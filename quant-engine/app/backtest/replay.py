@@ -48,8 +48,13 @@ class ReplayStrategy:
         self.buy_buffer = config.get("buy_buffer", 15)
         self.sell_buffer = config.get("sell_buffer", 30)
         self.max_position_pct = config.get("max_position_pct", 0.20)
+        # Iteration 4 风控参数（与 Go execStrategy 同口径，缺省 0 = 规则关闭）
+        self.stop_loss_pct = config.get("stop_loss_pct", 0.0)
+        self.drawdown_fuse_pct = config.get("drawdown_fuse_pct", 0.0)
+        self.industry_limit_pct = config.get("industry_limit_pct", 0.0)
         self.holdings: set = set()
         self.pool: list[str] = []
+        self.industry: dict[str, str] = {}  # {code: industry}，行业集中度用
         # 预计算数据：{code: {dates: np.ndarray(日期), factors: np.ndarray(n×6),
         #                     closes: {date: 原始收盘}}}
         self.series: dict[str, dict] = {}
@@ -69,6 +74,12 @@ class ReplayStrategy:
         self.pool = sorted(self.db.execute(
             select(StockBasic.code).where(
                 StockBasic.universe.in_(("hs300", "zz500")))).scalars().all())
+        # 行业映射（行业集中度风控用）：pool 内按 code 取 industry，缺失行业码不计
+        self.industry = {
+            code: ind for code, ind in self.db.execute(
+                select(StockBasic.code, StockBasic.industry).where(
+                    StockBasic.code.in_(self.pool)))
+            if ind}
         grid_rows = self.db.execute(
             select(TradeCalendar.cal_date).where(
                 TradeCalendar.cal_date >= start,

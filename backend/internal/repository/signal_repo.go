@@ -2,6 +2,8 @@ package repository
 
 import (
 	"database/sql"
+	"encoding/json"
+	"sort"
 	"time"
 
 	"gorm.io/gorm"
@@ -134,7 +136,7 @@ func (r *SignalRepository) enrichSignals(items []SignalItem, strategy string, da
 	if err != nil {
 		return err
 	}
-	subs, err := r.GetSignalSubscores(codes, date)
+	subs, err := r.GetSignalSubscores(codes, date, strategy)
 	if err != nil {
 		return err
 	}
@@ -177,65 +179,176 @@ func (r *SignalRepository) enrichSignals(items []SignalItem, strategy string, da
 // GetSignalRanks 横截面排名：某策略某日全部信号按原始分降序 RANK
 // 与 reason「排名 X/735」同口径 —— 引擎对 100×Σ(weight×normalized) 未舍入分
 // rank(method="min")，strategy_signal.score 仅存 2 位小数，直接对 score 排名会在
-// 舍入并列区产生 ±1 偏差，故由 factor_value + factor_definition 重算原始分
+// 舍入并列区产生 ±1 偏差，故由 factor_value + 策略因子级权重在 Go 侧重算原始分
+// （Iteration 4：权重口径从 factor_definition 切到策略自带 factor_weights）
 func (r *SignalRepository) GetSignalRanks(strategy string, date time.Time) (map[string]int, error) {
-	type row struct {
-		Code string
-		Rank int
-	}
-	var rows []row
-	err := r.db.Raw(`
-		SELECT s.code, RANK() OVER (ORDER BY r.raw_score DESC) AS rank
-		FROM strategy_signal s
-		JOIN (
-			SELECT fv.code, 100 * SUM(fd.weight * fv.normalized) AS raw_score
-			FROM factor_value fv
-			JOIN factor_definition fd ON fd.name = fv.factor_name
-			WHERE fv.trade_date = ?
-			GROUP BY fv.code
-		) r ON r.code = s.code
-		WHERE s.strategy_name = ? AND s.trade_date = ?`, date, strategy, date).Scan(&rows).Error
+	weights, err := r.strategyFactorWeights(strategy)
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[string]int, len(rows))
+	type row struct {
+		Code    string
+		Factor  string
+		Normal  float64
+	}
+	var rows []row
+	err = r.db.Table("factor_value").
+		Select("code AS code, factor_name AS factor, normalized AS normal").
+		Where("trade_date = ?", date).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	raw := make(map[string]float64)
 	for _, rr := range rows {
-		out[rr.Code] = rr.Rank
+		w, ok := weights[rr.Factor]
+		if !ok {
+			continue
+		}
+		raw[rr.Code] += w * rr.Normal
+	}
+	ranks := rankRawScores(raw)
+
+	// 仅保留该策略当日实际有信号的 code
+	var codes []string
+	if err := r.db.Table("strategy_signal").
+		Where("strategy_name = ? AND trade_date = ?", strategy, date).
+		Pluck("code", &codes).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]int, len(codes))
+	for _, c := range codes {
+		if v, ok := ranks[c]; ok {
+			out[c] = v
+		}
 	}
 	return out, nil
 }
 
 // GetSignalSubscores 四因子分项分：Σ(weight × normalized) × 100 per category
-// weight/category 均取自 factor_definition —— 与引擎 multi_factor.py 的
-// self.factor_weights / self.factor_categories（由 factor_definition 构造）同源
-func (r *SignalRepository) GetSignalSubscores(codes []string, date time.Time) (map[string]map[string]float64, error) {
+// weight 取策略因子级权重（缺失回退 factor_definition）；category 仍取 factor_definition
+// —— 与引擎 multi_factor.py 同源（Iteration 4 权重口径切换）
+func (r *SignalRepository) GetSignalSubscores(codes []string, date time.Time, strategy string) (map[string]map[string]float64, error) {
 	if len(codes) == 0 {
 		return map[string]map[string]float64{}, nil
 	}
+	weights, err := r.strategyFactorWeights(strategy)
+	if err != nil {
+		return nil, err
+	}
+	cats, err := r.factorCategories()
+	if err != nil {
+		return nil, err
+	}
 	type row struct {
-		Code     string
-		Category string
-		Score    float64
+		Code    string
+		Factor  string
+		Normal  float64
 	}
 	var rows []row
-	err := r.db.Table("factor_value").
-		Select("factor_value.code, factor_definition.category, "+
-			"SUM(factor_definition.weight * factor_value.normalized) * 100 AS score").
-		Joins("JOIN factor_definition ON factor_definition.name = factor_value.factor_name").
-		Where("factor_value.trade_date = ? AND factor_value.code IN (?)", date, codes).
-		Group("factor_value.code, factor_definition.category").
+	err = r.db.Table("factor_value").
+		Select("code AS code, factor_name AS factor, normalized AS normal").
+		Where("trade_date = ? AND code IN (?)", date, codes).
 		Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[string]map[string]float64, len(rows))
 	for _, rr := range rows {
+		w, ok := weights[rr.Factor]
+		if !ok {
+			continue
+		}
+		cat, ok := cats[rr.Factor]
+		if !ok {
+			continue
+		}
 		if out[rr.Code] == nil {
 			out[rr.Code] = make(map[string]float64)
 		}
-		out[rr.Code][rr.Category] = rr.Score
+		out[rr.Code][cat] += w * rr.Normal * 100
 	}
 	return out, nil
+}
+
+// strategyFactorWeights 读取策略自带因子级权重（strategy.factor_weights），
+// 缺失因子回退 factor_definition.weight（Iteration 4 权重口径）。
+// 策略不存在时整体回退 factor_definition（老库未配置策略的场景）。
+func (r *SignalRepository) strategyFactorWeights(strategy string) (map[string]float64, error) {
+	// 1. factor_definition 全量作为回退基
+	var defs []model.FactorDefinition
+	if err := r.db.Find(&defs).Error; err != nil {
+		return nil, err
+	}
+	weights := make(map[string]float64, len(defs))
+	for _, d := range defs {
+		weights[d.Name] = d.Weight
+	}
+	// 2. 策略自带因子级权重覆盖
+	var st model.Strategy
+	err := r.db.Where("name = ?", strategy).First(&st).Error
+	if err == gorm.ErrRecordNotFound {
+		return weights, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(st.FactorWeights) > 0 {
+		var m map[string]float64
+		if err := json.Unmarshal(st.FactorWeights, &m); err != nil {
+			return nil, err
+		}
+		for k, v := range m {
+			weights[k] = v
+		}
+	}
+	return weights, nil
+}
+
+// factorCategories 因子类别映射（category 是因子级属性，不随策略变）
+func (r *SignalRepository) factorCategories() (map[string]string, error) {
+	var defs []model.FactorDefinition
+	if err := r.db.Find(&defs).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(defs))
+	for _, d := range defs {
+		out[d.Name] = d.Category
+	}
+	return out, nil
+}
+
+// rankRawScores 原始分 → 排名（RANK，method="min"：并列同分同排名，后续跳位）
+// 与引擎 rank(method="min") 同口径。
+func rankRawScores(raw map[string]float64) map[string]int {
+	if len(raw) == 0 {
+		return map[string]int{}
+	}
+	scores := make([]float64, 0, len(raw))
+	for _, v := range raw {
+		scores = append(scores, v)
+	}
+	sort.Sort(sort.Reverse(sort.Float64Slice(scores))) // 降序
+	// 去重降序分数 → 排名（并列同分同排名）
+	ranks := make(map[string]int, len(raw))
+	unique := make([]float64, 0, len(scores))
+	for _, s := range scores {
+		if len(unique) == 0 || s != unique[len(unique)-1] {
+			unique = append(unique, s)
+		}
+	}
+	// 分数种类少（<= 股票数），线性查表
+	for code, v := range raw {
+		rk := 1
+		for i, u := range unique {
+			if v == u {
+				rk = i + 1
+				break
+			}
+		}
+		ranks[code] = rk
+	}
+	return ranks
 }
 
 // GetSignalPe 个股最新 PE(TTM)：取 trade_date <= 信号日 的最新一条
@@ -400,33 +513,19 @@ func (r *SignalRepository) GetStockFactorScore(code string) (*StockFactorScore, 
 	if err != nil {
 		return nil, err
 	}
-	// 排名：该策略该日全部信号按原始分降序 RANK（先全截面计算，再过滤本代码，见 GetSignalRanks）
-	var rankVal sql.NullInt64
-	if err := r.db.Raw(`
-		SELECT rk FROM (
-			SELECT s.code, RANK() OVER (ORDER BY r.raw_score DESC) AS rk
-			FROM strategy_signal s
-			JOIN (
-				SELECT fv.code, 100 * SUM(fd.weight * fv.normalized) AS raw_score
-				FROM factor_value fv
-				JOIN factor_definition fd ON fd.name = fv.factor_name
-				WHERE fv.trade_date = ?
-				GROUP BY fv.code
-			) r ON r.code = s.code
-			WHERE s.strategy_name = ? AND s.trade_date = ?
-		) x WHERE x.code = ?`, sig.TradeDate, sig.StrategyName, sig.TradeDate, code).
-		Scan(&rankVal).Error; err != nil {
+	// 排名：该策略该日全部信号按原始分降序 RANK（复用 GetSignalRanks：Go 侧按策略权重计算）
+	ranks, err := r.GetSignalRanks(sig.StrategyName, sig.TradeDate)
+	if err != nil {
 		return nil, err
 	}
 	// 四因子分项（取最新信号当日，与 G1 同源）
-	subs, err := r.GetSignalSubscores([]string{code}, sig.TradeDate)
+	subs, err := r.GetSignalSubscores([]string{code}, sig.TradeDate, sig.StrategyName)
 	if err != nil {
 		return nil, err
 	}
 	fs := &StockFactorScore{Score: sig.Score, Signal: sig.Action}
-	if rankVal.Valid {
-		rv := int(rankVal.Int64)
-		fs.Rank = &rv
+	if v, ok := ranks[code]; ok {
+		fs.Rank = &v
 	}
 	if m, ok := subs[code]; ok {
 		if v, ok := m["trend"]; ok {

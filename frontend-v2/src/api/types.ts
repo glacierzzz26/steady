@@ -245,17 +245,63 @@ export interface SignalQuery {
   page_size?: number
 }
 
-// ============ 策略定义（契约 §4.7）============
+// ============ 策略定义（契约 §4.1/§4.2；Iteration 4 多策略生命周期）============
 export interface StrategyInfo {
   name: string
-  description: string
+  zh_name?: string
+  description?: string
+  version?: string
+  status?: string // draft/backtest/sample/active/paused/archived
   factor_weights: Record<string, number>
   params: Record<string, unknown>
-  status: string
+  latest_backtest_id?: number // 最近一次回测 job id（策略卡「回测依据」）
 }
 
 export interface StrategiesData {
   items: StrategyInfo[]
+}
+
+// 因子定义（构建器因子池：GET /factors 真实 factor_definition）
+export interface FactorDefinition {
+  name: string
+  category?: string
+  description?: string
+  formula?: string
+  weight: number
+}
+
+export interface FactorsData {
+  items: FactorDefinition[]
+}
+
+// A/B 对比（§3.3 GET /strategies/compare）
+export interface CompareNavItem {
+  date: string
+  nav: number
+}
+
+export interface CompareSide {
+  strategy_name: string
+  total_return: number
+  annualized_return: number
+  max_drawdown: number
+  sharpe: number
+  turnover: number
+  cost: number
+  trades: number
+  nav: CompareNavItem[]
+}
+
+export interface CompareBenchmark {
+  code: string
+  nav: CompareNavItem[]
+}
+
+export interface CompareResult {
+  status?: 'pending' | 'done' | 'failed' // pending → 前端轮询
+  base?: CompareSide
+  candidate?: CompareSide
+  benchmark?: CompareBenchmark
 }
 
 // ============ 个股信号历史（契约 §4.6）============
@@ -316,7 +362,9 @@ export interface BacktestJobItem {
   // G8 扩展：T+1 成交假设（t_close/t1_open）+ 年化偏差（2026-08-23 已点亮）
   fill_mode?: string
   t1_deviation?: number
-  turnover?: number // 待 Iteration 4（换手率与交易成本分析）
+  // Iteration 4 §3.5：年化单边换手（倍数/年）+ 年化交易成本占比（%）
+  turnover?: number
+  cost?: number
 }
 
 export interface BacktestsData {
@@ -328,6 +376,7 @@ export interface BacktestSubmit {
   end_date: string
   top_n: number
   fill_mode?: string // G8：t_close/t1_open，前端默认切 t1_open
+  strategy_name?: string // Iteration 4：指定策略回测（空=后端解析 active）
 }
 
 // ============ 通知配置（契约 §4.12）============

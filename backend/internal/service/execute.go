@@ -42,14 +42,16 @@ func NewExecuteService(db *gorm.DB, trading *TradingService, nav *NavService,
 
 // ExecuteResult 手动执行结果
 type ExecuteResult struct {
-	TradeDate  time.Time
-	Skipped    bool // ExecuteDay 幂等跳过（当日净值已存在 = 已完整执行）
-	BuyCount   int
-	SellCount  int
-	Manual     int
-	Rejected   int
-	Nav        float64
-	NavSkipped bool // 净值快照幂等跳过
+	TradeDate   time.Time
+	Skipped     bool // ExecuteDay 幂等跳过（当日净值已存在 = 已完整执行）
+	BuyCount    int
+	SellCount   int
+	Manual      int
+	Rejected    int
+	RiskActions int  // 风控动作数（止损强制卖出）
+	Fused       bool // 当日回撤熔断（跳过策略 BUY）
+	Nav         float64
+	NavSkipped  bool // 净值快照幂等跳过
 }
 
 // ExecuteDayManual 执行最近交易日的自动交易 + 净值快照，并记录账本 + 推送结果卡片。
@@ -81,6 +83,7 @@ func (s *ExecuteService) ExecuteDayManual() (*ExecuteResult, error) {
 		TradeDate: *latest, Skipped: tradeRes.Skipped,
 		BuyCount: tradeRes.BuyCount, SellCount: tradeRes.SellCount,
 		Manual: tradeRes.Manual, Rejected: tradeRes.Rejected,
+		RiskActions: tradeRes.RiskActions, Fused: tradeRes.Fused,
 		Nav: navRes.Nav, NavSkipped: navRes.Skipped,
 	}
 	s.recordLedger(acc.ID, *latest, tradeRes)
@@ -95,13 +98,23 @@ func (s *ExecuteService) recordLedger(accountID uint64, tradeDate time.Time,
 		_ = s.taskRun.Record("auto_trade", tradeDate, "success", "当日已执行，幂等跳过",
 			map[string]interface{}{"trade_date": tradeDate.Format("2006-01-02"), "skipped": true})
 	} else {
-		_ = s.taskRun.Record("auto_trade", tradeDate, "success",
-			fmt.Sprintf("买入 %d / 卖出 %d / 手动 %d / 拒绝 %d",
-				tradeRes.BuyCount, tradeRes.SellCount, tradeRes.Manual, tradeRes.Rejected),
+		// Iteration 4 风控：熔断日在台账标注（BUY 全跳），止损动作数单列
+		status := "success"
+		message := fmt.Sprintf("买入 %d / 卖出 %d / 手动 %d / 拒绝 %d",
+			tradeRes.BuyCount, tradeRes.SellCount, tradeRes.Manual, tradeRes.Rejected)
+		if tradeRes.RiskActions > 0 {
+			message += fmt.Sprintf(" / 止损 %d", tradeRes.RiskActions)
+		}
+		if tradeRes.Fused {
+			status = "fused"
+			message += " / 回撤熔断（当日跳过策略买入）"
+		}
+		_ = s.taskRun.Record("auto_trade", tradeDate, status, message,
 			map[string]interface{}{
 				"trade_date": tradeDate.Format("2006-01-02"), "skipped": false,
 				"buy_count": tradeRes.BuyCount, "sell_count": tradeRes.SellCount,
 				"manual": tradeRes.Manual, "rejected": tradeRes.Rejected,
+				"risk_actions": tradeRes.RiskActions, "fused": tradeRes.Fused,
 			})
 	}
 	var navRow model.AccountNav
@@ -128,5 +141,11 @@ func (s *ExecuteService) pushExecuteCard(res *ExecuteResult) {
 	content := fmt.Sprintf(
 		"**执行日期** %s\n买入 **%d** 笔 · 卖出 **%d** 笔\n手动 **%d** 笔 · 拒绝 **%d** 笔",
 		date, res.BuyCount, res.SellCount, res.Manual, res.Rejected)
+	if res.RiskActions > 0 {
+		content += fmt.Sprintf("\n止损强制卖出 **%d** 笔", res.RiskActions)
+	}
+	if res.Fused {
+		content += "\n⚠️ 回撤熔断：当日跳过策略买入"
+	}
 	_ = s.notify.SendCard("💹 Steady · 手动执行结果", content, "blue", "手动触发 ExecuteDay")
 }

@@ -46,18 +46,16 @@ class MultiFactorStrategy(Strategy):
     description = "趋势40% + 价值30% + 质量20% + 风险10%"
 
     def __init__(self, config: dict):
+        self.name = config.get("name") or self.name  # 策略名可来自 strategy 行（fork 策略名不同）
         super().__init__(config)
-        self.weights = {
-            "trend": config.get("trend_weight", 0.40),
-            "value": config.get("value_weight", 0.30),
-            "quality": config.get("quality_weight", 0.20),
-            "risk": config.get("risk_weight", 0.10),
-        }
         self.universe = config.get("universe", "hs300+zz500")  # 股票池
         self.top_n = config.get("top_n", 20)                   # 目标持仓数
         self.buy_buffer = config.get("buy_buffer", 15)         # 未持仓且排名<=15 → BUY
         self.sell_buffer = config.get("sell_buffer", 30)       # 已持仓且排名>30 → SELL
         self.max_position_pct = config.get("max_position_pct", 0.20)  # 单股仓位上限
+        # Iteration 4 权重口径：策略自带因子级权重（factor_weights），calculate() 内
+        # 覆盖 factor_definition（缺失因子回退 factor_definition.weight）
+        self.strategy_factor_weights = dict(config.get("factor_weights") or {})
         self.db = config.get("db")
         self.trade_date: date | None = None
         self.holdings: set = set()
@@ -89,14 +87,20 @@ class MultiFactorStrategy(Strategy):
         self.holdings = self._reconstruct_holdings(self.trade_date)
 
     def calculate(self) -> pd.DataFrame:
-        """综合评分（复用 factor_service.score_cross_section，回测同口径）"""
+        """综合评分（复用 factor_service.score_cross_section，回测同口径）
+
+        Iteration 4 权重口径：策略自带因子级权重（strategy.factor_weights）覆盖，
+        缺失因子回退 factor_definition.weight。
+        """
         defs = list(self.db.execute(
             select(FactorDefinition).where(
                 FactorDefinition.name.in_(ALL_FACTORS))).scalars())
-        self.factor_weights = {d.name: float(d.weight) for d in defs}
+        base = {d.name: float(d.weight) for d in defs}
+        base.update(self.strategy_factor_weights)
+        self.factor_weights = base
         self.factor_categories = {d.name: d.category for d in defs}
         if len(self.factor_weights) != len(ALL_FACTORS):
-            logger.warning("factor_definition 权重不完整：%s", self.factor_weights)
+            logger.warning("权重不完整（策略 %s）：%s", self.name, self.factor_weights)
         self.data = score_cross_section(self.factor_df, self.factor_weights)
         return self.data
 

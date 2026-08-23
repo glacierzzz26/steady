@@ -28,7 +28,9 @@ func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
 	positionRepo := repository.NewPositionRepository(db)
 	tradeRepo := repository.NewTradeRepository(db)
 	backtestRepo := repository.NewBacktestRepository(db)
-	backtestSvc := service.NewBacktestService(backtestRepo)
+	strategyRepo := repository.NewStrategyRepository(db)
+	backtestSvc := service.NewBacktestService(backtestRepo, strategyRepo)
+	strategySvc := service.NewStrategyService(strategyRepo, backtestSvc)
 	tushareSvc := service.NewTushareConfigService(db)
 
 	// 基础路径 /api/v1
@@ -45,8 +47,14 @@ func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
 		v1.GET("/stocks/:code/financial", handler.GetFinancialList(financialRepo, stockRepo))
 		v1.GET("/kline/:code", handler.GetKline(dailyRepo, stockRepo))
 
-		// 策略与信号（Sprint 4）
-		v1.GET("/strategies", handler.GetStrategies(signalRepo))
+		// 策略与信号（Sprint 4；Iteration 4：策略生命周期 CRUD/switch/fork + 因子列表）
+		v1.GET("/strategies", handler.GetStrategies(strategySvc))
+		v1.POST("/strategies", handler.CreateStrategy(strategySvc))
+		v1.PUT("/strategies/:name", handler.UpdateStrategy(strategySvc))
+		v1.POST("/strategies/:name/versions", handler.ForkStrategy(strategySvc))
+		v1.POST("/strategies/:name/switch", handler.SwitchStrategy(strategySvc))
+		v1.GET("/strategies/compare", handler.CompareStrategies(strategySvc)) // §3.3 A/B
+		v1.GET("/factors", handler.GetFactors(strategyRepo))
 		v1.GET("/signals", handler.GetSignals(signalRepo))
 		v1.GET("/signals/:code", handler.GetSignalsByCode(signalRepo, stockRepo))
 

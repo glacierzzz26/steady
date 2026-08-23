@@ -77,25 +77,30 @@ def job_calc_factors():
 
 
 def generate_signals(db, td: date) -> int:
-    """运行 multi_factor 策略并把信号写入 strategy_signal（幂等 upsert）；
-    返回写入行数（CLI 与定时任务共用）"""
+    """运行 active 策略并把信号写入 strategy_signal（幂等 upsert）；
+    返回写入行数（CLI 与定时任务共用）
+
+    Iteration 4：策略按 status='active' 选取（单 active 不变量），
+    config 用该行 params，评分权重用该行 factor_weights，strategy_signal
+    按该策略名写入。
+    """
     from app.models.tables import Strategy as StrategyModel
     from app.strategies.multi_factor import MultiFactorStrategy
 
     row = db.execute(
-        select(StrategyModel).where(
-            StrategyModel.name == "multi_factor",
-            StrategyModel.status == "active")
+        select(StrategyModel).where(StrategyModel.status == "active")
     ).scalar()
     if row is None:
-        raise RuntimeError("策略 multi_factor 未配置（strategy 表）")
+        raise RuntimeError("无 active 策略（strategy 表，请先激活一个策略）")
     config = dict(row.params or {})
+    config["factor_weights"] = dict(row.factor_weights or {})
+    config["name"] = row.name
     config["db"] = db
     signals = MultiFactorStrategy(config).run(str(td))
     if not signals:
         return 0
     rows = [
-        {"strategy_name": "multi_factor", "code": s.code,
+        {"strategy_name": row.name, "code": s.code,
          "trade_date": td, "score": s.score,
          "action": s.action, "reason": s.reason}
         for s in signals

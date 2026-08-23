@@ -128,17 +128,24 @@ class FactorValue(Base):
 
 
 class Strategy(Base):
-    """策略定义（factor_weights/params 为 JSONB）"""
+    """策略定义（factor_weights/params 为 JSONB）
+
+    Iteration 4：factor_weights 为因子级权重映射（评分源）；status 状态机
+    draft/backtest/sample/active/paused/archived，同一时间仅一个 active。
+    """
 
     __tablename__ = "strategy"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     name = Column(String(50), unique=True, nullable=False)
+    zh_name = Column(String(50))
     description = Column(String)
-    factor_weights = Column(JSON)  # JSONB
+    version = Column(String(20), default="v1.0")
+    factor_weights = Column(JSON)  # JSONB 因子级权重
     params = Column(JSON)  # JSONB
-    status = Column(String(10), default="active")
+    status = Column(String(10), default="draft")
     created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now())
 
 
 class StrategySignal(Base):
@@ -189,6 +196,8 @@ class BacktestResult(Base):
     final_value = Column(Numeric(14, 2))
     trades = Column(Integer)
     positions = Column(Integer)
+    turnover = Column(Numeric(8, 2))  # 年化单边换手（Iteration 4）
+    cost = Column(Numeric(8, 4))  # 年化交易成本占比（Iteration 4）
     benchmark_return = Column(Numeric(10, 4))
     excess_return = Column(Numeric(10, 4))
     nav = Column(JSON)  # JSONB [{"date","nav","benchmark"}]

@@ -120,11 +120,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_factor_value
 CREATE TABLE IF NOT EXISTS strategy (
     id            BIGSERIAL     PRIMARY KEY,
     name          VARCHAR(50)   UNIQUE NOT NULL,
+    zh_name       VARCHAR(50),              -- 中文名（前端展示，Iteration 4）
     description   TEXT,
-    factor_weights JSONB,                   -- 因子权重配置
-    params        JSONB,                    -- 策略参数（股票池/轮动阈值等）
-    status        VARCHAR(10)   DEFAULT 'active',
-    created_at    TIMESTAMP     DEFAULT NOW()
+    version       VARCHAR(20)   DEFAULT 'v1.0',  -- 版本号（展示/排序，Iteration 4）
+    factor_weights JSONB,                   -- 因子级权重映射（合计 1.0，Iteration 4 起为评分源）
+    params        JSONB,                    -- 策略参数（股票池/轮动阈值/风控等）
+    status        VARCHAR(10)   DEFAULT 'draft',  -- draft/backtest/sample/active/paused/archived
+    created_at    TIMESTAMP     DEFAULT NOW(),
+    updated_at    TIMESTAMP     DEFAULT NOW()
 );
 
 -- ------------------------------------------------------------
@@ -271,12 +274,17 @@ INSERT INTO factor_definition (name, category, description, formula, weight) VAL
     ('debt_risk',   'risk',    '负债风险因子',       '资产负债率越低分越高',          0.1000)
 ON CONFLICT (name) DO NOTHING;
 
--- 策略定义（多因子：趋势40% + 价值30% + 质量20% + 风险10%）
-INSERT INTO strategy (name, description, factor_weights, params) VALUES (
+-- 策略定义（多因子：趋势40% + 价值30% + 质量20% + 风险10%，每日排名轮动）
+-- Iteration 4：factor_weights 存因子级权重映射（合计 1.0，评分源）；
+-- status 为唯一运行中策略；风控参数 stop_loss/drawdown_fuse/industry_limit 缺省由代码兜底。
+INSERT INTO strategy (name, zh_name, description, version, factor_weights, params, status) VALUES (
     'multi_factor',
+    '多因子轮动',
     '多因子评分策略：趋势40% + 价值30% + 质量20% + 风险10%，每日排名轮动',
-    '{"trend": 0.40, "value": 0.30, "quality": 0.20, "risk": 0.10}',
-    '{"universe": "hs300+zz500", "top_n": 20, "buy_buffer": 15, "sell_buffer": 30, "max_position_pct": 0.20}'
+    'v1.0',
+    '{"ma_trend": 0.20, "macd_signal": 0.20, "pe_ratio": 0.15, "pb_ratio": 0.15, "roe_quality": 0.20, "debt_risk": 0.10}',
+    '{"universe": "hs300+zz500", "top_n": 20, "buy_buffer": 15, "sell_buffer": 30, "max_position_pct": 0.20, "stop_loss_pct": 0.15, "drawdown_fuse_pct": 0.10, "industry_limit_pct": 0.30}',
+    'active'
 ) ON CONFLICT (name) DO NOTHING;
 
 -- 默认模拟账户（初始资金 10 万；无唯一约束，用 NOT EXISTS 保证可重复执行）
@@ -316,6 +324,8 @@ CREATE TABLE IF NOT EXISTS backtest_result (
     final_value       DECIMAL(14,2),
     trades            INT,
     positions         INT,
+    turnover          DECIMAL(8,2),  -- 年化单边换手（倍数/年，Iteration 4）
+    cost              DECIMAL(8,4),  -- 年化交易成本占比（1.2% = 0.012，Iteration 4）
     benchmark_return  DECIMAL(10,4),
     excess_return     DECIMAL(10,4),
     nav               JSONB,  -- [{"date":"...","nav":1.0,"benchmark":1.0|null},...]

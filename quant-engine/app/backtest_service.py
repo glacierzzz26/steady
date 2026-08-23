@@ -23,8 +23,13 @@ FACTOR_NAMES = ["ma_trend", "macd_signal", "pe_ratio", "pb_ratio",
                 "roe_quality", "debt_risk"]
 
 
-def build_replay_strategy(db, top_n: int | None = None):
-    """构建内存重放策略（权重来自 factor_definition，参数来自 strategy 表）"""
+def build_replay_strategy(db, top_n: int | None = None,
+                          strategy_name: str = "multi_factor"):
+    """构建内存重放策略
+
+    Iteration 4 权重口径：权重 = 指定策略的 factor_weights（缺失因子回退
+    factor_definition）；参数（top_n/buffer/风控）来自该策略行 params。
+    """
     from sqlalchemy import select
 
     from app.backtest.replay import ReplayStrategy
@@ -38,22 +43,27 @@ def build_replay_strategy(db, top_n: int | None = None):
 
     params = {}
     row = db.execute(select(StrategyModel).where(
-        StrategyModel.name == "multi_factor")).scalar()
-    if row is not None and row.params:
-        params = dict(row.params)
+        StrategyModel.name == strategy_name)).scalar()
+    if row is not None:
+        if row.params:
+            params = dict(row.params)
+        if row.factor_weights:
+            weights.update(dict(row.factor_weights))
     if top_n:
         params["top_n"] = top_n
     return ReplayStrategy(db, params, weights, categories)
 
 
 def create_job(db, start: date, end: date, top_n: int = 20,
-               fill_mode: str = "t_close") -> BacktestJob:
+               fill_mode: str = "t_close",
+               strategy_name: str = "multi_factor") -> BacktestJob:
     """创建回测任务（幂等：同参数同假设已存在直接返回；failed 重置为 pending 重跑）
 
     fill_mode 纳入唯一键：t_close 与 t1_open 同区间不同假设可并存。
+    Iteration 4：strategy_name 参数化，支持多策略回测（A/B 对比）。
     """
     stmt = pg_insert(BacktestJob).values(
-        strategy_name="multi_factor", start_date=start, end_date=end,
+        strategy_name=strategy_name, start_date=start, end_date=end,
         top_n=top_n, fill_mode=fill_mode,
     ).on_conflict_do_update(
         index_elements=["strategy_name", "start_date", "end_date", "top_n",
@@ -64,7 +74,7 @@ def create_job(db, start: date, end: date, top_n: int = 20,
     db.execute(stmt)
     db.commit()
     return db.execute(select(BacktestJob).where(
-        BacktestJob.strategy_name == "multi_factor",
+        BacktestJob.strategy_name == strategy_name,
         BacktestJob.start_date == start,
         BacktestJob.end_date == end,
         BacktestJob.top_n == top_n,
@@ -124,13 +134,14 @@ def _push_backtest_card(db, job: BacktestJob, status: str, report: dict | None =
                            footer=f"任务 #{job.id}")
 
 
-def _clone_strategy(strategy, db, top_n: int):
+def _clone_strategy(strategy, db, top_n: int, strategy_name: str = "multi_factor"):
     """浅拷贝预加载数据给配对运行的第二个策略实例（只读数据共享，holdings 独立）"""
-    s = build_replay_strategy(db, top_n)
+    s = build_replay_strategy(db, top_n, strategy_name=strategy_name)
     s.series = strategy.series
     s.grid = strategy.grid
     s._date_pos = strategy._date_pos
     s.pool = strategy.pool
+    s.industry = strategy.industry  # 行业映射（preload 已加载，clone 沿用）
     return s
 
 
@@ -146,11 +157,12 @@ def run_and_save(db, job: BacktestJob):
     try:
         fill_mode = job.fill_mode or "t_close"
         alt_mode = "t1_open" if fill_mode == "t_close" else "t_close"
-        strategy = build_replay_strategy(db, job.top_n)
+        strategy = build_replay_strategy(db, job.top_n,
+                                         strategy_name=job.strategy_name)
         strategy.preload(str(job.start_date), str(job.end_date))
         primary_strat = strategy if fill_mode == "t_close" \
-            else _clone_strategy(strategy, db, job.top_n)
-        alt_strat = _clone_strategy(strategy, db, job.top_n) \
+            else _clone_strategy(strategy, db, job.top_n, job.strategy_name)
+        alt_strat = _clone_strategy(strategy, db, job.top_n, job.strategy_name) \
             if fill_mode == "t_close" else strategy
 
         primary = BacktestEngine(primary_strat, str(job.start_date),
@@ -177,6 +189,8 @@ def run_and_save(db, job: BacktestJob):
             "final_value": report.get("final_value"),
             "trades": report.get("trades"),
             "positions": report.get("positions"),
+            "turnover": report.get("turnover"),  # 年化单边换手（Iteration 4）
+            "cost": report.get("cost"),          # 年化交易成本占比（Iteration 4）
             "benchmark_return": report.get("benchmark", {}).get("total_return"),
             "excess_return": report.get("excess_return"),
             "nav": nav_series,  # JSONB 列直接传 list，SQLAlchemy JSON 类型自动序列化
@@ -184,6 +198,7 @@ def run_and_save(db, job: BacktestJob):
             "fill_mode", "t1_deviation",
             "total_return", "annualized_return", "max_drawdown", "sharpe",
             "trading_days", "final_value", "trades", "positions",
+            "turnover", "cost",
             "benchmark_return", "excess_return", "nav",
         ])
         db.execute(update(BacktestJob).where(BacktestJob.id == job.id).values(
