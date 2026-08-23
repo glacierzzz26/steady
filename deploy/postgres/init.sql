@@ -293,17 +293,21 @@ CREATE TABLE IF NOT EXISTS backtest_job (
     start_date    DATE          NOT NULL,
     end_date      DATE          NOT NULL,
     top_n         INT           NOT NULL DEFAULT 20,
+    fill_mode     VARCHAR(16)   NOT NULL DEFAULT 't_close',  -- t_close/t1_open（成交假设）
     status        VARCHAR(16)   NOT NULL DEFAULT 'pending',  -- pending/running/done/failed
     error         TEXT,
     created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
     finished_at   TIMESTAMPTZ
 );
 
+-- 唯一键纳入 fill_mode：t_close 与 t1_open 同区间不同假设可并存
 CREATE UNIQUE INDEX IF NOT EXISTS uq_backtest_job
-    ON backtest_job (strategy_name, start_date, end_date, top_n);
+    ON backtest_job (strategy_name, start_date, end_date, top_n, fill_mode);
 
 CREATE TABLE IF NOT EXISTS backtest_result (
     job_id            BIGINT        PRIMARY KEY REFERENCES backtest_job (id) ON DELETE CASCADE,
+    fill_mode         VARCHAR(16)   NOT NULL DEFAULT 't_close',
+    t1_deviation      DECIMAL(10,4),  -- 年化收益 T+1 偏差（t1_open − t_close）
     total_return      DECIMAL(10,4),
     annualized_return DECIMAL(10,4),
     max_drawdown      DECIMAL(10,4),

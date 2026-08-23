@@ -15,6 +15,7 @@ var (
 	ErrBacktestRange     = errors.New("回测起始日不能晚于结束日")
 	ErrBacktestSpan      = errors.New("回测区间不能超过5年")
 	ErrBacktestTopN      = errors.New("目标持仓数应在1-50之间")
+	ErrBacktestFillMode  = errors.New("fill_mode 仅支持 t_close / t1_open")
 	ErrBacktestNotFound  = errors.New("回测任务不存在")
 )
 
@@ -30,8 +31,8 @@ func NewBacktestService(repo *repository.BacktestRepository) *BacktestService {
 	return &BacktestService{repo: repo}
 }
 
-// CreateJob 校验并创建任务（幂等：同参数返回已有任务）
-func (s *BacktestService) CreateJob(start, end time.Time, topN int) (*model.BacktestJob, error) {
+// CreateJob 校验并创建任务（幂等：同参数同假设返回已有任务）
+func (s *BacktestService) CreateJob(start, end time.Time, topN int, fillMode string) (*model.BacktestJob, error) {
 	if !start.Before(end) {
 		return nil, ErrBacktestRange
 	}
@@ -41,11 +42,18 @@ func (s *BacktestService) CreateJob(start, end time.Time, topN int) (*model.Back
 	if topN < 1 || topN > 50 {
 		return nil, ErrBacktestTopN
 	}
+	if fillMode == "" {
+		fillMode = "t_close"
+	}
+	if fillMode != "t_close" && fillMode != "t1_open" {
+		return nil, ErrBacktestFillMode
+	}
 	j := &model.BacktestJob{
 		StrategyName: "multi_factor",
 		StartDate:    start,
 		EndDate:      end,
 		TopN:         topN,
+		FillMode:     fillMode,
 	}
 	return s.repo.CreateJob(j)
 }

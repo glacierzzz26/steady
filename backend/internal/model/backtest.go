@@ -11,6 +11,7 @@ type BacktestJob struct {
 	StartDate    time.Time  `gorm:"not null" json:"start_date"`
 	EndDate      time.Time  `gorm:"not null" json:"end_date"`
 	TopN         int        `gorm:"not null;default:20" json:"top_n"`
+	FillMode     string     `gorm:"size:16;not null;default:t_close" json:"fill_mode"` // t_close/t1_open
 	Status       string     `gorm:"size:16;not null;default:pending" json:"status"`
 	Error        string     `gorm:"type:text" json:"error"`
 	CreatedAt    time.Time  `json:"created_at"`
@@ -26,6 +27,8 @@ func (BacktestJob) TableName() string { return "backtest_job" }
 // BacktestResult 回测结果（nav 为 JSONB 序列：[{"date","nav","benchmark"}]）
 type BacktestResult struct {
 	JobID            uint64    `gorm:"primaryKey" json:"job_id"`
+	FillMode         string    `gorm:"size:16;not null;default:t_close" json:"fill_mode"`
+	T1Deviation      float64   `json:"t1_deviation"` // 年化收益 T+1 偏差（t1_open − t_close）
 	TotalReturn      float64   `json:"total_return"`
 	AnnualizedReturn float64   `json:"annualized_return"`
 	MaxDrawdown      float64   `json:"max_drawdown"`

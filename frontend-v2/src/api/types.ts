@@ -313,10 +313,10 @@ export interface BacktestJobItem {
   benchmark_return: number
   excess_return: number
   nav: BacktestNavItem[] // 详情接口才有
-  // G8 扩展：T+1 成交假设（2.2 排期，后端补齐前可空）
+  // G8 扩展：T+1 成交假设（t_close/t1_open）+ 年化偏差（2026-08-23 已点亮）
   fill_mode?: string
   t1_deviation?: number
-  turnover?: number
+  turnover?: number // 待 Iteration 4（换手率与交易成本分析）
 }
 
 export interface BacktestsData {
@@ -327,7 +327,7 @@ export interface BacktestSubmit {
   start_date: string
   end_date: string
   top_n: number
-  fill_mode?: string // G8：后端支持前不传
+  fill_mode?: string // G8：t_close/t1_open，前端默认切 t1_open
 }
 
 // ============ 通知配置（契约 §4.12）============

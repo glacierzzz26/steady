@@ -166,6 +166,7 @@ class BacktestJob(Base):
     start_date = Column(Date, nullable=False)
     end_date = Column(Date, nullable=False)
     top_n = Column(Integer, nullable=False, default=20)
+    fill_mode = Column(String(16), nullable=False, default="t_close")  # t_close/t1_open
     status = Column(String(16), nullable=False, default="pending")
     error = Column(String)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -178,6 +179,8 @@ class BacktestResult(Base):
     __tablename__ = "backtest_result"
 
     job_id = Column(BigInteger, primary_key=True)
+    fill_mode = Column(String(16), nullable=False, default="t_close")
+    t1_deviation = Column(Numeric(10, 4))  # 年化(t1_open) − 年化(t_close)
     total_return = Column(Numeric(10, 4))
     annualized_return = Column(Numeric(10, 4))
     max_drawdown = Column(Numeric(10, 4))
