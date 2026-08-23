@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"database/sql"
 	"time"
 
 	"gorm.io/gorm"
@@ -62,4 +63,21 @@ func (r *AccountNavRepository) GetLastBefore(accountID uint64, tradeDate time.Ti
 		return nil, err
 	}
 	return &n, nil
+}
+
+// GetPeakTotalAsset 历史峰值总资产（trade_date <= 截止日，含当日）；无数据返回 0
+// 回撤熔断口径：历史峰值取 account_nav 中 trade_date <= 当日 的 MAX total_asset
+func (r *AccountNavRepository) GetPeakTotalAsset(accountID uint64, upto time.Time) (float64, error) {
+	var peak sql.NullFloat64
+	err := r.db.Table("account_nav").
+		Select("MAX(total_asset)").
+		Where("account_id = ? AND trade_date <= ?", accountID, upto).
+		Scan(&peak).Error
+	if err != nil {
+		return 0, err
+	}
+	if !peak.Valid {
+		return 0, nil
+	}
+	return peak.Float64, nil
 }

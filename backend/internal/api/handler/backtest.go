@@ -47,6 +47,8 @@ type backtestJobDTO struct {
 	FinalValue       float64      `json:"final_value,omitempty"`
 	Trades           int          `json:"trades,omitempty"`
 	Positions        int          `json:"positions,omitempty"`
+	Turnover         float64      `json:"turnover,omitempty"` // 年化单边换手（倍数/年）
+	Cost             float64      `json:"cost,omitempty"`     // 年化交易成本占比（1.2%=0.012）
 	BenchmarkReturn  float64      `json:"benchmark_return,omitempty"`
 	ExcessReturn     float64      `json:"excess_return,omitempty"`
 	Nav              []navPointDTO `json:"nav,omitempty"`
@@ -81,6 +83,8 @@ func toBacktestJobDTO(j *model.BacktestJob) backtestJobDTO {
 		d.FinalValue = j.Result.FinalValue
 		d.Trades = j.Result.Trades
 		d.Positions = j.Result.Positions
+		d.Turnover = j.Result.Turnover
+		d.Cost = j.Result.Cost
 		d.BenchmarkReturn = j.Result.BenchmarkReturn
 		d.ExcessReturn = j.Result.ExcessReturn
 		// nav JSONB 原始文本解析为序列（仅详情需要，列表处 Nav 为 nil）
@@ -117,15 +121,16 @@ func GetBacktests(btSvc *service.BacktestService) gin.HandlerFunc {
 }
 
 // CreateBacktest 提交回测任务（POST /backtests）
-// 请求体 {start_date, end_date, top_n, fill_mode}，成功响应 {job_id, status:"pending"}
-// fill_mode 可选，默认 t_close；前端默认切 t1_open（保守假设，无未来函数）
+// 请求体 {start_date, end_date, top_n, fill_mode, strategy_name}，成功响应 {job_id, status:"pending"}
+// strategy_name 可选（默认 active 策略）；fill_mode 可选，默认 t_close；前端默认切 t1_open（保守假设，无未来函数）
 func CreateBacktest(btSvc *service.BacktestService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req struct {
-			StartDate string `json:"start_date"`
-			EndDate   string `json:"end_date"`
-			TopN      int    `json:"top_n"`
-			FillMode  string `json:"fill_mode"`
+			StartDate    string `json:"start_date"`
+			EndDate      string `json:"end_date"`
+			TopN         int    `json:"top_n"`
+			FillMode     string `json:"fill_mode"`
+			StrategyName string `json:"strategy_name"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			response.Fail(c, http.StatusBadRequest, response.CodeInvalidParam, "请求体格式错误")
@@ -144,7 +149,7 @@ func CreateBacktest(btSvc *service.BacktestService) gin.HandlerFunc {
 		if req.TopN == 0 {
 			req.TopN = 20
 		}
-		job, err := btSvc.CreateJob(start, end, req.TopN, req.FillMode)
+		job, err := btSvc.CreateJob(start, end, req.TopN, req.FillMode, req.StrategyName)
 		if err != nil {
 			status, code, msg := backtestError(err)
 			response.Fail(c, status, code, msg)
@@ -278,6 +283,12 @@ func backtestError(err error) (int, int, string) {
 		return http.StatusBadRequest, response.CodeInvalidParam, err.Error()
 	case errors.Is(err, service.ErrBacktestNotFound):
 		return http.StatusNotFound, response.CodeResourceMissing, err.Error()
+	case errors.Is(err, service.ErrBacktestNoActive):
+		return http.StatusBadRequest, response.CodeInvalidParam, err.Error()
+	case errors.Is(err, service.ErrStrategyNotFound):
+		return http.StatusNotFound, response.CodeResourceMissing, err.Error()
+	case errors.Is(err, service.ErrStrategyArchived):
+		return http.StatusBadRequest, response.CodeInvalidParam, err.Error()
 	default:
 		return http.StatusInternalServerError, response.CodeInternalError, "操作失败"
 	}

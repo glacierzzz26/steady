@@ -37,6 +37,8 @@ type BacktestResult struct {
 	FinalValue       float64   `json:"final_value"`
 	Trades           int       `json:"trades"`
 	Positions        int       `json:"positions"`
+	Turnover         float64   `json:"turnover"` // 年化单边换手（倍数/年）
+	Cost             float64   `json:"cost"`     // 年化交易成本占比（1.2% = 0.012）
 	BenchmarkReturn  float64   `json:"benchmark_return"`
 	ExcessReturn     float64   `json:"excess_return"`
 	Nav              string    `gorm:"type:jsonb" json:"nav"` // 原始 JSON 字符串，handler 转结构体

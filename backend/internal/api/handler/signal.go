@@ -11,28 +11,6 @@ import (
 	"quant-system/backend/pkg/response"
 )
 
-// GetStrategies 策略列表（活跃策略）
-func GetStrategies(signalRepo *repository.SignalRepository) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		items, err := signalRepo.GetStrategies()
-		if err != nil {
-			response.Fail(c, http.StatusInternalServerError, response.CodeInternalError, "查询失败")
-			return
-		}
-		out := make([]gin.H, 0, len(items))
-		for _, s := range items {
-			out = append(out, gin.H{
-				"name":           s.Name,
-				"description":    s.Description,
-				"factor_weights": s.FactorWeights,
-				"params":         s.Params,
-				"status":         s.Status,
-			})
-		}
-		response.OK(c, gin.H{"items": out})
-	}
-}
-
 // GetSignals 策略信号列表（分页）
 // ?strategy=multi_factor&date=2026-08-19&action=BUY&page=1&page_size=100
 // date 缺省 = 最近一期；无信号返回空 items（仍 200）

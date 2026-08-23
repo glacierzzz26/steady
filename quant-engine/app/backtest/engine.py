@@ -41,6 +41,13 @@ class BacktestEngine:
         self.daily_returns = []
         self.pending_signals: list = []  # t1_open：T 日信号待 T+1 执行
         self._benchmark_cache: Optional[dict] = None
+        # Iteration 4 风控（镜像 Go execStrategy；策略未定义时缺省 0 = 规则关闭）
+        self.stop_loss_pct = getattr(strategy, "stop_loss_pct", 0.0)
+        self.drawdown_fuse_pct = getattr(strategy, "drawdown_fuse_pct", 0.0)
+        self.industry_limit_pct = getattr(strategy, "industry_limit_pct", 0.0)
+        self._peak = 0.0       # 历史最高 total_value（熔断基准，峰值回撤引擎内维护）
+        self._fused = False    # 当日回撤熔断（BUY 全跳）
+        self.risk_actions = 0  # 止损强制卖出笔数（与 Go RiskActions 同口径）
 
     def _get_trading_dates(self) -> List[str]:
         """从 trade_calendar 取 [start, end] 区间的交易日"""
@@ -116,6 +123,83 @@ class BacktestEngine:
         for signal in pending:
             self._process_signal(signal, date)
 
+    def _mark_to_market(self, date: str):
+        """持仓按当日收盘 mark-to-market（停牌无当日价保留旧价）。
+
+        镜像 Go ExecuteDay 第 2 步：止损 profit_rate / 熔断 total_value /
+        行业集中市值占比均基于当日收盘口径。
+        """
+        prices = {}
+        for code in self.portfolio.positions:
+            price = self._get_price(code, date)
+            if price is not None:
+                prices[code] = price
+        self.portfolio.mark_to_market(prices)
+
+    def _stop_loss_scan(self, date: str):
+        """止损扫描（策略信号前）：持仓亏损 >= stop_loss_pct → 当日可卖量强制卖出。
+
+        镜像 Go stopLossScan：profit_rate = (现价-成本)/成本 <= -stop_loss_pct 触发，
+        卖当日可卖量，停牌/跌停跳过，计入 risk_actions。
+        """
+        if self.stop_loss_pct <= 0:
+            return
+        for code in list(self.portfolio.positions.keys()):
+            pos = self.portfolio.positions[code]
+            if pos.available_qty <= 0:
+                continue
+            if pos.cost_price <= 0:
+                continue
+            profit_rate = (pos.current_price - pos.cost_price) / pos.cost_price
+            if profit_rate > -self.stop_loss_pct:
+                continue
+            price = self._get_price(code, date)  # 当日收盘
+            if price is None:  # 停牌：保留持仓，次日再扫
+                continue
+            prev_close = self._get_prev_close(code, date)
+            if not self.broker._check_price_limit(code, price, prev_close, "SELL"):
+                continue  # 跌停无法成交，保留持仓
+            ok = self.broker.execute_sell(
+                self.portfolio, code, price, pos.available_qty,
+                prev_close=prev_close)
+            if ok:
+                self.portfolio.trades.append(
+                    {"date": date, "code": code, "action": "SELL",
+                     "price": round(price, 2), "qty": pos.available_qty})
+                self.risk_actions += 1
+
+    def _drawdown_fused(self) -> bool:
+        """回撤熔断：回撤幅度 = (历史峰值 − 当前总资产)/历史峰值 >= fuse_pct。
+
+        镜像 Go drawdownFused（回撤按幅度计：当前资产低于峰值才触发）。峰值取
+        已记录净值的 MAX total_value（即本引擎 _peak，每日记净值后更新）；
+        峰值缺失（首日）不熔断。
+        """
+        if self.drawdown_fuse_pct <= 0 or self._peak <= 0:
+            return False
+        total = self.portfolio.total_value
+        return (self._peak - total) / self._peak >= self.drawdown_fuse_pct
+
+    def _industry_over_limit(self, code: str, exec_price: float, qty: int) -> bool:
+        """行业集中度（BUY 撮合前）：加仓后该行业市值占比 > limit_pct → 拒单。
+
+        镜像 Go industryOverLimit：同行业持仓市值（含目标股票已有仓）+ 本次买入
+        毛额，除以组合总资产；目标行业缺失/未知 → 不检查。
+        """
+        if self.industry_limit_pct <= 0 or qty <= 0:
+            return False
+        industry = getattr(self.strategy, "industry", {}).get(code)
+        if not industry:
+            return False
+        industry_mv = 0.0
+        for c, pos in self.portfolio.positions.items():
+            if c == code:
+                industry_mv += pos.market_value
+            elif getattr(self.strategy, "industry", {}).get(c) == industry:
+                industry_mv += pos.market_value
+        after = (industry_mv + exec_price * qty) / self.portfolio.total_value
+        return after > self.industry_limit_pct
+
     def run(self) -> dict:
         """执行回测并返回报告；策略实现 preload 时先预加载"""
         preload = getattr(self.strategy, "preload", None)
@@ -128,7 +212,12 @@ class BacktestEngine:
         logger.info("回测区间 %s ~ %s，共 %s 个交易日（fill_mode=%s）",
                     self.start_date, self.end_date, len(dates), self.fill_mode)
         for date in dates:
-            self._unfreeze_t1(date)  # T+1：解冻上一交易日买入
+            # 每日循环（镜像 Go ExecuteDay）：解冻 → 收盘 mark → 止损 → 熔断 →
+            # 信号（BUY 熔断日跳过 + 行业集中检查）→ 记净值
+            self._unfreeze_t1(date)            # T+1：解冻上一交易日买入
+            self._mark_to_market(date)         # 持仓按当日收盘 mark
+            self._stop_loss_scan(date)         # 止损扫描（策略信号前）
+            self._fused = self._drawdown_fused()  # 回撤熔断判断
             if self.fill_mode == "t1_open":
                 # 先执行昨日（T-1 收盘生成的）信号：今日开盘价成交，无未来函数
                 self._execute_pending(date)
@@ -140,20 +229,27 @@ class BacktestEngine:
             else:
                 for signal in signals:
                     self._process_signal(signal, date)
-            # 记录每日净值（含基准对比）
+            # 记录每日净值（含基准对比），并维护历史峰值
             nav = self.portfolio.total_value
             benchmark = self._get_benchmark_nav(date)
             self.daily_returns.append({"date": date, "nav": nav,
                                        "benchmark": benchmark})
+            if nav > self._peak:
+                self._peak = nav
         return self._generate_report()
 
     def _process_signal(self, signal: Signal, date: str):
         if signal.action == "BUY":
+            if self._fused:  # 回撤熔断日：BUY 全跳（SELL/止损照常）
+                return
             price = self._get_fill_price(signal.code, date)
             if price is None:  # 停牌/数据缺失：跳过
                 return
             qty = self._calc_quantity(price)
             if qty <= 0:
+                return
+            # 行业集中度（BUY 撮合前）：加仓后该行业市值占比超限 → 拒单
+            if self._industry_over_limit(signal.code, price * (1 + Broker.SLIPPAGE), qty):
                 return
             # 涨停检查 + 100股整手 + 资金校验（Broker 内完成）；
             # 滑点+佣金可能超出预算（top_n 全量买入时现金趋近预算），
@@ -216,6 +312,15 @@ class BacktestEngine:
                   "trades": len(self.portfolio.trades),
                   "positions": len(self.portfolio.positions),
                   "portfolio": metrics(navs)}
+        # 风险指标（§3.5）：turnover=年化单边换手，cost=年化交易成本占比
+        # 平均总资产 = 区间每日净值均值；252/交易日数 年化
+        if navs:
+            avg_asset = sum(navs) / len(navs)
+            annual = 252 / len(navs)
+            report["turnover"] = round(
+                self.portfolio.buy_amount / avg_asset * annual, 2)
+            report["cost"] = round(
+                self.portfolio.total_cost / avg_asset * annual, 4)
         bench = [r["benchmark"] for r in self.daily_returns
                  if r["benchmark"] is not None]
         if bench:

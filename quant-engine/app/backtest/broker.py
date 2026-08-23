@@ -56,7 +56,9 @@ class Broker:
             return False  # 涨停无法成交，跳过
         exec_price = price * (1 + self.SLIPPAGE)
         commission = self.calc_commission(exec_price * qty)
-        portfolio.buy(code, exec_price, qty, commission, trade_date)
+        # 滑点成本 = 参考价 × 滑点率 × 股数（成交价已含滑点，差额即滑点成本）
+        slippage = price * self.SLIPPAGE * qty
+        portfolio.buy(code, exec_price, qty, commission, trade_date, slippage)
         return True
 
     def execute_sell(self, portfolio: Portfolio, code: str, price: float, qty: int,
@@ -66,5 +68,6 @@ class Broker:
         exec_price = price * (1 - self.SLIPPAGE)
         commission = self.calc_commission(exec_price * qty)
         tax = self.calc_tax(exec_price * qty)
-        portfolio.sell(code, exec_price, qty, commission, tax)
+        slippage = price * self.SLIPPAGE * qty
+        portfolio.sell(code, exec_price, qty, commission, tax, slippage)
         return True
