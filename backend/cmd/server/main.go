@@ -52,23 +52,29 @@ func main() {
 		log.Fatal("自动迁移失败", zap.Error(err))
 	}
 
-	// 4. 交易/通知/执行服务 + 调度器（Sprint 5：19:35 自动下单 / 21:05 净值快照）
+	// 4. 交易/通知/执行服务 + 调度器（Sprint 5：19:35 自动下单 / 21:05 净值快照 / 21:15 对账校验）
 	tradingSvc := service.NewTradingService(db, cfg.Account)
 	navSvc := service.NewNavService(db, cfg.Account)
 	taskRunSvc := service.NewTaskRunService(db)
 	notifySvc := service.NewNotifyService(db)
 	executeSvc := service.NewExecuteService(db, tradingSvc, navSvc, taskRunSvc, notifySvc)
 	briefSvc := service.NewMorningBriefService(db)
+	consistencySvc := service.NewConsistencyService(db, taskRunSvc, notifySvc)
 
 	sched := service.NewScheduler(log)
 	accountRepo := repository.NewAccountRepository(db)
 	dailyRepo := repository.NewDailyRepository(db)
-	sched.Register("auto-trade", 19, 35, func() error {
+	// 三个每日任务均声明补跑语义：重启后若当天触发时刻已过且当日未执行 → 启动时立即补跑。
+	// 注册顺序即补跑顺序（auto-trade → nav-snapshot → consistency-check），保持数据依赖链。
+	sched.RegisterCatchUp("auto-trade", 19, 35, func() error {
 		return runAutoTrade(log, taskRunSvc, tradingSvc, accountRepo, dailyRepo)
-	})
-	sched.Register("nav-snapshot", 21, 5, func() error {
+	}, catchUpDaily(taskRunSvc, dailyRepo, "auto_trade"))
+	sched.RegisterCatchUp("nav-snapshot", 21, 5, func() error {
 		return runNavSnapshot(log, taskRunSvc, db, navSvc, accountRepo, dailyRepo)
-	})
+	}, catchUpDaily(taskRunSvc, dailyRepo, "nav_snapshot"))
+	sched.RegisterCatchUp("consistency-check", 21, 15, func() error {
+		return runConsistencyCheck(log, taskRunSvc, consistencySvc, dailyRepo)
+	}, catchUpDaily(taskRunSvc, dailyRepo, "consistency_check"))
 	go sched.Start()
 
 	// 5. 注册路由并启动服务
@@ -91,6 +97,34 @@ func recordTask(log *zap.Logger, svc *service.TaskRunService, name string, td ti
 	status, msg string, detail interface{}) {
 	if err := svc.Record(name, td, status, msg, detail); err != nil {
 		log.Warn("记录任务执行状态失败", zap.String("task", name), zap.Error(err))
+	}
+}
+
+// catchUpDaily 启动补跑判定：仅当日补跑。最近交易日 == 今天（交易日）且当日该任务
+// 无执行记录 → 需补跑；非交易日/周末（最近交易日 < 今天）返回 false，避免对历史
+// 交易日做无谓的幂等重跑（那会盖掉当日原始台账 detail）。与对应 run 函数同源
+// （GetLatestTradeDate）；无行情数据返回 false（run 函数也会跳过）。
+func catchUpDaily(taskRunSvc *service.TaskRunService, dailyRepo *repository.DailyRepository,
+	taskName string) func() (bool, error) {
+	sh := time.FixedZone("CST", 8*3600)
+	return func() (bool, error) {
+		latest, err := dailyRepo.GetLatestTradeDate()
+		if err != nil {
+			return false, err
+		}
+		if latest == nil {
+			return false, nil // 无行情数据 → 对应 run 函数也会跳过，无需补跑
+		}
+		now := time.Now().In(sh)
+		latestLocal := latest.In(sh)
+		if latestLocal.Year() != now.Year() || latestLocal.YearDay() != now.YearDay() {
+			return false, nil // 最近交易日不是今天（周末/节假日）→ 当日无执行期望
+		}
+		done, err := taskRunSvc.HasRun(taskName, *latest)
+		if err != nil {
+			return false, err
+		}
+		return !done, nil
 	}
 }
 
@@ -183,6 +217,36 @@ func runNavSnapshot(log *zap.Logger, taskRunSvc *service.TaskRunService, db *gor
 	} else {
 		log.Info("净值快照完成", zap.String("trade_date", latest.Format("2006-01-02")),
 			zap.Float64("nav", res.Nav))
+	}
+	return nil
+}
+
+// runConsistencyCheck 21:15 每日对账校验（晚于 21:05 净值快照）。
+// 检查结果与卡片推送由 ConsistencyService.CheckDay 内部处理（台账幂等 upsert）。
+func runConsistencyCheck(log *zap.Logger, taskRunSvc *service.TaskRunService,
+	consistencySvc *service.ConsistencyService,
+	dailyRepo *repository.DailyRepository) error {
+
+	latest, err := dailyRepo.GetLatestTradeDate()
+	if err != nil {
+		return fmt.Errorf("查询最近交易日失败: %w", err)
+	}
+	if latest == nil {
+		log.Info("无行情数据，跳过对账校验")
+		return nil
+	}
+	res, err := consistencySvc.CheckDay(*latest)
+	if err != nil {
+		recordTask(log, taskRunSvc, "consistency_check", *latest, "failed", "对账校验异常",
+			map[string]interface{}{"trade_date": latest.Format("2006-01-02")})
+		return err
+	}
+	if res.Passed {
+		log.Info("对账校验通过", zap.String("trade_date", latest.Format("2006-01-02")),
+			zap.Bool("idle", res.Idle))
+	} else {
+		log.Warn("对账校验未通过", zap.String("trade_date", latest.Format("2006-01-02")),
+			zap.Int("violations", len(res.Violations)))
 	}
 	return nil
 }
