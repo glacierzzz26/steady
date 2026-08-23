@@ -281,7 +281,7 @@ func (s *TradingService) execStrategy(tx *gorm.DB, ledger *Ledger, acc *model.Ac
 			return err
 		}
 		for _, sg := range items {
-			rejected, err := s.fillStrategy(tx, ledger, acc, sg, date, topN, maxPct, dr, or, tr, pr)
+			rejected, err := s.fillStrategy(tx, ledger, acc, res, sg, date, topN, maxPct, dr, or, tr, pr)
 			if err != nil {
 				return err
 			}
@@ -297,9 +297,9 @@ func (s *TradingService) execStrategy(tx *gorm.DB, ledger *Ledger, acc *model.Ac
 	return exec(model.ActionBuy)
 }
 
-// fillStrategy 单笔策略信号撮合；rejected 非空表示拒单原因
+// fillStrategy 单笔策略信号撮合；rejected 非空表示拒单原因；成交笔数累计到 res
 func (s *TradingService) fillStrategy(tx *gorm.DB, ledger *Ledger, acc *model.Account,
-	sg repository.SignalItem, date time.Time, topN int, maxPct float64,
+	res *ExecResult, sg repository.SignalItem, date time.Time, topN int, maxPct float64,
 	dr *repository.DailyRepository, or *repository.OrderRepository,
 	tr *repository.TradeRepository, pr *repository.PositionRepository) (string, error) {
 
@@ -339,6 +339,7 @@ func (s *TradingService) fillStrategy(tx *gorm.DB, ledger *Ledger, acc *model.Ac
 			commission, tax, date, "strategy", sg.Reason, or, tr); err != nil {
 			return "", err
 		}
+		res.SellCount++
 		// pos 与 ledger 共享指针：清仓后 Quantity==0 → savePosition 删除持仓
 		if err := s.savePosition(pr, acc.ID, pos); err != nil {
 			return "", err
@@ -369,6 +370,7 @@ func (s *TradingService) fillStrategy(tx *gorm.DB, ledger *Ledger, acc *model.Ac
 				commission, 0, date, "strategy", sg.Reason, or, tr); err != nil {
 				return "", err
 			}
+			res.BuyCount++
 			if err := s.savePosition(pr, acc.ID, ledger.positions[sg.Code]); err != nil {
 				return "", err
 			}
