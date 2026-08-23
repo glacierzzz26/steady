@@ -119,7 +119,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_factor_value
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS strategy (
     id            BIGSERIAL     PRIMARY KEY,
-    name          VARCHAR(50)   UNIQUE NOT NULL,
+    name          VARCHAR(50)   NOT NULL,        -- 唯一约束名任意（模型用 `unique` 标签与 DB 现状对齐，GORM 不增删该约束）
     zh_name       VARCHAR(50),              -- 中文名（前端展示，Iteration 4）
     description   TEXT,
     version       VARCHAR(20)   DEFAULT 'v1.0',  -- 版本号（展示/排序，Iteration 4）
@@ -127,7 +127,8 @@ CREATE TABLE IF NOT EXISTS strategy (
     params        JSONB,                    -- 策略参数（股票池/轮动阈值/风控等）
     status        VARCHAR(10)   DEFAULT 'draft',  -- draft/backtest/sample/active/paused/archived
     created_at    TIMESTAMP     DEFAULT NOW(),
-    updated_at    TIMESTAMP     DEFAULT NOW()
+    updated_at    TIMESTAMP     DEFAULT NOW(),
+    CONSTRAINT uq_strategy_name UNIQUE (name)
 );
 
 -- ------------------------------------------------------------
