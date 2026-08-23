@@ -1,379 +1,274 @@
-import { useEffect, useMemo, useState } from 'react'
-import {
-  Button,
-  Card,
-  Col,
-  DatePicker,
-  Empty,
-  Form,
-  InputNumber,
-  Row,
-  Statistic,
-  Table,
-  Tag,
-  message,
-} from 'antd'
-import type { ColumnsType } from 'antd/es/table'
-import {
-  AccountBookOutlined,
-  FallOutlined,
-  ReloadOutlined,
-  ThunderboltOutlined,
-} from '@ant-design/icons'
-import * as echarts from 'echarts'
-import type { EChartsOption } from 'echarts'
-import dayjs from 'dayjs'
+import { useMemo, useState } from 'react'
+import EChart from '../../components/EChart'
+import Kpi from '../../components/Kpi'
+import Notice from '../../components/Notice'
+import Tag from '../../components/Tag'
+import { backtestApi, strategyApi, type BacktestJobItem } from '../../api'
+import { useApi } from '../../hooks/useApi'
+import { lineOpt } from '../../mock/chartOpt'
 
-import StatCard from '../../components/StatCard'
-import { useEChart } from '../../hooks/useEChart'
-import { getBacktest, getBacktests, submitBacktest } from '../../services/api'
-import type { BacktestJobItem, BacktestNavItem } from '../../types'
-import { tablePagination } from '../../utils/table'
+const G8_DONE_HINT = 'T+1 开盘为保守假设（无未来函数），已支持（G8）'
+/** 年化单边换手（倍数/年，后端已年化） */
+const fmtTurnover = (v?: number) =>
+  v === undefined || v === null || Number.isNaN(v) ? '--' : `${v.toFixed(2)}×/年`
+/** 年化交易成本占比（小数比例 → %） */
+const fmtCost = (v?: number) =>
+  v === undefined || v === null || Number.isNaN(v) ? '--' : `${(v * 100).toFixed(2)}%/年`
 
-const { RangePicker } = DatePicker
+/** 回测收益为小数比例（0.382 = 38.2%）→ 带符号百分比 */
+function fmtBtPct(v?: number | null): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return '--'
+  return `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%`
+}
+const signCls = (v?: number | null) => (v !== undefined && v !== null && v < 0 ? 'down' : 'up')
+/** fill_mode 后端小写 → 前端展示文案 */
+const fillModeLabel = (v?: string) => (v === 't1_open' ? 'T+1开盘' : v === 't_close' ? 'T日收盘' : '--')
 
-// A 股红涨绿跌
-const UP = '#cf1322'
-const DOWN = '#3f8600'
-
-const statusTag = (s: BacktestJobItem['status']) => {
-  const map: Record<BacktestJobItem['status'], [string, string]> = {
-    pending: ['blue', '排队中'],
-    running: ['cyan', '回测中'],
-    done: ['green', '已完成'],
-    failed: ['red', '失败'],
-  }
-  const [color, text] = map[s] ?? ['default', s]
-  return <Tag color={color} style={{ borderRadius: 6 }}>{text}</Tag>
+const BT_STATUS: Record<string, ['ok' | 'hold' | 'warn', string]> = {
+  pending: ['hold', '排队中'],
+  running: ['hold', '运行中'],
+  done: ['ok', '完成'],
+  failed: ['warn', '失败'],
 }
 
-const pctColor = (v: number) => (v >= 0 ? UP : DOWN)
-
-/** 指标卡：红涨绿跌（返回一个 Statistic，供 Col 包裹） */
-function MetricStat({ title, value, precision = 2, suffix = '%' }: { title: string; value: number; precision?: number; suffix?: string }) {
-  return (
-    <Statistic title={title} value={value} precision={precision} suffix={suffix} valueStyle={{ color: pctColor(value), fontWeight: 600 }} />
-  )
-}
-
-/** 收益曲线：策略净值 vs 沪深300（同起点归一化，benchmark 缺失日断线） */
-function NavChart({ items }: { items: BacktestNavItem[] }) {
-  const option = useMemo<EChartsOption | null>(() => {
-    if (!items.length) return null
-    const dates = items.map((it) => it.date.slice(5)) // YYYY-MM-DD → MM-DD
-    const base = items[0].nav
-    const benchBase = items.find((it) => it.benchmark != null)?.benchmark
-    return {
-      tooltip: {
-        trigger: 'axis',
-        valueFormatter: (v) => `${((Number(v) - 1) * 100).toFixed(2)}%`,
-      },
-      legend: { data: ['策略净值', '沪深300'], top: 4, right: 12, icon: 'roundRect' },
-      grid: { left: 16, right: 20, top: 44, bottom: 12, containLabel: true },
-      xAxis: {
-        type: 'category',
-        data: dates,
-        axisLine: { lineStyle: { color: '#e6ecf5' } },
-        axisTick: { show: false },
-        axisLabel: { color: '#8a97ab' },
-      },
-      yAxis: {
-        type: 'value',
-        axisLabel: { color: '#8a97ab', formatter: (v: number) => `${((v - 1) * 100).toFixed(0)}%` },
-        splitLine: { lineStyle: { color: '#eef2fa' } },
-      },
-      series: [
-        {
-          name: '策略净值',
-          type: 'line',
-          data: items.map((it) => it.nav / base),
-          smooth: true,
-          symbol: 'none',
-          lineStyle: { width: 3, color: '#1d39c4' },
-          areaStyle: {
-            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(29, 57, 196, 0.28)' },
-              { offset: 1, color: 'rgba(29, 57, 196, 0.02)' },
-            ]),
-          },
-        },
-        {
-          name: '沪深300',
-          type: 'line',
-          data: items.map((it) =>
-            it.benchmark != null && benchBase ? it.benchmark / benchBase : null,
-          ),
-          smooth: true,
-          symbol: 'none',
-          lineStyle: { width: 2, color: '#f5a623', type: 'dashed' },
-        },
-      ],
-    }
-  }, [items])
-  const domRef = useEChart(option, [items])
-  return <div ref={domRef} style={{ height: 320 }} />
-}
-
-export default function BacktestPage() {
-  const [form] = Form.useForm<{ range: [dayjs.Dayjs, dayjs.Dayjs]; topN: number }>()
-  const [jobs, setJobs] = useState<BacktestJobItem[]>([])
-  const [selected, setSelected] = useState<BacktestJobItem | null>(null)
-  const [loading, setLoading] = useState(true)
+export default function Backtest() {
+  const [strategy, setStrategy] = useState('')
+  const [start, setStart] = useState('2019-01-01')
+  const [end, setEnd] = useState(() => new Date().toISOString().slice(0, 10))
+  const [topN, setTopN] = useState(20)
+  const [fillMode, setFillMode] = useState('T+1开盘')
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const [selectedId, setSelectedId] = useState<number | null>(null)
   const [submitting, setSubmitting] = useState(false)
-  const [reloadTick, setReloadTick] = useState(0)
 
-  // 加载列表 + 选中任务详情（任务未终结时由轮询接管）
-  useEffect(() => {
-    let cancelled = false
-    setLoading(true)
-    Promise.all([
-      getBacktests(100),
-      selected?.id ? getBacktest(selected.id).catch(() => null) : Promise.resolve(null),
-    ])
-      .then(([list, detail]) => {
-        if (cancelled) return
-        setJobs(list.items)
-        if (detail) setSelected(detail)
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadTick, selected?.id])
+  const strategies = useApi(() => strategyApi.getStrategies(), [])
+  const list = useApi(() => backtestApi.getBacktests(20), [])
+  const detail = useApi<BacktestJobItem | null>(
+    () =>
+      selectedId !== null ? backtestApi.getBacktest(selectedId) : Promise.resolve(null),
+    [selectedId, list.data],
+  )
 
-  // 轮询：存在 pending/running 任务时每 5s 刷新；全部终结后停止
-  useEffect(() => {
-    const active = jobs.some((j) => j.status === 'pending' || j.status === 'running')
-    if (!active) return
-    const timer = setInterval(() => {
-      if (!document.hidden) setReloadTick((t) => t + 1)
-    }, 5000)
-    return () => clearInterval(timer)
-  }, [jobs])
+  const strategyOpts = strategies.data?.items ?? []
+  const btRows = list.data?.items ?? []
 
-  const onSubmit = async () => {
-    const values = await form.validateFields()
-    const [start, end] = values.range
+  const navOption = useMemo(() => {
+    const n = detail.data?.nav ?? []
+    return lineOpt(
+      {
+        dates: n.map(p => p.date),
+        series: [
+          { name: '策略净值', data: n.map(p => p.nav), w: 2 },
+          { name: '沪深300', data: n.map(p => p.benchmark ?? null) },
+        ],
+      },
+      ['#4C7DFF', '#8B93A7'],
+      true,
+    )
+  }, [detail.data])
+
+  const submit = async () => {
     setSubmitting(true)
+    setMsg(null)
     try {
-      const res = await submitBacktest({
-        start_date: start.format('YYYY-MM-DD'),
-        end_date: end.format('YYYY-MM-DD'),
-        top_n: values.topN ?? 20,
+      const res = await backtestApi.submitBacktest({
+        start_date: start,
+        end_date: end,
+        top_n: topN,
+        fill_mode: fillMode === 'T+1开盘' ? 't1_open' : 't_close',
+        strategy_name: strategy, // Iteration 4：指定策略回测（空=后端解析 active）
       })
-      message.success(`回测任务 #${res.job_id} 已提交，引擎每 5 分钟执行一次`)
-      form.resetFields()
-      setReloadTick((t) => t + 1)
-    } catch {
-      // 错误提示已由 axios 拦截器统一弹出
+      setMsg({ ok: true, text: `回测任务已提交 job #${res.job_id}（${res.status}）` })
+      setSelectedId(res.job_id)
+      list.reload()
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof Error ? e.message : '提交失败' })
     } finally {
       setSubmitting(false)
     }
   }
 
-  const columns = useMemo<ColumnsType<BacktestJobItem>>(
-    () => [
-      { title: 'ID', dataIndex: 'id', width: 60 },
-      { title: '区间', key: 'range', width: 180, render: (_, j) => `${j.start_date} ~ ${j.end_date}` },
-      { title: 'TopN', dataIndex: 'top_n', width: 70, align: 'right' },
-      {
-        title: '总收益',
-        dataIndex: 'total_return',
-        width: 100,
-        align: 'right',
-        render: (v: number, j) =>
-          j.status === 'done' ? (
-            <span style={{ color: pctColor(v) }}>{(v * 100).toFixed(2)}%</span>
-          ) : (
-            '--'
-          ),
-      },
-      {
-        title: '最大回撤',
-        dataIndex: 'max_drawdown',
-        width: 100,
-        align: 'right',
-        render: (v: number, j) => (j.status === 'done' ? `${(v * 100).toFixed(2)}%` : '--'),
-      },
-      {
-        title: '年化',
-        dataIndex: 'annualized_return',
-        width: 100,
-        align: 'right',
-        render: (v: number, j) =>
-          j.status === 'done' ? (
-            <span style={{ color: pctColor(v) }}>{(v * 100).toFixed(2)}%</span>
-          ) : (
-            '--'
-          ),
-      },
-      { title: '状态', dataIndex: 'status', width: 90, render: statusTag },
-      {
-        title: '创建时间',
-        dataIndex: 'created_at',
-        width: 110,
-        render: (v: string) => v.slice(5), // YYYY-MM-DD → MM-DD
-      },
-    ],
-    [],
-  )
+  const pick = (id: number) => {
+    setSelectedId(id)
+    setMsg(null)
+  }
 
-  const r = selected
-  const nav = r?.nav ?? []
+  const d = detail.data
+  const dStatus = d ? (BT_STATUS[d.status] ?? ['hold', d.status]) : null
 
   return (
-    <div className="page-container">
-      <Row gutter={[16, 16]}>
-        <Col xs={24} lg={8}>
-          <Card title="新建回测" styles={{ body: { padding: 16 } }}>
-            <Form form={form} layout="vertical" initialValues={{ topN: 20 }}>
-              <Form.Item
-                name="range"
-                label="回测区间"
-                rules={[{ required: true, message: '请选择回测区间' }]}
-              >
-                <RangePicker style={{ width: '100%' }} />
-              </Form.Item>
-              <Form.Item name="topN" label="目标持仓数（TopN）">
-                <InputNumber min={1} max={50} style={{ width: '100%' }} />
-              </Form.Item>
-              <Button type="primary" block loading={submitting} onClick={onSubmit}>
-                提交回测
-              </Button>
-              <div style={{ color: '#8a97ab', fontSize: 12, marginTop: 10 }}>
-                ※ 引擎每 5 分钟执行一次任务；同参数重复提交不重复执行
-              </div>
-            </Form>
-          </Card>
-        </Col>
-        <Col xs={24} lg={16}>
-          <Card
-            title="回测任务"
-            extra={
-              <Button
-                size="small"
-                icon={<ReloadOutlined />}
-                loading={loading}
-                onClick={() => setReloadTick((t) => t + 1)}
-              >
-                刷新
-              </Button>
-            }
-            styles={{ body: { paddingTop: 8 } }}
+    <section className="page">
+      <div className="grid" style={{ gridTemplateColumns: '340px 1fr', marginBottom: 14 }}>
+        {/* 发起回测表单 */}
+        <div className="card">
+          <h3>发起回测</h3>
+          <div style={{ fontSize: 14, color: 'var(--txt2)', marginBottom: 6 }}>策略</div>
+          <select
+            style={{ width: '100%' }}
+            value={strategy}
+            onChange={e => setStrategy(e.target.value)}
           >
-            <Table<BacktestJobItem>
-              rowKey="id"
-              columns={columns}
-              dataSource={jobs}
-              loading={loading}
-              size="small"
-              pagination={tablePagination()}
-              onRow={(j) => ({
-                onClick: () => setSelected(j),
-                style: { cursor: 'pointer' },
-              })}
-              locale={{ emptyText: '暂无回测任务，左侧新建一个试试' }}
-            />
-          </Card>
-        </Col>
-      </Row>
+            <option value="">请选择策略</option>
+            {strategyOpts.map(s => (
+              <option key={s.name} value={s.name}>
+                {s.name} · {s.status === 'active' ? '运行中' : s.status}
+              </option>
+            ))}
+          </select>
+          <div style={{ fontSize: 14, color: 'var(--txt2)', margin: '12px 0 6px' }}>回测区间</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input type="date" value={start} onChange={e => setStart(e.target.value)} style={{ width: '50%' }} />
+            <input type="date" value={end} onChange={e => setEnd(e.target.value)} style={{ width: '50%' }} />
+          </div>
+          <div style={{ fontSize: 14, color: 'var(--txt2)', margin: '12px 0 6px' }}>
+            持仓数 top_n <b className="num" style={{ color: '#A8C0FF', float: 'right' }}>{topN}</b>
+          </div>
+          <input type="range" min={5} max={50} value={topN} onChange={e => setTopN(+e.target.value)} />
+          <div style={{ fontSize: 14, color: 'var(--txt2)', margin: '12px 0 6px' }}>成交时点假设</div>
+          <div className="seg" style={{ width: '100%', display: 'flex' }}>
+            <button
+              style={{ flex: 1, ...(fillMode === 'T日收盘' ? { background: 'rgba(76,125,255,.18)', color: '#A8C0FF' } : {}) }}
+              onClick={() => setFillMode('T日收盘')}
+            >
+              T日收盘
+            </button>
+            <button
+              style={{ flex: 1, ...(fillMode === 'T+1开盘' ? { background: 'rgba(76,125,255,.18)', color: '#A8C0FF' } : {}) }}
+              onClick={() => setFillMode('T+1开盘')}
+            >
+              T+1开盘
+            </button>
+          </div>
+          <div style={{ fontSize: 13, color: 'var(--txt3)', margin: '8px 0 14px' }}>
+            {fillMode === 'T+1开盘'
+              ? `${G8_DONE_HINT}；结果自动附 T vs T+1 年化偏差`
+              : 'T 日收盘为乐观假设（含未来函数），仅用于偏差对比'}
+          </div>
+          <button className="btn pri" style={{ width: '100%', justifyContent: 'center' }} onClick={submit} disabled={submitting || !strategy}>
+            {submitting ? '提交中…' : '提交回测任务'}
+          </button>
+          {msg && (
+            <div
+              style={{
+                marginTop: 10,
+                fontSize: 13,
+                color: msg.ok ? 'var(--ok)' : 'var(--down)',
+                border: `1px solid ${msg.ok ? 'rgba(47,191,113,.25)' : 'rgba(240,82,79,.25)'}`,
+                borderRadius: 8,
+                padding: '8px 10px',
+                background: msg.ok ? 'rgba(47,191,113,.06)' : 'rgba(240,82,79,.06)',
+              }}
+            >
+              {msg.text}
+            </div>
+          )}
+        </div>
 
-      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-        <Col span={24}>
-          <Card
-            title={
-              r ? `回测详情 #${r.id}（${r.start_date} ~ ${r.end_date}，Top${r.top_n}，${r.strategy_name}）` : '回测详情'
-            }
-          >
-            {!r || r.status !== 'done' ? (
-              <Empty
-                description={
-                  !r
-                    ? '选择左侧任务查看详情'
-                    : r.status === 'failed'
-                      ? `回测失败：${r.error || '未知错误'}`
-                      : `任务${r.status === 'pending' ? '排队中' : '回测中'}，结果生成后自动展示`
-                }
-                style={{ padding: '40px 0' }}
-              />
+        {/* 回测历史 */}
+        <div className="card">
+          <h3>
+            回测历史
+            <span className="hint">近 20 条 · 点击行查看净值</span>
+          </h3>
+          {list.error ? (
+            <Notice text={list.error} onRetry={list.reload} retrying={list.loading} />
+          ) : list.loading && !list.data ? (
+            <div className="empty">回测列表加载中…</div>
+          ) : btRows.length === 0 ? (
+            <div className="empty">暂无回测任务</div>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>策略</th>
+                  <th className="r">区间</th>
+                  <th className="r">top_n</th>
+                  <th className="r">假设</th>
+                  <th className="r">总收益</th>
+                  <th className="r">年化</th>
+                  <th className="r">最大回撤</th>
+                  <th className="r">夏普</th>
+                  <th className="r">超额</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                {btRows.map(j => {
+                  const [tagType, tagText] = BT_STATUS[j.status] ?? ['hold', j.status]
+                  const sel = j.id === selectedId
+                  return (
+                    <tr
+                      key={j.id}
+                      onClick={() => pick(j.id)}
+                      title={j.error || '点击加载净值'}
+                      style={{ cursor: 'pointer', ...(sel ? { background: 'rgba(76,125,255,.08)' } : {}) }}
+                    >
+                      <td className="num">#{j.id}</td>
+                      <td>{j.strategy_name}</td>
+                      <td className="r num">{`${j.start_date}~${j.end_date}`}</td>
+                      <td className="r num">{j.top_n}</td>
+                      <td className="r num">{fillModeLabel(j.fill_mode)}</td>
+                      <td className={`r num ${signCls(j.total_return)}`}>{fmtBtPct(j.total_return)}</td>
+                      <td className={`r num ${signCls(j.annualized_return)}`}>{fmtBtPct(j.annualized_return)}</td>
+                      <td className="r num">{fmtBtPct(j.max_drawdown)}</td>
+                      <td className="r num">{j.sharpe ? j.sharpe.toFixed(2) : '--'}</td>
+                      <td className={`r num ${signCls(j.excess_return)}`}>{fmtBtPct(j.excess_return)}</td>
+                      <td>
+                        <Tag type={tagType} label={tagText} />
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
+          <div style={{ marginTop: 10, fontSize: 13, color: 'var(--txt3)' }}>
+            fill_mode / T+1 偏差已点亮（G8）；年换手 / 成本占比已点亮（Iteration 4 §3.5）
+          </div>
+        </div>
+      </div>
+
+      {/* 回测详情 */}
+      <div className="card">
+        <h3>
+          {d
+            ? `回测 #${d.id} · ${d.strategy_name} · ${d.start_date}~${d.end_date} · top_n ${d.top_n} · ${fillModeLabel(d.fill_mode)}`
+            : '回测详情'}
+          <span className="hint">
+            {dStatus ? (
+              <Tag type={dStatus[0]} label={dStatus[1]} />
             ) : (
-              <>
-                <Row gutter={[16, 16]}>
-                  <Col xs={12} lg={4}>
-                    <Card styles={{ body: { padding: '20px 24px' } }}>
-                      <MetricStat title="总收益" value={r.total_return * 100} />
-                      <div style={{ marginTop: 8, color: '#8a97ab', fontSize: 12 }}>
-                        {r.trading_days} 个交易日
-                      </div>
-                    </Card>
-                  </Col>
-                  <Col xs={12} lg={4}>
-                    <Card styles={{ body: { padding: '20px 24px' } }}>
-                      <MetricStat title="年化收益" value={r.annualized_return * 100} />
-                      <div style={{ marginTop: 8, color: '#8a97ab', fontSize: 12 }}>
-                        基准 <span style={{ color: pctColor(r.benchmark_return) }}>{(r.benchmark_return * 100).toFixed(2)}%</span>
-                      </div>
-                    </Card>
-                  </Col>
-                  <Col xs={12} lg={4}>
-                    <StatCard
-                      title="最大回撤"
-                      value={r.max_drawdown * 100}
-                      precision={2}
-                      suffix="%"
-                      icon={<FallOutlined />}
-                      color="orange"
-                    />
-                  </Col>
-                  <Col xs={12} lg={4}>
-                    <StatCard
-                      title="夏普比率"
-                      value={r.sharpe}
-                      precision={2}
-                      icon={<ThunderboltOutlined />}
-                      color="purple"
-                    />
-                  </Col>
-                  <Col xs={12} lg={4}>
-                    <Card styles={{ body: { padding: '20px 24px' } }}>
-                      <MetricStat title="超额收益" value={r.excess_return * 100} />
-                      <div style={{ marginTop: 8, color: '#8a97ab', fontSize: 12 }}>
-                        相对沪深300
-                      </div>
-                    </Card>
-                  </Col>
-                  <Col xs={12} lg={4}>
-                    <StatCard
-                      title="期末净值"
-                      value={r.final_value}
-                      precision={2}
-                      suffix="元"
-                      icon={<AccountBookOutlined />}
-                      color="blue"
-                      footer={`成交 ${r.trades} 笔 · 期末持仓 ${r.positions} 只`}
-                    />
-                  </Col>
-                </Row>
-                <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-                  <Col span={24}>
-                    <Card size="small" title="策略净值 vs 沪深300（同起点归一化）">
-                      {nav.length ? (
-                        <NavChart items={nav} />
-                      ) : (
-                        <Empty description="净值序列为空" style={{ padding: '40px 0' }} />
-                      )}
-                    </Card>
-                  </Col>
-                </Row>
-              </>
+              '点击历史行查看'
             )}
-          </Card>
-        </Col>
-      </Row>
-    </div>
+          </span>
+        </h3>
+        {!d ? (
+          <div className="empty" style={{ padding: '44px 0' }}>
+            从上方历史列表选择一条回测查看净值与指标
+          </div>
+        ) : detail.error ? (
+          <Notice text={detail.error} onRetry={detail.reload} retrying={detail.loading} />
+        ) : d.status !== 'done' ? (
+          <div className="empty" style={{ padding: '44px 0' }}>
+            {d.status === 'failed' ? `任务失败：${d.error || '未知错误'}` : '任务运行中，完成后展示净值曲线'}
+          </div>
+        ) : (
+          <>
+            <EChart option={navOption} height={280} />
+            <div className="grid" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginTop: 14 }}>
+              <Kpi lb="总收益" v={fmtBtPct(d.total_return)} vClass={signCls(d.total_return)} d={`基准 ${fmtBtPct(d.benchmark_return)}`} style={{ border: 0, background: 'var(--panel2)' }} />
+              <Kpi lb="年化收益" v={fmtBtPct(d.annualized_return)} vClass={signCls(d.annualized_return)} d={`${d.trading_days} 个交易日`} style={{ border: 0, background: 'var(--panel2)' }} />
+              <Kpi lb="最大回撤" v={fmtBtPct(d.max_drawdown)} d="全程" style={{ border: 0, background: 'var(--panel2)' }} />
+              <Kpi lb="夏普" v={d.sharpe ? d.sharpe.toFixed(2) : '--'} d={`最终资产 ¥${d.final_value.toLocaleString('zh-CN', { maximumFractionDigits: 0 })}`} style={{ border: 0, background: 'var(--panel2)' }} />
+              <Kpi lb="超额收益" v={fmtBtPct(d.excess_return)} vClass={signCls(d.excess_return)} d={`${d.trades} 笔交易 · ${d.positions} 只持仓`} style={{ border: 0, background: 'var(--panel2)' }} />
+              <Kpi lb="T+1偏差" v={fmtBtPct(d.t1_deviation)} vClass={signCls(d.t1_deviation)} d="年化（t1_open−t_close）" style={{ border: 0, background: 'var(--panel2)' }} />
+              <Kpi lb="年换手" v={fmtTurnover(d.turnover)} d="单边 ×/年（§3.5）" style={{ border: 0, background: 'var(--panel2)' }} />
+              <Kpi lb="成本占比" v={fmtCost(d.cost)} d="年化成本/平均总资产" style={{ border: 0, background: 'var(--panel2)' }} />
+            </div>
+          </>
+        )}
+      </div>
+    </section>
   )
 }

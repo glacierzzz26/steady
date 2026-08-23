@@ -1,210 +1,78 @@
-import { useEffect, useMemo, useState } from 'react'
-import {
-  Alert,
-  Button,
-  Card,
-  Col,
-  Empty,
-  Form,
-  Input,
-  InputNumber,
-  Popconfirm,
-  Row,
-  Select,
-  Space,
-  Switch,
-  Table,
-  Tag,
-  TimePicker,
-  Typography,
-  message,
-} from 'antd'
-import type { ColumnsType } from 'antd/es/table'
-import {
-  ApiOutlined,
-  BellOutlined,
-  DatabaseOutlined,
-  RobotOutlined,
-  SaveOutlined,
-  SendOutlined,
-} from '@ant-design/icons'
-import dayjs from 'dayjs'
+import { useEffect, useState } from 'react'
+import Notice from '../../components/Notice'
+import Tag from '../../components/Tag'
+import { settingsApi } from '../../api'
+import { useApi } from '../../hooks/useApi'
+import type { FeishuConfig, LLMConfig, LLMConfigUpdate, NotifyEvent } from '../../api'
 
-import {
-  getLLMConfig,
-  getNotifyConfig,
-  getTaskRuns,
-  getTushareConfig,
-  sendNotifyTest,
-  testLLM,
-  testTushare,
-  updateFeishuConfig,
-  updateLLMConfig,
-  updateNotifyEvent,
-  updateTushareConfig,
-} from '../../services/api'
-import type {
-  FeishuConfig,
-  LLMConfig,
-  LLMConfigUpdate,
-  NotifyEvent,
-  TaskRunItem,
-  TushareConfig,
-} from '../../types'
-import { tablePagination } from '../../utils/table'
-
-// 调度方式：weekday=每周几 / trading_day=交易日 / event=事件触发（由业务直接推送）
-const SCHEDULE_OPTIONS = [
-  { value: 'trading_day', label: '交易日' },
-  { value: 'weekday', label: '每周几' },
-  { value: 'event', label: '事件触发' },
-]
-
-const WEEKDAY_OPTIONS = [
-  { value: '1', label: '周一' },
-  { value: '2', label: '周二' },
-  { value: '3', label: '周三' },
-  { value: '4', label: '周四' },
-  { value: '5', label: '周五' },
-  { value: '6', label: '周六' },
-  { value: '7', label: '周日' },
-]
-
-const TEMPLATE_OPTIONS = [
-  { value: 'blue', label: '蓝' },
-  { value: 'green', label: '绿' },
-  { value: 'red', label: '红' },
-]
-
-// 大模型 provider（base_url 留空 = 各 provider 默认地址）
-const LLM_PROVIDER_OPTIONS = [
-  { value: 'openai', label: 'OpenAI' },
-  { value: 'deepseek', label: 'DeepSeek' },
-  { value: 'qwen', label: '通义千问（Qwen）' },
-  { value: 'glm', label: '智谱 GLM' },
-]
-
-// 任务执行记录 → 中文名（未收录的任务原样展示）
-const TASK_LABELS: Record<string, string> = {
-  calc_factors: '因子计算',
-  generate_signals: '策略信号',
-  consume_backtests: '回测任务',
-  auto_trade: '模拟交易',
-  nav_snapshot: '净值快照',
-  daily_report: '每日日报',
-  data_quality: '数据健康检查',
-  morning_brief: '早盘简报',
+interface Msg {
+  ok: boolean
+  text: string
 }
 
-const taskLabel = (name: string) => TASK_LABELS[name] ?? name
-
-const runStatusTag = (s: TaskRunItem['status']) => {
-  const map: Record<TaskRunItem['status'], [string, string]> = {
-    success: ['green', '成功'],
-    skipped: ['orange', '跳过'],
-    failed: ['red', '失败'],
-  }
-  const [color, text] = map[s] ?? ['default', s]
-  return <Tag color={color} style={{ borderRadius: 6 }}>{text}</Tag>
+const PROV_CN: Record<string, string> = {
+  openai: 'OpenAI',
+  deepseek: 'DeepSeek',
+  qwen: '通义千问 (Qwen)',
+  glm: '智谱 GLM',
 }
 
-const fieldCaption = (text: string) => (
-  <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-    {text}
-  </Typography.Text>
-)
+function InlineMsg({ m }: { m: Msg | null }) {
+  if (!m) return null
+  return (
+    <div style={{ fontSize: 12.5, color: m.ok ? 'var(--ok)' : 'var(--up)', marginTop: 10 }}>
+      {m.ok ? '✓ ' : '✗ '}
+      {m.text}
+    </div>
+  )
+}
 
-export default function SettingsPage() {
+export default function Settings() {
+  // —— 加载：三卡独立拉取（各自出错各自 Notice+重试）——
+  const tushare = useApi(() => settingsApi.getTushareConfig(), [])
+  const notify = useApi(() => settingsApi.getNotifyConfig(), [])
+  const llm = useApi(() => settingsApi.getLLMConfig(), [])
+
+  // —— 本地编辑态（数据到达后从 data 拷贝）——
+  const [tk, setTk] = useState('')
+  const [tMsg, setTMsg] = useState<Msg | null>(null)
   const [feishu, setFeishu] = useState<FeishuConfig | null>(null)
   const [events, setEvents] = useState<NotifyEvent[]>([])
-  const [runs, setRuns] = useState<TaskRunItem[]>([])
-  const [tushare, setTushare] = useState<TushareConfig | null>(null)
-  const [tushareToken, setTushareToken] = useState('')
-  const [llm, setLlm] = useState<LLMConfig | null>(null)
-  const [llmKey, setLlmKey] = useState('')
-  const [loading, setLoading] = useState(true)
-  const [savingFeishu, setSavingFeishu] = useState(false)
-  const [testing, setTesting] = useState(false)
+  const [nMsg, setNMsg] = useState<Msg | null>(null)
   const [savingKey, setSavingKey] = useState<string | null>(null)
+  const [llmCfg, setLlmCfg] = useState<LLMConfig | null>(null)
+  const [llmKey, setLlmKey] = useState('')
+  const [lMsg, setLMsg] = useState<Msg | null>(null)
+
+  useEffect(() => {
+    if (notify.data) {
+      setFeishu(notify.data.feishu)
+      setEvents(notify.data.events)
+    }
+  }, [notify.data])
+
+  useEffect(() => {
+    if (llm.data) setLlmCfg(llm.data)
+  }, [llm.data])
+
   const [savingTushare, setSavingTushare] = useState(false)
   const [testingTushare, setTestingTushare] = useState(false)
+  const [savingNotify, setSavingNotify] = useState(false)
+  const [testingNotify, setTestingNotify] = useState(false)
   const [savingLLM, setSavingLLM] = useState(false)
   const [testingLLM, setTestingLLM] = useState(false)
 
-  const load = () => {
-    setLoading(true)
-    Promise.all([getNotifyConfig(), getTaskRuns(50), getTushareConfig(), getLLMConfig()])
-      .then(([cfg, runsData, tushareData, llmData]) => {
-        setFeishu(cfg.feishu)
-        setEvents(cfg.events)
-        setRuns(runsData.items)
-        setTushare(tushareData)
-        setLlm(llmData)
-      })
-      .catch(() => {
-        // 错误已由 axios 拦截器统一弹出，保留空态供重试
-      })
-      .finally(() => setLoading(false))
-  }
-
-  useEffect(() => {
-    load()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const patchEvent = (eventKey: string, patch: Partial<NotifyEvent>) =>
-    setEvents((prev) => prev.map((e) => (e.event_key === eventKey ? { ...e, ...patch } : e)))
-
-  const onSaveFeishu = async () => {
-    if (!feishu) return
-    setSavingFeishu(true)
-    try {
-      await updateFeishuConfig(feishu)
-      message.success('飞书配置已保存')
-    } catch {
-      // 拦截器已提示
-    } finally {
-      setSavingFeishu(false)
-    }
-  }
-
-  const onTest = async () => {
-    setTesting(true)
-    try {
-      await sendNotifyTest()
-      message.success('测试卡片已发送，请查看飞书群')
-    } catch {
-      // 拦截器已提示
-    } finally {
-      setTesting(false)
-    }
-  }
-
+  // ---- Tushare ----
   const onSaveTushare = async () => {
-    const token = tushareToken.trim()
-    if (!token) return // 空输入不提交，避免误清空；清除走 onClearTushare
+    const token = tk.trim()
+    if (!token) return // 空输入不提交，避免误清空
     setSavingTushare(true)
     try {
-      await updateTushareConfig(token)
-      setTushare({ configured: true, token_masked: `****${token.slice(-4)}` })
-      setTushareToken('')
-      message.success('Tushare 配置已保存')
-    } catch {
-      // 拦截器已提示
-    } finally {
-      setSavingTushare(false)
-    }
-  }
-
-  const onClearTushare = async () => {
-    setSavingTushare(true)
-    try {
-      await updateTushareConfig('')
-      setTushare({ configured: false, token_masked: '' })
-      setTushareToken('')
-      message.success('已清除 Tushare token，数据源回到 AkShare')
-    } catch {
-      // 拦截器已提示
+      await settingsApi.updateTushareConfig(token)
+      setTk('')
+      setTMsg({ ok: true, text: '已保存（Token 完整值不回显）' })
+    } catch (e) {
+      setTMsg({ ok: false, text: e instanceof Error ? e.message : '保存失败' })
     } finally {
       setSavingTushare(false)
     }
@@ -213,54 +81,75 @@ export default function SettingsPage() {
   const onTestTushare = async () => {
     setTestingTushare(true)
     try {
-      await testTushare(tushareToken.trim()) // token 为空时测已存 token
-      message.success('Tushare 连接正常')
-    } catch {
-      // 拦截器已提示具体原因（token 无效 / 积分不足等）
+      await settingsApi.testTushare(tk.trim()) // token 留空 = 测已存 token
+      setTMsg({ ok: true, text: 'Tushare 连接正常' })
+    } catch (e) {
+      setTMsg({ ok: false, text: e instanceof Error ? e.message : '连接失败' })
     } finally {
       setTestingTushare(false)
     }
   }
 
-  // ---- 大模型配置：api_key 留空 = 保留已存；清除走 onClearLLM ----
-  const onSaveLLM = async () => {
-    if (!llm) return
-    setSavingLLM(true)
+  // ---- 飞书：事件开关 + 整体配置 ----
+  const patchEvent = (eventKey: string, patch: Partial<NotifyEvent>) =>
+    setEvents(prev => prev.map(e => (e.event_key === eventKey ? { ...e, ...patch } : e)))
+
+  const onSaveEvent = async (ev: NotifyEvent) => {
+    setSavingKey(ev.event_key)
     try {
-      const req: LLMConfigUpdate = {
-        enabled: llm.enabled,
-        provider: llm.provider,
-        model: llm.model.trim(),
-        base_url: llm.base_url.trim(),
-      }
-      const key = llmKey.trim()
-      if (key) req.api_key = key
-      await updateLLMConfig(req)
-      setLlm({
-        ...llm,
-        model: llm.model.trim(),
-        base_url: llm.base_url.trim(),
-        api_key_masked: key ? `****${key.slice(-4)}` : llm.api_key_masked,
-      })
-      setLlmKey('')
-      message.success('大模型配置已保存')
-    } catch {
-      // 拦截器已提示
+      await settingsApi.updateNotifyEvent(ev.event_key, ev)
+      setNMsg({ ok: true, text: `${ev.name} 已保存` })
+    } catch (e) {
+      setNMsg({ ok: false, text: e instanceof Error ? e.message : '保存失败' })
     } finally {
-      setSavingLLM(false)
+      setSavingKey(null)
     }
   }
 
-  const onClearLLM = async () => {
-    if (!llm) return
+  const onSaveFeishu = async () => {
+    if (!feishu) return
+    setSavingNotify(true)
+    try {
+      await settingsApi.updateFeishuConfig(feishu)
+      setNMsg({ ok: true, text: '飞书配置已保存' })
+    } catch (e) {
+      setNMsg({ ok: false, text: e instanceof Error ? e.message : '保存失败' })
+    } finally {
+      setSavingNotify(false)
+    }
+  }
+
+  const onTestNotify = async () => {
+    setTestingNotify(true)
+    try {
+      await settingsApi.sendNotifyTest()
+      setNMsg({ ok: true, text: '测试卡片已发送，请查看飞书群' })
+    } catch (e) {
+      setNMsg({ ok: false, text: e instanceof Error ? e.message : '发送失败' })
+    } finally {
+      setTestingNotify(false)
+    }
+  }
+
+  // ---- LLM：api_key 留空 = 保留已存 ----
+  const onSaveLLM = async () => {
+    if (!llmCfg) return
     setSavingLLM(true)
     try {
-      await updateLLMConfig({ ...llm, clear_api_key: true })
-      setLlm({ ...llm, api_key_masked: '' })
+      const req: LLMConfigUpdate = {
+        enabled: llmCfg.enabled,
+        provider: llmCfg.provider,
+        model: llmCfg.model.trim(),
+        base_url: llmCfg.base_url.trim(),
+      }
+      const key = llmKey.trim()
+      if (key) req.api_key = key
+      await settingsApi.updateLLMConfig(req)
+      setLlmCfg({ ...llmCfg, api_key_masked: key ? `****${key.slice(-4)}` : llmCfg.api_key_masked })
       setLlmKey('')
-      message.success('已清除大模型 API Key')
-    } catch {
-      // 拦截器已提示
+      setLMsg({ ok: true, text: '大模型配置已保存' })
+    } catch (e) {
+      setLMsg({ ok: false, text: e instanceof Error ? e.message : '保存失败' })
     } finally {
       setSavingLLM(false)
     }
@@ -269,394 +158,203 @@ export default function SettingsPage() {
   const onTestLLM = async () => {
     setTestingLLM(true)
     try {
-      await testLLM()
-      message.success('大模型连接正常')
-    } catch {
-      // 拦截器已提示具体原因（key 无效 / 网络不通等）
+      await settingsApi.testLLM()
+      setLMsg({ ok: true, text: '大模型连接正常' })
+    } catch (e) {
+      setLMsg({ ok: false, text: e instanceof Error ? e.message : '连接失败' })
     } finally {
       setTestingLLM(false)
     }
   }
 
-  const onSaveEvent = async (ev: NotifyEvent) => {
-    setSavingKey(ev.event_key)
-    try {
-      await updateNotifyEvent(ev.event_key, ev)
-      message.success(`${ev.name}配置已保存`)
-    } catch {
-      // 拦截器已提示
-    } finally {
-      setSavingKey(null)
-    }
-  }
-
-  const runColumns = useMemo<ColumnsType<TaskRunItem>>(
-    () => [
-      { title: '交易日', dataIndex: 'run_date', width: 110 },
-      { title: '任务', dataIndex: 'task_name', width: 130, render: (v: string) => taskLabel(v) },
-      { title: '状态', dataIndex: 'status', width: 80, render: (v: TaskRunItem['status']) => runStatusTag(v) },
-      { title: '消息', dataIndex: 'message', ellipsis: true },
-      { title: '记录时间', dataIndex: 'created_at', width: 170 },
-    ],
-    [],
-  )
-
   return (
-    <div className="page-container">
-      <Row gutter={[16, 16]}>
-        <Col xs={24} lg={14}>
-          <Card
-            title="飞书机器人"
-            extra={
-              <Space>
-                <Button icon={<SendOutlined />} loading={testing} onClick={onTest}>
-                  发送测试卡片
-                </Button>
-                <Button type="primary" icon={<SaveOutlined />} loading={savingFeishu} onClick={onSaveFeishu}>
-                  保存
-                </Button>
-              </Space>
-            }
-          >
-            <Form layout="vertical">
-              <Form.Item label="启用飞书通知">
-                <Switch
-                  checked={feishu?.enabled ?? false}
-                  onChange={(v) => feishu && setFeishu({ ...feishu, enabled: v })}
-                />
-              </Form.Item>
-              <Form.Item label="通知时 @所有人" extra="开启后所有通知卡片都会 @ 群内所有人（个人通知群推荐开启）">
-                <Switch
-                  checked={feishu?.at_all ?? false}
-                  onChange={(v) => feishu && setFeishu({ ...feishu, at_all: v })}
-                />
-              </Form.Item>
-              <Form.Item label="Webhook URL" extra="飞书群机器人 webhook，形如 https://open.feishu.cn/open-apis/bot/v2/hook/xxx">
-                <Input
-                  value={feishu?.webhook_url ?? ''}
-                  onChange={(e) => feishu && setFeishu({ ...feishu, webhook_url: e.target.value })}
-                  placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
-                />
-              </Form.Item>
-              <Form.Item label="签名密钥（Secret）" extra="机器人在飞书开启「签名校验」后必填；留空则请求不签名">
-                <Input.Password
-                  value={feishu?.secret ?? ''}
-                  onChange={(e) => feishu && setFeishu({ ...feishu, secret: e.target.value })}
-                  placeholder="机器人签名校验密钥（可选）"
-                  autoComplete="off"
-                />
-              </Form.Item>
-              <Form.Item label="Dashboard 地址" extra="卡片内跳转链接 base，留空默认 http://localhost">
-                <Input
-                  value={feishu?.dashboard_url ?? ''}
-                  onChange={(e) => feishu && setFeishu({ ...feishu, dashboard_url: e.target.value })}
-                  placeholder="http://localhost"
-                />
-              </Form.Item>
-              <Row gutter={16}>
-                <Col span={12}>
-                  <Form.Item label="请求超时（秒）">
-                    <InputNumber
-                      min={1}
-                      max={60}
-                      value={feishu?.timeout ?? 10}
-                      onChange={(v) => feishu && setFeishu({ ...feishu, timeout: v ?? 10 })}
-                      style={{ width: '100%' }}
-                    />
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item label="失败重试（次）">
-                    <InputNumber
-                      min={0}
-                      max={5}
-                      value={feishu?.max_retries ?? 0}
-                      onChange={(v) => feishu && setFeishu({ ...feishu, max_retries: v ?? 0 })}
-                      style={{ width: '100%' }}
-                    />
-                  </Form.Item>
-                </Col>
-              </Row>
-            </Form>
-          </Card>
-        </Col>
-        <Col xs={24} lg={10}>
-          <Card
-            title={<Space><RobotOutlined />大模型能力</Space>}
-            extra={
-              <Space>
-                <Button icon={<ApiOutlined />} loading={testingLLM} onClick={onTestLLM}>
-                  测试连接
-                </Button>
-                <Button type="primary" icon={<SaveOutlined />} loading={savingLLM} onClick={onSaveLLM}>
-                  保存
-                </Button>
-              </Space>
-            }
-          >
-            <Alert
-              type="info"
-              showIcon
-              message="云端 API · 简报解读 / 术语解释 / 项目问答"
-              description="provider + base_url 可配（留空用各厂商默认地址）；api_key 仅存数据库、不回显。启用后：早盘简报页「AI 解读」按钮可用，每个交易日 09:20 自动推送 AI 解读飞书卡片。"
-              style={{ marginBottom: 16 }}
-            />
-            <Form layout="vertical">
-              <Form.Item label="启用大模型能力">
-                <Switch
-                  checked={llm?.enabled ?? false}
-                  onChange={(v) => llm && setLlm({ ...llm, enabled: v })}
-                />
-              </Form.Item>
-              <Form.Item label="提供商">
-                <Select
-                  style={{ width: '100%' }}
-                  value={llm?.provider ?? 'openai'}
-                  options={LLM_PROVIDER_OPTIONS}
-                  onChange={(v: LLMConfig['provider']) => llm && setLlm({ ...llm, provider: v })}
-                />
-              </Form.Item>
-              <Form.Item label="模型名称" extra="例如 deepseek-chat / qwen-plus / glm-4-flash / gpt-4o-mini">
-                <Input
-                  value={llm?.model ?? ''}
-                  onChange={(e) => llm && setLlm({ ...llm, model: e.target.value })}
-                  placeholder="必填，如 deepseek-chat"
-                />
-              </Form.Item>
-              <Form.Item label="Base URL" extra="留空 = 所选提供商默认地址">
-                <Input
-                  value={llm?.base_url ?? ''}
-                  onChange={(e) => llm && setLlm({ ...llm, base_url: e.target.value })}
-                  placeholder="https://api.deepseek.com/v1（留空用默认）"
-                />
-              </Form.Item>
-              <Form.Item
-                label="API Key"
-                extra={
-                  llm?.api_key_masked
-                    ? `已配置（掩码 ${llm.api_key_masked}），留空保存保持当前 key`
-                    : '未配置 API Key'
-                }
-              >
-                <Space.Compact style={{ width: '100%' }}>
-                  <Input.Password
-                    value={llmKey}
-                    onChange={(e) => setLlmKey(e.target.value)}
-                    placeholder={
-                      llm?.api_key_masked ? '已配置，留空保持当前 key' : '粘贴大模型 API Key'
-                    }
-                    autoComplete="off"
-                  />
-                  {llm?.api_key_masked && (
-                    <Popconfirm
-                      title="确认清除大模型 API Key？"
-                      description="清除后大模型能力将停用。"
-                      onConfirm={onClearLLM}
-                      okText="清除"
-                      okButtonProps={{ danger: true }}
-                    >
-                      <Button type="link" danger loading={savingLLM}>
-                        清除
-                      </Button>
-                    </Popconfirm>
-                  )}
-                </Space.Compact>
-              </Form.Item>
-            </Form>
-          </Card>
-        </Col>
-      </Row>
-
-      <div style={{ height: 16 }} />
-
-      <Card
-        title={<Space><DatabaseOutlined />Tushare 数据源</Space>}
-        extra={
-          <Space>
-            <Button icon={<ApiOutlined />} loading={testingTushare} onClick={onTestTushare}>
-              测试连接
-            </Button>
-            <Button
-              type="primary"
-              icon={<SaveOutlined />}
-              loading={savingTushare}
-              disabled={!tushareToken.trim()}
-              onClick={onSaveTushare}
-            >
-              保存
-            </Button>
-          </Space>
-        }
-      >
-        <Alert
-          type="info"
-          showIcon
-          message="数据主源（行情 / 估值 / 指数 / 日历 / 列表 / 财务）"
-          description="token 仅存于数据库（app_config 表），配置后采集器优先走 Tushare；财务接口需 2000+ 积分，积分不足自动回退 AkShare。未配置时全部走 AkShare 免费接口。"
-          style={{ marginBottom: 16 }}
-        />
-        <Form layout="vertical">
-          <Form.Item
-            label="当前状态"
-            extra={
-              tushare?.configured
-                ? `已配置（掩码 ${tushare.token_masked}），完整 token 不回显`
-                : '未配置，采集走 AkShare'
-            }
-          >
-            <Space>
-              <Tag color={tushare?.configured ? 'green' : 'orange'} style={{ borderRadius: 6 }}>
-                {tushare?.configured ? '已配置' : '未配置'}
-              </Tag>
-              {tushare?.configured && (
-                <Popconfirm
-                  title="确认清除 Tushare token？"
-                  description="清除后数据源回到 AkShare 免费接口。"
-                  onConfirm={onClearTushare}
-                  okText="清除"
-                  okButtonProps={{ danger: true }}
-                >
-                  <Button size="small" type="link" danger loading={savingTushare}>
-                    清除 token
-                  </Button>
-                </Popconfirm>
-              )}
-            </Space>
-          </Form.Item>
-          <Form.Item label="Tushare Pro Token" extra="粘贴新 token 后保存以更新；留空保存无效（清除走上方按钮）">
-            <Input.Password
-              value={tushareToken}
-              onChange={(e) => setTushareToken(e.target.value)}
-              placeholder={tushare?.configured ? '已配置，留空保持当前 token' : '粘贴 Tushare Pro token'}
-              autoComplete="off"
-            />
-          </Form.Item>
-        </Form>
-      </Card>
-
-      <div style={{ height: 16 }} />
-
-      <Card
-        title={<Space><BellOutlined />通知事件</Space>}
-        extra={<Typography.Text type="secondary" style={{ fontSize: 12 }}>每个事件可独立配置开关 / 调度方式 / 发送时刻</Typography.Text>}
-      >
-        {events.length === 0 ? (
-          <Empty description="暂无通知事件配置" style={{ padding: '24px 0' }} />
-        ) : (
-          <Space direction="vertical" style={{ width: '100%' }} size={12}>
-            {events.map((ev) => (
-              <div
-                key={ev.event_key}
-                style={{
-                  border: '1px solid #e6ecf5',
-                  borderRadius: 12,
-                  padding: '14px 16px',
-                  background: '#fbfcff',
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                  <Space>
-                    <Typography.Text strong>{ev.name}</Typography.Text>
-                    <Tag style={{ borderRadius: 6 }}>{ev.event_key}</Tag>
-                  </Space>
-                  <Space size={12}>
-                    <Switch checked={ev.enabled} onChange={(v) => patchEvent(ev.event_key, { enabled: v })} />
-                    <Typography.Text type={ev.enabled ? 'success' : 'secondary'} style={{ fontSize: 12 }}>
-                      {ev.enabled ? '已启用' : '已停用'}
-                    </Typography.Text>
-                    <Button
-                      size="small"
-                      type="primary"
-                      icon={<SaveOutlined />}
-                      loading={savingKey === ev.event_key}
-                      onClick={() => onSaveEvent(ev)}
-                    >
-                      保存
-                    </Button>
-                  </Space>
-                </div>
-                <Row gutter={16}>
-                  <Col xs={24} sm={8}>
-                    {fieldCaption('调度方式')}
-                    <Select
-                      style={{ width: '100%' }}
-                      value={ev.schedule_type}
-                      options={SCHEDULE_OPTIONS}
-                      onChange={(v: NotifyEvent['schedule_type']) =>
-                        patchEvent(
-                          ev.event_key,
-                          v === 'event'
-                            ? { schedule_type: v, send_at: null, weekdays: '' }
-                            : { schedule_type: v },
-                        )
-                      }
-                    />
-                  </Col>
-                  {ev.schedule_type === 'weekday' && (
-                    <Col xs={24} sm={8}>
-                      {fieldCaption('每周几（可多选）')}
-                      <Select
-                        mode="multiple"
-                        style={{ width: '100%' }}
-                        value={ev.weekdays ? ev.weekdays.split(',') : []}
-                        options={WEEKDAY_OPTIONS}
-                        onChange={(vals: string[]) => patchEvent(ev.event_key, { weekdays: vals.join(',') })}
-                        placeholder="选择星期"
-                      />
-                    </Col>
-                  )}
-                  {ev.schedule_type !== 'event' && (
-                    <Col xs={12} sm={6}>
-                      {fieldCaption('发送时刻')}
-                      <TimePicker
-                        format="HH:mm"
-                        style={{ width: '100%' }}
-                        value={ev.send_at ? dayjs(ev.send_at, 'HH:mm') : null}
-                        onChange={(t) => patchEvent(ev.event_key, { send_at: t ? t.format('HH:mm') : null })}
-                        placeholder="19:30"
-                      />
-                    </Col>
-                  )}
-                  <Col xs={ev.schedule_type === 'weekday' ? 12 : ev.schedule_type === 'event' ? 16 : 10} sm={4}>
-                    {fieldCaption('卡片模板')}
-                    <Select
-                      style={{ width: '100%' }}
-                      value={ev.template}
-                      options={TEMPLATE_OPTIONS}
-                      onChange={(v) => patchEvent(ev.event_key, { template: v })}
-                    />
-                  </Col>
-                </Row>
+    <section className="page">
+      <div className="grid" style={{ gridTemplateColumns: 'repeat(3,1fr)' }}>
+        {/* ---- Tushare ---- */}
+        <div className="card">
+          <h3>数据源 · Tushare</h3>
+          {tushare.error ? (
+            <Notice text={tushare.error} onRetry={tushare.reload} retrying={tushare.loading} />
+          ) : (
+            <>
+              <div style={{ fontSize: 14, color: 'var(--txt2)', marginBottom: 6 }}>Token</div>
+              <input
+                type="text"
+                value={tk}
+                onChange={e => setTk(e.target.value)}
+                placeholder={tushare.data?.configured ? `已配置 ${tushare.data.token_masked}，留空保持` : '粘贴 Tushare Pro token'}
+                style={{ width: '100%' }}
+              />
+              <div style={{ fontSize: 14, color: 'var(--txt2)', margin: '12px 0 6px' }}>当前状态</div>
+              <div style={{ fontSize: 14.5, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {tushare.data?.configured ? (
+                  <Tag type="ok" label={`主源已配置 ${tushare.data.token_masked}`} />
+                ) : (
+                  <Tag type="warn" label="未配置 · 采集走 AkShare" />
+                )}
+                <Tag type="hold" label="AkShare 兜底待命" />
               </div>
-            ))}
-          </Space>
-        )}
-      </Card>
+              <div style={{ marginTop: 14, display: 'flex', gap: 8 }}>
+                <button className="btn" onClick={onTestTushare} disabled={testingTushare}>
+                  {testingTushare ? '测试中…' : '测试连接'}
+                </button>
+                <button className="btn pri" onClick={onSaveTushare} disabled={savingTushare || !tk.trim()}>
+                  {savingTushare ? '保存中…' : '保存'}
+                </button>
+              </div>
+              <InlineMsg m={tMsg} />
+            </>
+          )}
+        </div>
 
-      <div style={{ height: 16 }} />
-
-      <Card title="任务执行记录" extra={<Typography.Text type="secondary" style={{ fontSize: 12 }}>每日任务对账台账：该做没做、是否失败</Typography.Text>}>
-        <Table<TaskRunItem>
-          rowKey="id"
-          columns={runColumns}
-          dataSource={runs}
-          loading={loading}
-          size="small"
-          pagination={tablePagination()}
-          expandable={{
-            rowExpandable: (r) => !!r.detail,
-            expandedRowRender: (r) =>
-              r.detail ? (
-                <pre style={{ margin: 0, fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-                  {JSON.stringify(r.detail, null, 2)}
-                </pre>
+        {/* ---- 飞书 ---- */}
+        <div className="card">
+          <h3>通知 · 飞书机器人</h3>
+          {notify.error ? (
+            <Notice text={notify.error} onRetry={notify.reload} retrying={notify.loading} />
+          ) : (
+            <>
+              <div style={{ fontSize: 14, color: 'var(--txt2)', marginBottom: 6 }}>推送项</div>
+              {events.length === 0 ? (
+                <div className="empty">暂无通知事件</div>
               ) : (
-                <Typography.Text type="secondary">无明细</Typography.Text>
-              ),
-          }}
-          locale={{ emptyText: '暂无任务执行记录' }}
-        />
-      </Card>
-    </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {events.map(ev => (
+                    <div key={ev.event_key} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 13.5, flex: 1 }}>{ev.name}</span>
+                      <input
+                        type="checkbox"
+                        checked={ev.enabled}
+                        onChange={e => patchEvent(ev.event_key, { enabled: e.target.checked })}
+                      />
+                      <button
+                        className="btn"
+                        style={{ padding: '2px 8px', fontSize: 12 }}
+                        onClick={() => onSaveEvent(ev)}
+                        disabled={savingKey === ev.event_key}
+                      >
+                        {savingKey === ev.event_key ? '保存中' : '保存'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{ fontSize: 14, color: 'var(--txt2)', margin: '14px 0 6px' }}>Webhook</div>
+              <input
+                type="text"
+                value={feishu?.webhook_url ?? ''}
+                onChange={e => feishu && setFeishu({ ...feishu, webhook_url: e.target.value })}
+                placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
+                style={{ width: '100%' }}
+              />
+              <div style={{ fontSize: 14, color: 'var(--txt2)', margin: '10px 0 6px' }}>
+                启用通知
+                <input
+                  type="checkbox"
+                  checked={feishu?.enabled ?? false}
+                  onChange={e => feishu && setFeishu({ ...feishu, enabled: e.target.checked })}
+                  style={{ marginLeft: 8, verticalAlign: 'middle' }}
+                />
+              </div>
+              <div style={{ marginTop: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button className="btn" onClick={onTestNotify} disabled={testingNotify}>
+                  {testingNotify ? '发送中…' : '发送测试卡片'}
+                </button>
+                <button className="btn pri" onClick={onSaveFeishu} disabled={savingNotify}>
+                  {savingNotify ? '保存中…' : '保存飞书配置'}
+                </button>
+              </div>
+              <InlineMsg m={nMsg} />
+            </>
+          )}
+        </div>
+
+        {/* ---- LLM ---- */}
+        <div className="card">
+          <h3>AI 助手 · LLM</h3>
+          {llm.error ? (
+            <Notice text={llm.error} onRetry={llm.reload} retrying={llm.loading} />
+          ) : (
+            <>
+              <table style={{ fontSize: 14 }}>
+                <tbody>
+                  <tr>
+                    <td style={{ color: 'var(--txt2)' }}>Provider</td>
+                    <td className="r">
+                      <select
+                        style={{ padding: '4px 8px' }}
+                        value={llmCfg?.provider ?? 'openai'}
+                        onChange={e => llmCfg && setLlmCfg({ ...llmCfg, provider: e.target.value as LLMConfig['provider'] })}
+                      >
+                        {Object.entries(PROV_CN).map(([v, l]) => (
+                          <option key={v} value={v}>
+                            {l}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style={{ color: 'var(--txt2)' }}>模型</td>
+                    <td className="r">
+                      <input
+                        type="text"
+                        value={llmCfg?.model ?? ''}
+                        onChange={e => llmCfg && setLlmCfg({ ...llmCfg, model: e.target.value })}
+                        placeholder="deepseek-chat"
+                        style={{ width: '100%' }}
+                      />
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style={{ color: 'var(--txt2)' }}>Base URL</td>
+                    <td className="r">
+                      <input
+                        type="text"
+                        value={llmCfg?.base_url ?? ''}
+                        onChange={e => llmCfg && setLlmCfg({ ...llmCfg, base_url: e.target.value })}
+                        placeholder="留空用默认"
+                        style={{ width: '100%' }}
+                      />
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style={{ color: 'var(--txt2)' }}>API Key</td>
+                    <td className="r">
+                      <input
+                        type="text"
+                        value={llmKey}
+                        onChange={e => setLlmKey(e.target.value)}
+                        placeholder={
+                          llmCfg?.api_key_masked
+                            ? `已配置 ${llmCfg.api_key_masked}，留空保持`
+                            : '粘贴 API Key'
+                        }
+                        style={{ width: '100%' }}
+                      />
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style={{ color: 'var(--txt2)' }}>数据访问</td>
+                    <td className="r">
+                      <Tag type="ok" label="只读白名单" />
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div style={{ marginTop: 14, display: 'flex', gap: 8 }}>
+                <button className="btn" onClick={onTestLLM} disabled={testingLLM}>
+                  {testingLLM ? '测试中…' : '测试对话'}
+                </button>
+                <button className="btn pri" onClick={onSaveLLM} disabled={savingLLM}>
+                  {savingLLM ? '保存中…' : '保存'}
+                </button>
+              </div>
+              <InlineMsg m={lMsg} />
+            </>
+          )}
+        </div>
+      </div>
+    </section>
   )
 }
