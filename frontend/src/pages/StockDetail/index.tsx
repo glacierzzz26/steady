@@ -1,235 +1,246 @@
-import { useEffect, useState } from 'react'
-import { Alert, Button, Card, Col, Descriptions, Empty, Result, Row, Skeleton, Statistic, Table, Tag } from 'antd'
-import type { ColumnsType } from 'antd/es/table'
-import { ArrowLeftOutlined } from '@ant-design/icons'
+import { useMemo } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import EChart from '../../components/EChart'
+import Notice from '../../components/Notice'
+import Tag from '../../components/Tag'
+import { mapAction, mapUniverse, stocksApi, tradeApi } from '../../api'
+import { useApi } from '../../hooks/useApi'
+import { klineOpt, radarOpt } from '../../mock/chartOpt'
+import { fmtChg, fmtPct } from '../../lib/format'
 
-import KLineChart from '../../components/KLineChart'
-import { getFinancial, getStockDetail } from '../../services/api'
-import type { FinancialItem, Market, StockDetail as StockDetailData } from '../../types'
-import { formatAmount, formatPct, formatWanYi } from '../../utils/format'
-import { tablePagination } from '../../utils/table'
+const G3_HINT = '待 G3 后端补齐因子得分'
 
-const MARKET_LABEL: Record<Market, string> = { SH: '沪市', SZ: '深市', BJ: '北交所' }
-
-function universeLabel(u: string) {
-  if (u === 'hs300') return '沪深300'
-  if (u === 'zz500') return '中证500'
-  return '候选'
-}
-
-// 财务字段：百分比字段用 formatPct（原始百分数，≤0 视为缺失）
-// 注：PE/PB 无季度财务来源，已移至最新行情卡的日度估值（daily_valuation）
-type FinNumberKey = Exclude<keyof FinancialItem, 'report_date' | 'announce_date'>
-
-const SUMMARY_ITEMS: { key: FinNumberKey; label: string; fmt: (v: number) => string }[] = [
-  { key: 'roe', label: 'ROE', fmt: formatPct },
-  { key: 'profit_growth', label: '净利润增速', fmt: formatPct },
-  { key: 'revenue_growth', label: '营收增速', fmt: formatPct },
-  { key: 'debt_ratio', label: '资产负债率', fmt: formatPct },
-  { key: 'gross_margin', label: '毛利率', fmt: formatPct },
-]
-
-const FINANCIAL_COLUMNS: ColumnsType<FinancialItem> = [
-  { title: '报告期', dataIndex: 'report_date', width: 110 },
-  { title: '公告日', dataIndex: 'announce_date', width: 110 },
-  { title: 'ROE', dataIndex: 'roe', width: 90, render: formatPct },
-  { title: '净利润增速', dataIndex: 'profit_growth', width: 110, render: formatPct },
-  { title: '营收增速', dataIndex: 'revenue_growth', width: 110, render: formatPct },
-  { title: '资产负债率', dataIndex: 'debt_ratio', width: 110, render: formatPct },
-  { title: '毛利率', dataIndex: 'gross_margin', width: 100, render: formatPct },
-]
-
-export default function StockDetailPage() {
-  const { code = '' } = useParams<{ code: string }>()
+export default function StockDetail() {
+  const { code = '000792' } = useParams()
   const navigate = useNavigate()
 
-  const [detail, setDetail] = useState<StockDetailData | null>(null)
-  const [financial, setFinancial] = useState<FinancialItem[]>([])
-  const [loading, setLoading] = useState(true)
-  const [notFound, setNotFound] = useState(false)
-  const [error, setError] = useState('')
-  const [retryTick, setRetryTick] = useState(0)
+  const detail = useApi(() => stocksApi.getStockDetail(code), [code])
+  const kline = useApi(() => stocksApi.getKline(code, { period: 'day', adjust: 'qfq' }), [code])
+  const fin = useApi(() => stocksApi.getFinancial(code, 10), [code])
+  const sighist = useApi(() => stocksApi.getSignalHistory(code, 10), [code])
+  // 持仓命中判定（辅助；失败静默 → 视为未持仓）
+  const positions = useApi(() => tradeApi.getPositions(), [])
 
-  useEffect(() => {
-    let cancelled = false
-    setLoading(true)
-    setNotFound(false)
-    setError('')
-    Promise.all([getStockDetail(code), getFinancial(code, 100)])
-      .then(([d, f]) => {
-        if (cancelled) return
-        setDetail(d)
-        setFinancial(f.items)
-      })
-      .catch((e: Error) => {
-        if (cancelled) return
-        // ApiError.code 40004 = 股票不存在（拦截器已 message 提示）
-        if ('code' in e && (e as { code: number }).code === 40004) setNotFound(true)
-        else setError(e.message)
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
+  const { klineOption, chg, lastClose, lastDate } = useMemo(() => {
+    const items = kline.data?.items ?? []
+    const kd = items.map(i => i.date)
+    const d = items.map(i => [i.open, i.close, i.low, i.high]) // candlestick [open, close, low, high]
+    const v = items.map(i => i.volume)
+    const n = items.length
+    const lastClose = n ? items[n - 1].close : null
+    const prevClose = n >= 2 ? items[n - 2].close : null
+    const chg = lastClose && prevClose ? ((lastClose - prevClose) / prevClose) * 100 : null
+    return {
+      klineOption: klineOpt(kd, d, v),
+      chg,
+      lastClose,
+      lastDate: n ? items[n - 1].date : null,
     }
-  }, [code, retryTick])
+  }, [kline.data])
 
-  if (loading) {
+  const fs = detail.data?.factor_score
+  const hasRadar =
+    !!fs && [fs.trend, fs.value, fs.quality, fs.risk].every(v => v !== undefined && v !== null)
+  const isHeld = (positions.data?.items ?? []).some(p => p.code === code)
+  const board = detail.data ? mapUniverse(detail.data.universe) : undefined
+
+  if (detail.loading && !detail.data) {
     return (
-      <Card>
-        <Skeleton active paragraph={{ rows: 8 }} />
-      </Card>
+      <section className="page">
+        <div className="empty">加载中…</div>
+      </section>
     )
   }
-
-  if (notFound) {
+  if (detail.error) {
     return (
-      <Result
-        status="404"
-        title="股票不存在"
-        subTitle={`未找到代码 ${code} 对应的股票`}
-        extra={
-          <Button type="primary" onClick={() => navigate('/stocks')}>
-            返回股票池
-          </Button>
-        }
-      />
+      <section className="page">
+        <Notice text={detail.error} onRetry={detail.reload} retrying={detail.loading} />
+      </section>
     )
   }
-
-  if (error || !detail) {
+  if (!detail.data) {
     return (
-      <Card>
-        <Alert
-          type="error"
-          message="加载失败"
-          description={error || '未获取到股票数据'}
-          action={
-            <Button size="small" onClick={() => setRetryTick((t) => t + 1)}>
-              重试
-            </Button>
-          }
-        />
-      </Card>
+      <section className="page">
+        <div className="empty">未找到股票 {code}</div>
+      </section>
     )
   }
-
-  const bar = detail.latest_bar
-  const summary = detail.financial_summary
-  const val = detail.valuation
+  const stock = detail.data
 
   return (
-    <div className="page-container">
-      <div style={{ marginBottom: 16 }}>
-        <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => navigate('/stocks')} style={{ marginRight: 8 }}>
-          返回股票池
-        </Button>
-        <span style={{ fontSize: 20, fontWeight: 600 }}>
-          {detail.code} · {detail.name || '--'}
+    <section className="page">
+      {/* 头部 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
+        <button className="btn" onClick={() => navigate('/stocks')}>
+          ← 返回股票池
+        </button>
+        <span style={{ fontSize: 18, fontWeight: 600 }}>
+          {stock.name}{' '}
+          <span className="num" style={{ color: 'var(--txt3)', fontSize: 15 }}>
+            {stock.code}
+          </span>
         </span>
-        <Tag color={MARKET_LABEL[detail.market] ? 'blue' : 'default'} style={{ marginLeft: 12, borderRadius: 6 }}>
-          {MARKET_LABEL[detail.market] ?? detail.market}
-        </Tag>
-        <Tag style={{ borderRadius: 6 }}>{universeLabel(detail.universe)}</Tag>
-        <Tag style={{ borderRadius: 6 }}>{detail.status || '--'}</Tag>
+        {board && <span className={`ptag${board === 'zz' ? ' zz' : ''}`}>{board === 'hs' ? '沪深300' : '中证500'}</span>}
+        {isHeld && <Tag type="buy" label="当前持仓" />}
+        <span className="num" style={{ marginLeft: 'auto', fontSize: 16 }}>
+          {lastClose !== null ? lastClose.toFixed(2) : '--'}{' '}
+          <b className={chg !== null && chg >= 0 ? 'up' : 'down'}>{fmtChg(chg)}</b>{' '}
+          <span style={{ color: 'var(--txt3)', fontSize: 14 }}>{lastDate ?? ''} 收盘</span>
+        </span>
       </div>
 
-      <Row gutter={[16, 16]}>
-        <Col xs={24} lg={16}>
-          <Card title="基本信息" size="small">
-            <Descriptions column={2} size="small">
-              <Descriptions.Item label="代码">{detail.code}</Descriptions.Item>
-              <Descriptions.Item label="名称">{detail.name || '--'}</Descriptions.Item>
-              <Descriptions.Item label="市场">{MARKET_LABEL[detail.market] ?? detail.market}</Descriptions.Item>
-              <Descriptions.Item label="行业">{detail.industry || '--'}</Descriptions.Item>
-              <Descriptions.Item label="上市日期">{detail.list_date || '--'}</Descriptions.Item>
-              <Descriptions.Item label="股票池">{universeLabel(detail.universe)}</Descriptions.Item>
-            </Descriptions>
-          </Card>
-        </Col>
-        <Col xs={24} lg={8}>
-          <Card title="最新行情" size="small">
-            {bar ? (
-              <Row gutter={16}>
-                <Col span={24} style={{ marginBottom: 12 }}>
-                  <Statistic title={`收盘价（${bar.date}）`} value={bar.close} precision={2} />
-                </Col>
-                <Col span={8}>
-                  <Statistic title="开盘" value={bar.open} precision={2} valueStyle={{ fontSize: 15 }} />
-                </Col>
-                <Col span={8}>
-                  <Statistic title="最高" value={bar.high} precision={2} valueStyle={{ fontSize: 15 }} />
-                </Col>
-                <Col span={8}>
-                  <Statistic title="最低" value={bar.low} precision={2} valueStyle={{ fontSize: 15 }} />
-                </Col>
-                <Col span={12} style={{ marginTop: 12 }}>
-                  <Statistic title="成交量（手）" value={formatWanYi(bar.volume)} valueStyle={{ fontSize: 15 }} />
-                </Col>
-                <Col span={12} style={{ marginTop: 12 }}>
-                  <Statistic title="成交额" value={formatWanYi(bar.amount)} valueStyle={{ fontSize: 15 }} />
-                </Col>
-                {val && (
-                  <>
-                    <Col span={12} style={{ marginTop: 12 }}>
-                      <Statistic
-                        title={`PE(TTM)（${val.trade_date}）`}
-                        value={val.pe_ttm > 0 ? formatAmount(val.pe_ttm) : '--'}
-                        valueStyle={{ fontSize: 15 }}
-                      />
-                    </Col>
-                    <Col span={12} style={{ marginTop: 12 }}>
-                      <Statistic
-                        title="PB"
-                        value={val.pb > 0 ? formatAmount(val.pb) : '--'}
-                        valueStyle={{ fontSize: 15 }}
-                      />
-                    </Col>
-                  </>
-                )}
-              </Row>
-            ) : (
-              <Empty description="行情数据待回填" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-            )}
-          </Card>
-        </Col>
-      </Row>
-
-      <Card title="日K线" size="small" style={{ marginTop: 16 }}>
-        <KLineChart code={detail.code} />
-      </Card>
-
-      <Card title="财务摘要" size="small" style={{ marginTop: 16 }}>
-        {summary ? (
-          <>
-            <div style={{ color: '#8a97ab', fontSize: 12, marginBottom: 12 }}>
-              报告期 {summary.report_date || '--'} · 公告日 {summary.announce_date || '--'}（百分数均为原始值，0 或缺失显示 --）
+      {/* K线 + 因子得分 */}
+      <div className="grid" style={{ gridTemplateColumns: '2fr 1fr', marginBottom: 14 }}>
+        <div className="card">
+          <h3>
+            日K · 前复权
+            <span className="hint">
+              <span className="seg">
+                <button className="on">日线</button>
+                <button>周线</button>
+                <button>月线</button>
+              </span>
+            </span>
+          </h3>
+          {kline.error ? (
+            <Notice text={kline.error} onRetry={kline.reload} retrying={kline.loading} />
+          ) : kline.loading && !kline.data ? (
+            <div className="empty">K线加载中…</div>
+          ) : (
+            <EChart option={klineOption} height={320} />
+          )}
+        </div>
+        <div className="card">
+          <h3>
+            因子得分
+            <span className="hint">{hasRadar && fs ? (stock.valuation?.trade_date ?? '') : '待 G3'}</span>
+          </h3>
+          {hasRadar && fs ? (
+            <EChart option={radarOpt([fs.trend!, fs.value!, fs.quality!, fs.risk!])} height={230} />
+          ) : (
+            <div className="empty" style={{ padding: '52px 0' }}>
+              因子雷达待 G3 后端补齐
             </div>
-            <Row gutter={[16, 16]}>
-              {SUMMARY_ITEMS.map((it) => (
-                <Col xs={12} sm={8} md={6} key={it.key}>
-                  <Statistic title={it.label} value={it.fmt(summary[it.key])} valueStyle={{ fontSize: 18 }} />
-                </Col>
-              ))}
-            </Row>
-          </>
-        ) : (
-          <Empty description="暂无财务数据，待数据回填" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-        )}
-      </Card>
+          )}
+          <table style={{ fontSize: 14 }}>
+            <tbody>
+              <tr>
+                <td style={{ color: 'var(--txt2)' }}>综合分</td>
+                <td className="r num">
+                  {fs?.score !== undefined ? (
+                    <b>{fs.score.toFixed(1)}</b>
+                  ) : (
+                    <span className="muted" title={G3_HINT}>
+                      —
+                    </span>
+                  )}{' '}
+                  / 100
+                </td>
+              </tr>
+              <tr>
+                <td style={{ color: 'var(--txt2)' }}>横截面排名</td>
+                <td className="r num">
+                  {fs?.rank !== undefined ? (
+                    fs.rank
+                  ) : (
+                    <span className="muted" title={G3_HINT}>
+                      —
+                    </span>
+                  )}
+                </td>
+              </tr>
+              <tr>
+                <td style={{ color: 'var(--txt2)' }}>今日信号</td>
+                <td className="r">
+                  {fs?.signal ? <Tag type={mapAction(fs.signal)!} /> : <span className="muted">—</span>}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
 
-      <Card title="财务明细（近 20 期）" size="small" style={{ marginTop: 16 }}>
-        <Table<FinancialItem>
-          rowKey="report_date"
-          columns={FINANCIAL_COLUMNS}
-          dataSource={financial}
-          size="small"
-          pagination={tablePagination()}
-          locale={{ emptyText: '暂无财务数据' }}
-        />
-      </Card>
-    </div>
+      {/* 财务 + 信号历史 */}
+      <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+        <div className="card">
+          <h3>
+            财务指标<span className="hint">按公告日对齐 · 防未来函数</span>
+          </h3>
+          {fin.error ? (
+            <Notice text={fin.error} onRetry={fin.reload} retrying={fin.loading} />
+          ) : fin.loading && !fin.data ? (
+            <div className="empty">财务加载中…</div>
+          ) : (fin.data?.items ?? []).length === 0 ? (
+            <div className="empty">暂无财务数据</div>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>报告期</th>
+                  <th className="r">ROE</th>
+                  <th className="r">净利同比</th>
+                  <th className="r">毛利率</th>
+                  <th className="r">资产负债率</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(fin.data?.items ?? []).map(f => (
+                  <tr key={f.report_date}>
+                    <td className="num">{f.report_date}</td>
+                    <td className="r num">{fmtPct(f.roe)}</td>
+                    <td className={`r num ${f.profit_growth >= 0 ? 'up' : 'down'}`}>{fmtPct(f.profit_growth)}</td>
+                    <td className="r num">{fmtPct(f.gross_margin)}</td>
+                    <td className="r num">{fmtPct(f.debt_ratio)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+        <div className="card">
+          <h3>
+            信号历史<span className="hint">近 10 个交易日</span>
+          </h3>
+          {sighist.error ? (
+            <Notice text={sighist.error} onRetry={sighist.reload} retrying={sighist.loading} />
+          ) : sighist.loading && !sighist.data ? (
+            <div className="empty">信号加载中…</div>
+          ) : (sighist.data?.items ?? []).length === 0 ? (
+            <div className="empty">暂无信号记录</div>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>日期</th>
+                  <th>动作</th>
+                  <th className="r">综合分</th>
+                  <th className="r">排名</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(sighist.data?.items ?? []).map((h, i) => (
+                  <tr key={i} title={h.reason}>
+                    <td className="num">{h.trade_date}</td>
+                    <td>
+                      <Tag type={mapAction(h.action)!} />
+                    </td>
+                    <td className="r num">{h.score.toFixed(1)}</td>
+                    <td className="r num">
+                      {h.rank !== undefined ? (
+                        h.rank
+                      ) : (
+                        <span className="muted" title={G3_HINT}>
+                          —
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+    </section>
   )
 }
