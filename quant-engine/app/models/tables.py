@@ -11,6 +11,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Time,
     func,
 )
 from sqlalchemy.orm import declarative_base
@@ -189,3 +190,125 @@ class BacktestResult(Base):
     excess_return = Column(Numeric(10, 4))
     nav = Column(JSON)  # JSONB [{"date","nav","benchmark"}]
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class TaskRun(Base):
+    """任务执行记录（监控/对账数据源；backend GORM 侧有同构模型，DDL 以 init.sql 为准）"""
+
+    __tablename__ = "task_run"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    task_name = Column(String(64), nullable=False)
+    run_date = Column(Date, nullable=False)
+    status = Column(String(16), nullable=False)  # success / skipped / failed
+    message = Column(String)
+    detail = Column(JSON)  # 结构化明细（供页面 / 后续大模型消费）
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class NotifyConfig(Base):
+    """通知事件配置（页面可改：开关 / 调度类型 / 周几 / 发送时间）"""
+
+    __tablename__ = "notify_config"
+
+    event_key = Column(String, primary_key=True)
+    name = Column(String(50), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    schedule_type = Column(String(16), nullable=False, default="trading_day")  # weekday/trading_day/event
+    weekdays = Column(String)  # '1,2,3,4,5'（1=周一..7=周日）
+    send_at = Column(Time)  # 定时发送时刻；event 型为 NULL
+    template = Column(String(16), nullable=False, default="blue")
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class AppConfig(Base):
+    """应用配置键值表（飞书 + 大模型预留，页面可改；值以库为准）"""
+
+    __tablename__ = "app_config"
+
+    key = Column(String, primary_key=True)
+    value = Column(String)
+    value_type = Column(String(16), nullable=False, default="string")  # bool/int/string/secret
+    description = Column(String)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class MarketHotspot(Base):
+    """市场热点快照（早盘简报数据源，Issue #4）：collector 08:45 采集落库，
+    sections 结构与 collector 侧 MarketHotspot 一致（indices/sectors_gain/sectors_flow/hot_stocks）"""
+
+    __tablename__ = "market_hotspot"
+
+    spot_date = Column(Date, primary_key=True)
+    sections = Column(JSON, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class MorningBrief(Base):
+    """早盘简报正文（Issue #4）：quant-engine 09:10 组装落库，
+    sections JSONB 结构见 app/morning_brief.py assemble_brief"""
+
+    __tablename__ = "morning_brief"
+
+    brief_date = Column(Date, primary_key=True)
+    sections = Column(JSON, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class Position(Base):
+    """持仓（只读，早报/日报持仓节数据源；DDL 以 init.sql 为准）"""
+
+    __tablename__ = "position"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    account_id = Column(BigInteger, nullable=False)
+    code = Column(String(10), nullable=False)
+    quantity = Column(Integer, nullable=False)
+    available_qty = Column(Integer, nullable=False)
+    cost_price = Column(Numeric(10, 2))
+    current_price = Column(Numeric(10, 2))
+    market_value = Column(Numeric(15, 2))
+    profit = Column(Numeric(15, 2))
+    profit_rate = Column(Numeric(8, 4))
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=datetime.now)
+
+
+class AccountNav(Base):
+    """账户净值快照（只读；DDL 以 init.sql 为准）"""
+
+    __tablename__ = "account_nav"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    account_id = Column(BigInteger, nullable=False)
+    trade_date = Column(Date, nullable=False)
+    total_asset = Column(Numeric(15, 2))
+    cash = Column(Numeric(15, 2))
+    market_value = Column(Numeric(15, 2))
+    nav = Column(Numeric(10, 6))
+    daily_return = Column(Numeric(8, 4))
+    drawdown = Column(Numeric(8, 4))
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class Order(Base):
+    """委托单（只读；order 为 SQL 关键字，表名加引号）"""
+
+    __tablename__ = "order"
+    __table_args__ = {"quote": True}
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    order_id = Column(String(36), unique=True, nullable=False)
+    account_id = Column(BigInteger, nullable=False)
+    code = Column(String(10), nullable=False)
+    direction = Column(String(10), nullable=False)  # BUY / SELL
+    order_type = Column(String(10), default="LIMIT")
+    price = Column(Numeric(10, 2))
+    quantity = Column(Integer, nullable=False)
+    filled_qty = Column(Integer, default=0)
+    avg_fill_price = Column(Numeric(10, 2), default=0)
+    status = Column(String(20), default="PENDING")
+    reason = Column(String)
+    source = Column(String(20), default="strategy")
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=datetime.now)

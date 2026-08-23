@@ -274,3 +274,140 @@ export interface SignalHistoryData {
   code: string
   items: SignalHistoryItem[]
 }
+
+// ---- 通知与任务监控（Issue #5）----
+
+export type NotifyScheduleType = 'weekday' | 'trading_day' | 'event'
+
+export interface NotifyEvent {
+  event_key: string
+  name: string
+  enabled: boolean
+  schedule_type: NotifyScheduleType
+  weekdays: string // '1,2,3,4,5'（1=周一..7=周日）
+  send_at: string | null // HH:MM；event 型为 null
+  template: string // 卡片模板色 blue/red/green
+}
+
+export interface FeishuConfig {
+  enabled: boolean
+  webhook_url: string
+  dashboard_url: string
+  timeout: number
+  max_retries: number
+  secret: string // 签名校验密钥；留空=不签名
+  at_all: boolean // 通知卡片 @所有人
+}
+
+export interface NotifyConfigData {
+  events: NotifyEvent[]
+  feishu: FeishuConfig
+}
+
+export type TaskRunStatus = 'success' | 'skipped' | 'failed'
+
+export interface TaskRunItem {
+  id: number
+  task_name: string
+  run_date: string // YYYY-MM-DD
+  status: TaskRunStatus
+  message: string
+  detail: Record<string, unknown> | null
+  created_at: string
+}
+
+export interface TaskRunsData {
+  items: TaskRunItem[]
+}
+
+// 手动触发 ExecuteDay 结果
+export interface ExecuteDayResult {
+  trade_date: string
+  skipped: boolean
+  buy_count: number
+  sell_count: number
+  manual: number
+  rejected: number
+  nav: number
+}
+
+// ---- 早盘简报（Issue #4）----
+
+export interface MorningBriefIndexItem {
+  name: string
+  code: string
+  close: number | null
+  change_pct: number | null // 已是百分比数值（0.22 = 0.22%）
+}
+
+export interface MorningBriefSectorGainItem {
+  name: string
+  change_pct: number | null
+  leader: string | null
+}
+
+export interface MorningBriefSectorFlowItem {
+  name: string
+  net_inflow: string | null // 已格式化字符串（"7.82亿"）
+}
+
+export interface MorningBriefHotStockItem {
+  rank: number
+  code: string
+  name: string
+  change_pct: number | null
+  board_days?: number // 涨停池兜底时有（连板数）
+  industry?: string | null
+}
+
+export interface MorningBriefMarket {
+  indices: MorningBriefIndexItem[]
+  sectors_gain: MorningBriefSectorGainItem[]
+  sectors_flow: MorningBriefSectorFlowItem[]
+  hot_stocks: MorningBriefHotStockItem[]
+}
+
+export interface MorningBriefTradeOrder {
+  code: string
+  direction: 'BUY' | 'SELL'
+  price: number | null
+  quantity: number
+}
+
+export interface MorningBriefYesterday {
+  signal: { total: number; counts: Record<string, number>; top_buys: string[] }
+  trade: {
+    buy_count: number
+    sell_count: number
+    orders: MorningBriefTradeOrder[]
+    message?: string
+  }
+  nav: { nav: number | null; daily_return: number | null; drawdown: number | null; total_asset: number | null }
+  data_health: { overall: string; fail: number; warn: number; message: string }
+  tasks: { task_name: string; status: string; message: string | null }[]
+}
+
+export interface MorningBriefToday {
+  checklist: { time: string; task: string }[]
+  positions: {
+    code: string
+    name: string
+    quantity: number
+    market_value: number | null
+    profit_rate: number | null
+  }[]
+}
+
+export interface MorningBriefSections {
+  brief_date: string
+  trade_date: string
+  is_open_today: boolean
+  market: MorningBriefMarket
+  yesterday: MorningBriefYesterday
+  today: MorningBriefToday
+}
+
+export interface MorningBriefData {
+  brief_date: string
+  sections: MorningBriefSections
+}

@@ -11,7 +11,10 @@ import (
 
 // SetupRouter 注册全部路由
 func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
-	navSvc *service.NavService, initialCash float64) *gin.Engine {
+	navSvc *service.NavService, initialCash float64,
+	taskRunSvc *service.TaskRunService, notifySvc *service.NotifyService,
+	executeSvc *service.ExecuteService,
+	briefSvc *service.MorningBriefService) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
 
@@ -56,6 +59,17 @@ func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
 		v1.GET("/backtests", handler.GetBacktests(backtestSvc))
 		v1.POST("/backtests", handler.CreateBacktest(backtestSvc))
 		v1.GET("/backtests/:id", handler.GetBacktestDetail(backtestSvc))
+
+		// 通知与任务监控（Issue #5）
+		v1.GET("/notify/config", handler.GetNotifyConfig(notifySvc))
+		v1.PUT("/notify/config/:event", handler.UpdateNotifyEvent(notifySvc))
+		v1.PUT("/notify/config/feishu", handler.UpdateFeishuConfig(notifySvc))
+		v1.POST("/notify/test", handler.SendTestCard(notifySvc))
+		v1.GET("/tasks/runs", handler.GetTaskRuns(taskRunSvc))
+		v1.POST("/trading/execute-day", handler.ManualExecuteDay(executeSvc))
+
+		// 早盘简报（Issue #4）
+		v1.GET("/morning-brief", handler.GetMorningBrief(briefSvc))
 	}
 
 	return r
