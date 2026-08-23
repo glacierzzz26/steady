@@ -99,3 +99,165 @@ func stockSortClause(sort, order string) string {
 	}
 	return col + " ASC NULLS LAST"
 }
+
+// ---- G2 列表扩展：行情 / 估值 / 财务（批量一次 JOIN，避免 N+1）----
+// 缺失字段一律为 nil（前端空态「—」，不造假）
+
+// PoolMarket 最新行情（G2）：price / chg(%) / amount(元)
+type PoolMarket struct {
+	Price  *float64
+	Chg    *float64
+	Amount *float64
+}
+
+// GetPoolMarket 批量最新行情 + 涨跌幅
+// chg = 相对前一交易日收盘的百分比（daily_price 无涨跌列，需 LAG(close) 现算）
+func (r *StockRepository) GetPoolMarket(codes []string) (map[string]*PoolMarket, error) {
+	out := make(map[string]*PoolMarket, len(codes))
+	if len(codes) == 0 {
+		return out, nil
+	}
+	type row struct {
+		Code   string
+		Price  float64
+		Chg    *float64
+		Amount float64
+	}
+	var rows []row
+	err := r.db.Raw(`
+		WITH ranked AS (
+			SELECT code, close, amount,
+				LAG(close) OVER (PARTITION BY code ORDER BY trade_date) AS prev_close,
+				ROW_NUMBER() OVER (PARTITION BY code ORDER BY trade_date DESC) AS rn
+			FROM daily_price
+			WHERE code IN (?)
+		)
+		SELECT code, close AS price, amount,
+			CASE WHEN prev_close IS NOT NULL AND prev_close > 0
+				 THEN (close / prev_close - 1) * 100 END AS chg
+		FROM ranked WHERE rn = 1`, codes).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, rr := range rows {
+		out[rr.Code] = &PoolMarket{Price: &rr.Price, Chg: rr.Chg, Amount: &rr.Amount}
+	}
+	return out, nil
+}
+
+// PoolValuation 最新估值（G2）：pe_ttm / pb
+type PoolValuation struct {
+	Pe *float64
+	Pb *float64
+}
+
+// GetPoolValuation 批量最新日度估值（trade_date 倒序取最近一条）
+func (r *StockRepository) GetPoolValuation(codes []string) (map[string]*PoolValuation, error) {
+	out := make(map[string]*PoolValuation, len(codes))
+	if len(codes) == 0 {
+		return out, nil
+	}
+	type row struct {
+		Code string
+		Pe   *float64
+		Pb   *float64
+	}
+	var rows []row
+	err := r.db.Raw(`
+		WITH ranked AS (
+			SELECT code, pe_ttm, pb,
+				ROW_NUMBER() OVER (PARTITION BY code ORDER BY trade_date DESC) AS rn
+			FROM daily_valuation
+			WHERE code IN (?)
+		)
+		SELECT code, pe_ttm AS pe, pb FROM ranked
+		WHERE rn = 1 AND (pe_ttm IS NOT NULL OR pb IS NOT NULL)`, codes).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, rr := range rows {
+		out[rr.Code] = &PoolValuation{Pe: rr.Pe, Pb: rr.Pb}
+	}
+	return out, nil
+}
+
+// GetNames 批量查询股票名称（G4 委托/成交补名用），key: code；查不到的代码缺失
+func (r *StockRepository) GetNames(codes []string) (map[string]string, error) {
+	out := make(map[string]string, len(codes))
+	if len(codes) == 0 {
+		return out, nil
+	}
+	type row struct {
+		Code string
+		Name string
+	}
+	var rows []row
+	err := r.db.Model(&model.StockBasic{}).
+		Select("code, name").
+		Where("code IN (?)", codes).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, rr := range rows {
+		out[rr.Code] = rr.Name
+	}
+	return out, nil
+}
+
+// GetIndustries 批量查询股票行业（风控行业集中度用），key: code；查不到的代码缺失
+func (r *StockRepository) GetIndustries(codes []string) (map[string]string, error) {
+	out := make(map[string]string, len(codes))
+	if len(codes) == 0 {
+		return out, nil
+	}
+	type row struct {
+		Code     string
+		Industry string
+	}
+	var rows []row
+	err := r.db.Model(&model.StockBasic{}).
+		Select("code, industry").
+		Where("code IN (?)", codes).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, rr := range rows {
+		out[rr.Code] = rr.Industry
+	}
+	return out, nil
+}
+
+// PoolFinancial 财务摘要（G2）：roe（公告日最新，同详情口径）
+type PoolFinancial struct {
+	Roe *float64
+}
+
+// GetPoolFinancial 批量最新 ROE（announce_date DESC, report_date DESC 取最近一条）
+func (r *StockRepository) GetPoolFinancial(codes []string) (map[string]*PoolFinancial, error) {
+	out := make(map[string]*PoolFinancial, len(codes))
+	if len(codes) == 0 {
+		return out, nil
+	}
+	type row struct {
+		Code string
+		Roe  *float64
+	}
+	var rows []row
+	err := r.db.Raw(`
+		WITH ranked AS (
+			SELECT code, roe,
+				ROW_NUMBER() OVER (PARTITION BY code ORDER BY announce_date DESC, report_date DESC) AS rn
+			FROM financial_indicator
+			WHERE code IN (?) AND announce_date IS NOT NULL
+		)
+		SELECT code, roe FROM ranked WHERE rn = 1 AND roe IS NOT NULL`, codes).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, rr := range rows {
+		out[rr.Code] = &PoolFinancial{Roe: rr.Roe}
+	}
+	return out, nil
+}

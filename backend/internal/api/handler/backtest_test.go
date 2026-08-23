@@ -65,34 +65,40 @@ func TestIndexNavItems(t *testing.T) {
 	}
 }
 
-// TestBacktestServiceValidation 校验链在 repo 调用前触发（nil repo 足够测错误分支）
+// TestBacktestServiceValidation 校验链在 repo/strategy 解析前触发（nil repo 足够测错误分支）
 func TestBacktestServiceValidation(t *testing.T) {
-	svc := service.NewBacktestService(nil)
+	svc := service.NewBacktestService(nil, nil)
 	parse := func(s string) time.Time {
 		tm, _ := time.Parse("2006-01-02", s)
 		return tm
 	}
 
 	t.Run("起始晚于结束", func(t *testing.T) {
-		_, err := svc.CreateJob(parse("2026-08-19"), parse("2026-08-01"), 20)
+		_, err := svc.CreateJob(parse("2026-08-19"), parse("2026-08-01"), 20, "", "")
 		if err != service.ErrBacktestRange {
 			t.Fatalf("err = %v, want ErrBacktestRange", err)
 		}
 	})
 
 	t.Run("区间超5年", func(t *testing.T) {
-		_, err := svc.CreateJob(parse("2020-01-01"), parse("2026-08-01"), 20)
+		_, err := svc.CreateJob(parse("2020-01-01"), parse("2026-08-01"), 20, "", "")
 		if err != service.ErrBacktestSpan {
 			t.Fatalf("err = %v, want ErrBacktestSpan", err)
 		}
 	})
 
 	t.Run("topN 越界", func(t *testing.T) {
-		if _, err := svc.CreateJob(parse("2026-01-01"), parse("2026-08-01"), 0); err != service.ErrBacktestTopN {
+		if _, err := svc.CreateJob(parse("2026-01-01"), parse("2026-08-01"), 0, "", ""); err != service.ErrBacktestTopN {
 			t.Fatalf("topN=0 err = %v, want ErrBacktestTopN", err)
 		}
-		if _, err := svc.CreateJob(parse("2026-01-01"), parse("2026-08-01"), 51); err != service.ErrBacktestTopN {
+		if _, err := svc.CreateJob(parse("2026-01-01"), parse("2026-08-01"), 51, "", ""); err != service.ErrBacktestTopN {
 			t.Fatalf("topN=51 err = %v, want ErrBacktestTopN", err)
+		}
+	})
+
+	t.Run("fill_mode 非法", func(t *testing.T) {
+		if _, err := svc.CreateJob(parse("2026-01-01"), parse("2026-08-01"), 20, "t+0", ""); err != service.ErrBacktestFillMode {
+			t.Fatalf("fill_mode=t+0 err = %v, want ErrBacktestFillMode", err)
 		}
 	})
 }

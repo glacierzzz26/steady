@@ -28,22 +28,33 @@ func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
 	positionRepo := repository.NewPositionRepository(db)
 	tradeRepo := repository.NewTradeRepository(db)
 	backtestRepo := repository.NewBacktestRepository(db)
-	backtestSvc := service.NewBacktestService(backtestRepo)
+	strategyRepo := repository.NewStrategyRepository(db)
+	backtestSvc := service.NewBacktestService(backtestRepo, strategyRepo)
+	strategySvc := service.NewStrategyService(strategyRepo, backtestSvc)
 	tushareSvc := service.NewTushareConfigService(db)
 
 	// 基础路径 /api/v1
 	v1 := r.Group("/api/v1")
 	{
 		v1.GET("/health", handler.HealthCheck(db))
+		v1.GET("/health/checks", handler.GetHealthChecks(taskRunSvc))
+		v1.GET("/health/services", handler.GetServices(db))
+		v1.GET("/health/data-assets", handler.GetDataAssets(db))
 
 		// 股票相关
-		v1.GET("/stocks", handler.GetStockList(stockRepo))
-		v1.GET("/stocks/:code", handler.GetStockDetail(stockRepo, dailyRepo, financialRepo))
+		v1.GET("/stocks", handler.GetStockList(stockRepo, signalRepo))
+		v1.GET("/stocks/:code", handler.GetStockDetail(stockRepo, dailyRepo, financialRepo, signalRepo))
 		v1.GET("/stocks/:code/financial", handler.GetFinancialList(financialRepo, stockRepo))
 		v1.GET("/kline/:code", handler.GetKline(dailyRepo, stockRepo))
 
-		// 策略与信号（Sprint 4）
-		v1.GET("/strategies", handler.GetStrategies(signalRepo))
+		// 策略与信号（Sprint 4；Iteration 4：策略生命周期 CRUD/switch/fork + 因子列表）
+		v1.GET("/strategies", handler.GetStrategies(strategySvc))
+		v1.POST("/strategies", handler.CreateStrategy(strategySvc))
+		v1.PUT("/strategies/:name", handler.UpdateStrategy(strategySvc))
+		v1.POST("/strategies/:name/versions", handler.ForkStrategy(strategySvc))
+		v1.POST("/strategies/:name/switch", handler.SwitchStrategy(strategySvc))
+		v1.GET("/strategies/compare", handler.CompareStrategies(strategySvc)) // §3.3 A/B
+		v1.GET("/factors", handler.GetFactors(strategyRepo))
 		v1.GET("/signals", handler.GetSignals(signalRepo))
 		v1.GET("/signals/:code", handler.GetSignalsByCode(signalRepo, stockRepo))
 
@@ -51,10 +62,10 @@ func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
 		v1.GET("/account", handler.GetAccount(accountRepo, initialCash))
 		v1.GET("/account/nav", handler.GetAccountNav(navSvc, accountRepo))
 		v1.GET("/positions", handler.GetPositions(positionRepo, accountRepo, stockRepo))
-		v1.GET("/orders", handler.GetOrders(orderRepo, accountRepo))
+		v1.GET("/orders", handler.GetOrders(orderRepo, accountRepo, stockRepo))
 		v1.POST("/orders", handler.PlaceOrder(tradingSvc, accountRepo))
 		v1.DELETE("/orders/:id", handler.CancelOrder(tradingSvc, accountRepo))
-		v1.GET("/trades", handler.GetTrades(tradeRepo, accountRepo))
+		v1.GET("/trades", handler.GetTrades(tradeRepo, accountRepo, stockRepo))
 
 		// 指数基准 + 回测任务（Sprint 6）
 		v1.GET("/index/nav/:code", handler.GetIndexNav(dailyRepo))

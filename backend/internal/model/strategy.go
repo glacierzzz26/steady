@@ -39,15 +39,35 @@ type FactorValue struct {
 
 func (FactorValue) TableName() string { return "factor_value" }
 
+// 策略状态（Iteration 4 状态机：draft → backtest → sample → active → paused/archived）
+const (
+	StrategyDraft     = "draft"     // 草稿：可编辑
+	StrategyBacktest  = "backtest"  // 回测验证
+	StrategySample    = "sample"    // 样本外验证
+	StrategyActive    = "active"    // 运行中（唯一，驱动每日信号）
+	StrategyPaused    = "paused"    // 已暂停
+	StrategyArchived  = "archived"  // 已归档（冻结，不可编辑不可激活）
+)
+
 // Strategy 策略（对应表 strategy，factor_weights/params 为 JSONB）
+//
+// Iteration 4 语义：
+// - factor_weights 存**因子级权重映射**（合计 1.0，如 {"ma_trend":0.2,...}），
+//   评分/回测/排名三处同源；factor_definition.weight 降级为新建默认值来源。
+// - 每个版本一条独立记录（name 唯一）；version 列仅作展示/排序，
+//   版本化通过 fork 生成新 name（如 multi_factor_v2）。
+// - 同一时间仅一个 status='active' 的策略（服务层强制）。
 type Strategy struct {
 	ID            uint64         `gorm:"primaryKey"`
 	Name          string         `gorm:"uniqueIndex;size:50;not null"`
+	ZhName        string         `gorm:"size:50"` // 中文名（前端展示）
 	Description   string         `gorm:"type:text"`
+	Version       string         `gorm:"size:20;default:v1.0"`
 	FactorWeights datatypes.JSON `gorm:"type:jsonb"`
 	Params        datatypes.JSON `gorm:"type:jsonb"`
-	Status        string         `gorm:"size:10;default:active"`
+	Status        string         `gorm:"size:10;default:draft"`
 	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 func (Strategy) TableName() string { return "strategy" }

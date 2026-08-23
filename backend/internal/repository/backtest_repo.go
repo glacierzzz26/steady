@@ -16,12 +16,12 @@ func NewBacktestRepository(db *gorm.DB) *BacktestRepository {
 	return &BacktestRepository{db: db}
 }
 
-// CreateJob 创建任务（幂等：同参数已存在直接返回；failed 任务重置为 pending 重跑，
-// 与引擎 backtest_service.create_job 语义一致）
+// CreateJob 创建任务（幂等：同参数同假设已存在直接返回；failed 任务重置为 pending 重跑，
+// 与引擎 backtest_service.create_job 语义一致；fill_mode 纳入唯一键）
 func (r *BacktestRepository) CreateJob(j *model.BacktestJob) (*model.BacktestJob, error) {
 	err := r.db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "strategy_name"}, {Name: "start_date"},
-			{Name: "end_date"}, {Name: "top_n"}},
+			{Name: "end_date"}, {Name: "top_n"}, {Name: "fill_mode"}},
 		DoUpdates: clause.Assignments(map[string]interface{}{
 			"status":      "pending",
 			"error":       nil,
@@ -35,14 +35,14 @@ func (r *BacktestRepository) CreateJob(j *model.BacktestJob) (*model.BacktestJob
 		return nil, err
 	}
 	// 冲突时不返回新行，按参数重新查询
-	return r.GetByParams(j.StrategyName, j.StartDate, j.EndDate, j.TopN)
+	return r.GetByParams(j.StrategyName, j.StartDate, j.EndDate, j.TopN, j.FillMode)
 }
 
 // GetByParams 按唯一键查询
-func (r *BacktestRepository) GetByParams(strategy string, start, end interface{}, topN int) (*model.BacktestJob, error) {
+func (r *BacktestRepository) GetByParams(strategy string, start, end interface{}, topN int, fillMode string) (*model.BacktestJob, error) {
 	var j model.BacktestJob
-	err := r.db.Where("strategy_name = ? AND start_date = ? AND end_date = ? AND top_n = ?",
-		strategy, start, end, topN).First(&j).Error
+	err := r.db.Where("strategy_name = ? AND start_date = ? AND end_date = ? AND top_n = ? AND fill_mode = ?",
+		strategy, start, end, topN, fillMode).First(&j).Error
 	if err != nil {
 		return nil, err
 	}

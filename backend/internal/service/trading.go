@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -154,12 +155,14 @@ func NewTradingService(db *gorm.DB, account config.AccountConfig) *TradingServic
 
 // ExecResult ExecuteDay 执行结果
 type ExecResult struct {
-	TradeDate time.Time
-	Skipped   bool   // 该日已执行（幂等跳过）
-	BuyCount  int    // 策略买入成交数
-	SellCount int    // 策略卖出成交数
-	Manual    int    // 手动单成交数
-	Rejected  int    // 拒绝单数（涨停/跌停/资金不足/未达价等）
+	TradeDate   time.Time
+	Skipped     bool   // 该日已执行（幂等跳过）
+	BuyCount    int    // 策略买入成交数
+	SellCount   int    // 策略卖出成交数
+	Manual      int    // 手动单成交数
+	Rejected    int    // 拒绝单数（涨停/跌停/资金不足/行业集中/未达价等）
+	RiskActions int    // 风控动作数（止损强制卖出；SellCount 之外单独计）
+	Fused       bool   // 当日回撤熔断（跳过策略 BUY）
 }
 
 // ExecuteDay 日终自动执行（单事务）：
@@ -249,39 +252,70 @@ func (s *TradingService) ExecuteDay(accountID uint64, tradeDate time.Time) (*Exe
 	return res, err
 }
 
+// strategyParams 策略执行参数（轮动 + 风控，来自 active 策略 params）
+type strategyParams struct {
+	TopN             int     `json:"top_n"`
+	MaxPositionPct   float64 `json:"max_position_pct"`
+	StopLossPct      float64 `json:"stop_loss_pct"`
+	DrawdownFusePct  float64 `json:"drawdown_fuse_pct"`
+	IndustryLimitPct float64 `json:"industry_limit_pct"`
+}
+
+func defaultStrategyParams() strategyParams {
+	return strategyParams{TopN: 20, MaxPositionPct: 0.20}
+}
+
 // execStrategy 策略信号执行（SELL 先于 BUY，释放现金）
+// Iteration 4 风控：读 active 策略 params（轮动 + stop_loss / drawdown_fuse / industry_limit），
+// 执行顺序 = 止损扫描 → 熔断判断（跳过 BUY）→ SELL → BUY（行业集中检查）。
 func (s *TradingService) execStrategy(tx *gorm.DB, ledger *Ledger, acc *model.Account,
 	res *ExecResult, date time.Time, dr *repository.DailyRepository,
 	sr *repository.SignalRepository, or *repository.OrderRepository,
 	tr *repository.TradeRepository, pr *repository.PositionRepository) error {
 
-	strategy, err := sr.GetStrategy("multi_factor")
+	// 单 active 不变量：GetStrategies() 返回 status='active' 策略（最多一条）
+	actives, err := sr.GetStrategies()
 	if err != nil {
 		return err
 	}
-	topN, maxPct := 20, 0.20
-	if strategy != nil {
-		p := struct {
-			TopN           int     `json:"top_n"`
-			MaxPositionPct float64 `json:"max_position_pct"`
-		}{}
-		if err := json.Unmarshal(strategy.Params, &p); err == nil {
-			if p.TopN > 0 {
-				topN = p.TopN
+	params := defaultStrategyParams()
+	strategyName := "multi_factor"
+	if len(actives) > 0 {
+		st := actives[0]
+		strategyName = st.Name
+		if err := json.Unmarshal(st.Params, &params); err == nil {
+			if params.TopN <= 0 {
+				params.TopN = 20
 			}
-			if p.MaxPositionPct > 0 {
-				maxPct = p.MaxPositionPct
+			if params.MaxPositionPct <= 0 {
+				params.MaxPositionPct = 0.20
 			}
 		}
 	}
 
+	// 1. 止损扫描（策略信号前）：持仓亏损 >= stop_loss_pct → 强制卖出当日可卖量
+	if err := s.stopLossScan(tx, ledger, acc, res, date, params.StopLossPct, dr, or, tr, pr); err != nil {
+		return err
+	}
+
+	// 2. 回撤熔断：组合回撤 >= drawdown_fuse_pct → 当日跳过全部策略 BUY
+	fused, err := s.drawdownFused(tx, acc.ID, date, ledger.TotalAsset(), params.DrawdownFusePct)
+	if err != nil {
+		return err
+	}
+	res.Fused = fused
+
 	exec := func(action string) error {
-		items, err := sr.GetSignals("multi_factor", date, action, 500)
+		if action == model.ActionBuy && fused {
+			return nil // 熔断日 BUY 全跳（SELL/止损照常）
+		}
+		items, err := sr.GetSignals(strategyName, date, action, 500)
 		if err != nil {
 			return err
 		}
 		for _, sg := range items {
-			rejected, err := s.fillStrategy(tx, ledger, acc, res, sg, date, topN, maxPct, dr, or, tr, pr)
+			rejected, err := s.fillStrategy(tx, ledger, acc, res, sg, date,
+				params.TopN, params.MaxPositionPct, params.IndustryLimitPct, dr, or, tr, pr)
 			if err != nil {
 				return err
 			}
@@ -297,9 +331,119 @@ func (s *TradingService) execStrategy(tx *gorm.DB, ledger *Ledger, acc *model.Ac
 	return exec(model.ActionBuy)
 }
 
+// stopLossScan 止损扫描：持仓 profit_rate <= -stop_loss_pct → 强制卖出当日可卖量。
+// 落 strategy 单（reason 前缀「止损」），计入 RiskActions（SellCount/Rejected 之外单独计）。
+func (s *TradingService) stopLossScan(tx *gorm.DB, ledger *Ledger, acc *model.Account,
+	res *ExecResult, date time.Time, stopLossPct float64,
+	dr *repository.DailyRepository, or *repository.OrderRepository,
+	tr *repository.TradeRepository, pr *repository.PositionRepository) error {
+	if stopLossPct <= 0 {
+		return nil
+	}
+	for code, pos := range ledger.positions {
+		if pos.AvailableQty <= 0 {
+			continue
+		}
+		profitRate := (pos.CurrentPrice - pos.CostPrice) / pos.CostPrice
+		if profitRate > -stopLossPct {
+			continue
+		}
+		closePrice, err := s.barClose(dr, code, date)
+		if err != nil {
+			return err
+		}
+		if closePrice == nil { // 停牌：保留持仓，次日再扫
+			continue
+		}
+		prevClose, _, err := dr.GetPrevClose(code, date)
+		if err != nil {
+			return err
+		}
+		if !s.broker.CheckPriceLimit(code, *closePrice, prevClose, model.ActionSell) {
+			if err := or.Create(s.rejectedOrder(acc.ID, code, model.ActionSell,
+				*closePrice, pos.AvailableQty, "跌停无法成交", "止损", date)); err != nil {
+				return err
+			}
+			res.Rejected++
+			continue
+		}
+		execPrice := s.broker.SellExecPrice(*closePrice)
+		qty := pos.AvailableQty
+		amount := Round2(execPrice * float64(qty))
+		commission := Round2(s.broker.Commission(amount))
+		tax := Round2(s.broker.Tax(amount))
+		if err := ledger.Sell(code, execPrice, qty, commission, tax); err != nil {
+			return err
+		}
+		reason := fmt.Sprintf("止损：亏损 %.1f%% 强制卖出", profitRate*-100)
+		if err := s.recordFill(tx, acc.ID, code, model.ActionSell, execPrice, qty,
+			commission, tax, date, "strategy", reason, or, tr); err != nil {
+			return err
+		}
+		res.RiskActions++
+		if err := s.savePosition(pr, acc.ID, pos); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// drawdownFused 回撤熔断：回撤幅度 = (历史峰值 − 当前总资产)/历史峰值 >= fuse_pct
+// 历史峰值取 account_nav 中 trade_date <= 当日 的 MAX total_asset（含当日）。
+// 注意：回撤按幅度计（当前资产低于峰值才触发），否则下跌时 (total-peak) 为负恒不触发。
+func (s *TradingService) drawdownFused(tx *gorm.DB, accountID uint64, date time.Time,
+	totalAsset, fusePct float64) (bool, error) {
+	if fusePct <= 0 {
+		return false, nil
+	}
+	peak, err := repository.NewAccountNavRepository(tx).GetPeakTotalAsset(accountID, date)
+	if err != nil {
+		return false, err
+	}
+	if peak <= 0 {
+		return false, nil
+	}
+	drawdown := (peak - totalAsset) / peak
+	return drawdown >= fusePct, nil
+}
+
+// industryOverLimit 行业集中度：加仓后该行业市值占比 > limit_pct → 拒单
+func (s *TradingService) industryOverLimit(tx *gorm.DB, ledger *Ledger, code string,
+	execPrice float64, qty int, limitPct float64) (bool, error) {
+	if limitPct <= 0 || qty <= 0 {
+		return false, nil
+	}
+	stock, err := repository.NewStockRepository(tx).GetByCode(code)
+	if err != nil {
+		return false, err
+	}
+	if stock == nil || stock.Industry == "" {
+		return false, nil
+	}
+	// 同行业持仓市值（含目标股票若已有仓位）
+	var industryMV float64
+	for c, pos := range ledger.positions {
+		if c == code {
+			industryMV += pos.MarketValue()
+			continue
+		}
+		other, err := repository.NewStockRepository(tx).GetByCode(c)
+		if err != nil {
+			return false, err
+		}
+		if other != nil && other.Industry == stock.Industry {
+			industryMV += pos.MarketValue()
+		}
+	}
+	// 加仓后 = 同行业市值 + 本次买入额（毛额，近似）
+	after := (industryMV + execPrice*float64(qty)) / ledger.TotalAsset()
+	return after > limitPct, nil
+}
+
 // fillStrategy 单笔策略信号撮合；rejected 非空表示拒单原因；成交笔数累计到 res
 func (s *TradingService) fillStrategy(tx *gorm.DB, ledger *Ledger, acc *model.Account,
 	res *ExecResult, sg repository.SignalItem, date time.Time, topN int, maxPct float64,
+	industryLimitPct float64,
 	dr *repository.DailyRepository, or *repository.OrderRepository,
 	tr *repository.TradeRepository, pr *repository.PositionRepository) (string, error) {
 
@@ -362,6 +506,18 @@ func (s *TradingService) fillStrategy(tx *gorm.DB, ledger *Ledger, acc *model.Ac
 	}
 	execPrice := s.broker.BuyExecPrice(*closePrice)
 	qty := ledger.SizeBuyQty(*closePrice, topN, maxPct)
+	// 行业集中度（BUY 撮合前）：加仓后该行业市值占比超限 → 拒单
+	over, err := s.industryOverLimit(tx, ledger, sg.Code, execPrice, qty, industryLimitPct)
+	if err != nil {
+		return "", err
+	}
+	if over {
+		if err := or.Create(s.rejectedOrder(acc.ID, sg.Code, model.ActionBuy, *closePrice,
+			qty, "行业集中超限", sg.Reason, date)); err != nil {
+			return "", err
+		}
+		return "行业集中超限", nil
+	}
 	for qty > 0 { // 资金不足逐档减 100 股
 		amount := Round2(execPrice * float64(qty))
 		commission := Round2(s.broker.Commission(amount))

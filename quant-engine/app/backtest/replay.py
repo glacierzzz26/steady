@@ -48,8 +48,13 @@ class ReplayStrategy:
         self.buy_buffer = config.get("buy_buffer", 15)
         self.sell_buffer = config.get("sell_buffer", 30)
         self.max_position_pct = config.get("max_position_pct", 0.20)
+        # Iteration 4 风控参数（与 Go execStrategy 同口径，缺省 0 = 规则关闭）
+        self.stop_loss_pct = config.get("stop_loss_pct", 0.0)
+        self.drawdown_fuse_pct = config.get("drawdown_fuse_pct", 0.0)
+        self.industry_limit_pct = config.get("industry_limit_pct", 0.0)
         self.holdings: set = set()
         self.pool: list[str] = []
+        self.industry: dict[str, str] = {}  # {code: industry}，行业集中度用
         # 预计算数据：{code: {dates: np.ndarray(日期), factors: np.ndarray(n×6),
         #                     closes: {date: 原始收盘}}}
         self.series: dict[str, dict] = {}
@@ -58,12 +63,23 @@ class ReplayStrategy:
     # ---------- 预计算 ----------
 
     def preload(self, start: date | str, end: date | str):
-        """加载股票池因子序列与真实价（一次全量，内存重放）"""
+        """加载股票池因子序列与真实价（一次全量，内存重放）
+
+        幂等：已预加载（配对运行时第二个策略实例浅拷贝了 series/grid）直接返回。
+        """
+        if getattr(self, "grid", None):
+            return
         start = date.fromisoformat(start) if isinstance(start, str) else start
         end = date.fromisoformat(end) if isinstance(end, str) else end
         self.pool = sorted(self.db.execute(
             select(StockBasic.code).where(
                 StockBasic.universe.in_(("hs300", "zz500")))).scalars().all())
+        # 行业映射（行业集中度风控用）：pool 内按 code 取 industry，缺失行业码不计
+        self.industry = {
+            code: ind for code, ind in self.db.execute(
+                select(StockBasic.code, StockBasic.industry).where(
+                    StockBasic.code.in_(self.pool)))
+            if ind}
         grid_rows = self.db.execute(
             select(TradeCalendar.cal_date).where(
                 TradeCalendar.cal_date >= start,
@@ -78,17 +94,20 @@ class ReplayStrategy:
         price_start = start - timedelta(days=PRICE_WARMUP_DAYS)
         price_rows = self.db.execute(
             select(DailyPrice.code, DailyPrice.trade_date, DailyPrice.close,
-                   DailyPrice.adj_factor)
+                   DailyPrice.adj_factor, DailyPrice.open)
             .where(DailyPrice.code.in_(self.pool),
                    DailyPrice.trade_date >= price_start,
                    DailyPrice.trade_date <= end)
             .order_by(DailyPrice.code, DailyPrice.trade_date)).all()
         closes: dict[str, list] = {}
+        opens: dict[str, list] = {}
         anchors: dict[str, float] = {}
-        for code, td, close, adj in price_rows:
+        for code, td, close, adj, op in price_rows:
             if close is None or adj is None:
                 continue
             closes.setdefault(code, []).append((td, float(close), float(adj)))
+            if op is not None:
+                opens.setdefault(code, []).append((td, float(op)))
             anchors[code] = float(adj)
         val_rows = self.db.execute(
             select(DailyValuation.code, DailyValuation.trade_date,
@@ -119,21 +138,25 @@ class ReplayStrategy:
         for code in self.pool:
             self.series[code] = self._build_series(
                 code, closes.get(code, []), anchors.get(code),
-                valuations.get(code, []), financials.get(code, []))
+                valuations.get(code, []), financials.get(code, []),
+                opens.get(code, []))
         logger.info("回测预计算完成：%s 只股票 × %s 个交易日",
                     len(self.pool), len(self.grid))
 
     def _build_series(self, code: str, price_rows: list, anchor: float | None,
-                      val_rows: list, fin_rows: list) -> dict:
-        """单只股票：6 因子在回测日期网格上的序列 + 真实收盘价"""
+                      val_rows: list, fin_rows: list, open_rows: list = None) -> dict:
+        """单只股票：6 因子在回测日期网格上的序列 + 真实收盘/开盘价"""
         n = len(self.grid)
         factors = np.full((n, len(ALL_FACTORS)), np.nan)
         closes: dict[date, float] = {}
+        opens: dict[date, float] = {}
         if price_rows and anchor:
             series = pd.Series(
                 [c * adj / anchor for _, c, adj in price_rows],
                 index=[td for td, _, _ in price_rows])
             closes = {td: c for td, c, _ in price_rows}
+            for td, op in (open_rows or []):
+                opens[td] = op
             idx = {"ma_trend": 0, "macd_signal": 1}
             for name, pos in idx.items():
                 fn = ma_trend if name == "ma_trend" else macd_signal
@@ -151,7 +174,7 @@ class ReplayStrategy:
             fin_df = pd.DataFrame(fin_rows)
             factors[:, 4] = self._asof_grid(fin_df, "roe", by="announce_date")
             factors[:, 5] = self._asof_grid(fin_df, "debt_ratio", by="announce_date")
-        return {"factors": factors, "closes": closes}
+        return {"factors": factors, "closes": closes, "opens": opens}
 
     def _asof_grid(self, df: pd.DataFrame, col: str,
                    by: str = "trade_date") -> np.ndarray:
@@ -247,6 +270,13 @@ class ReplayStrategy:
         if s is None:
             return None
         return s["closes"].get(date.fromisoformat(trade_date))
+
+    def open_at(self, code: str, trade_date: str) -> float | None:
+        """当日开盘价（t1_open 成交口径；无 open 视为停牌/数据缺失）"""
+        s = self.series.get(code)
+        if s is None:
+            return None
+        return s["opens"].get(date.fromisoformat(trade_date))
 
     def prev_close_at(self, code: str, trade_date: str) -> float | None:
         """前一交易日收盘价（涨跌停判断；区间首日无前日 → None）"""

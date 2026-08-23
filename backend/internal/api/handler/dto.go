@@ -48,12 +48,24 @@ type valuationDTO struct {
 	Pb        float64 `json:"pb"`
 }
 
-// stockDetailDTO 股票详情：基本信息 + 最新行情 + 财务摘要 + 日度估值（未回填时为 null）
+// stockDetailDTO 股票详情：基本信息 + 最新行情 + 财务摘要 + 日度估值 + 因子得分（未回填时为 null）
 type stockDetailDTO struct {
 	StockBasicDTO
-	LatestBar        *klineItem    `json:"latest_bar"`
-	FinancialSummary *financialDTO `json:"financial_summary"`
-	Valuation        *valuationDTO `json:"valuation"`
+	LatestBar        *klineItem      `json:"latest_bar"`
+	FinancialSummary *financialDTO   `json:"financial_summary"`
+	Valuation        *valuationDTO   `json:"valuation"`
+	FactorScore      *factorScoreDTO `json:"factor_score"`
+}
+
+// factorScoreDTO 个股因子得分（G3）：最新信号 + 横截面排名 + 四因子分项（与 G1 同源，缺失为 null）
+type factorScoreDTO struct {
+	Score   float64  `json:"score"`
+	Rank    *int     `json:"rank"`
+	Signal  string   `json:"signal"`
+	Trend   *float64 `json:"trend"`
+	Value   *float64 `json:"value"`
+	Quality *float64 `json:"quality"`
+	Risk    *float64 `json:"risk"`
 }
 
 // accountDTO 模拟账户卡（Sprint 5）
@@ -91,10 +103,11 @@ type positionDTO struct {
 	ProfitRate   float64 `json:"profit_rate"`
 }
 
-// orderDTO 委托单条
+// orderDTO 委托单条（G4：name 补股票名称，缺失为空串，前端 name||code 兜底）
 type orderDTO struct {
 	OrderID      string  `json:"order_id"`
 	Code         string  `json:"code"`
+	Name         string  `json:"name"`
 	Direction    string  `json:"direction"`
 	OrderType    string  `json:"order_type"`
 	Price        float64 `json:"price"`
@@ -107,11 +120,12 @@ type orderDTO struct {
 	CreatedAt    string  `json:"created_at"`
 }
 
-// tradeDTO 成交单条
+// tradeDTO 成交单条（G4：name 补股票名称，缺失为空串，前端 name||code 兜底）
 type tradeDTO struct {
 	TradeID    string  `json:"trade_id"`
 	OrderID    string  `json:"order_id"`
 	Code       string  `json:"code"`
+	Name       string  `json:"name"`
 	Direction  string  `json:"direction"`
 	Price      float64 `json:"price"`
 	Quantity   int     `json:"quantity"`

@@ -11,28 +11,6 @@ import (
 	"quant-system/backend/pkg/response"
 )
 
-// GetStrategies 策略列表（活跃策略）
-func GetStrategies(signalRepo *repository.SignalRepository) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		items, err := signalRepo.GetStrategies()
-		if err != nil {
-			response.Fail(c, http.StatusInternalServerError, response.CodeInternalError, "查询失败")
-			return
-		}
-		out := make([]gin.H, 0, len(items))
-		for _, s := range items {
-			out = append(out, gin.H{
-				"name":           s.Name,
-				"description":    s.Description,
-				"factor_weights": s.FactorWeights,
-				"params":         s.Params,
-				"status":         s.Status,
-			})
-		}
-		response.OK(c, gin.H{"items": out})
-	}
-}
-
 // GetSignals 策略信号列表（分页）
 // ?strategy=multi_factor&date=2026-08-19&action=BUY&page=1&page_size=100
 // date 缺省 = 最近一期；无信号返回空 items（仍 200）
@@ -90,6 +68,13 @@ func GetSignals(signalRepo *repository.SignalRepository) gin.HandlerFunc {
 			out = append(out, gin.H{
 				"code": it.Code, "name": it.Name, "score": it.Score,
 				"action": it.Action, "reason": it.Reason,
+				"rank":    it.Rank,
+				"trend":   it.Trend,
+				"value":   it.Value,
+				"quality": it.Quality,
+				"risk":    it.Risk,
+				"pe":      it.Pe,
+				"chg20":   it.Chg20,
 			})
 		}
 		response.OK(c, gin.H{
@@ -132,12 +117,26 @@ func GetSignalsByCode(signalRepo *repository.SignalRepository,
 			response.Fail(c, http.StatusInternalServerError, response.CodeInternalError, "查询失败")
 			return
 		}
+		// G3：为每条历史信号补充该交易日的横截面排名
+		dates := make([]time.Time, len(items))
+		for i, it := range items {
+			dates[i] = it.TradeDate
+		}
+		ranks, err := signalRepo.GetSignalsRankByDates(code, dates)
+		if err != nil {
+			response.Fail(c, http.StatusInternalServerError, response.CodeInternalError, "查询失败")
+			return
+		}
 		out := make([]gin.H, 0, len(items))
 		for _, it := range items {
-			out = append(out, gin.H{
+			item := gin.H{
 				"trade_date": formatDate(it.TradeDate), "score": it.Score,
 				"action": it.Action, "reason": it.Reason,
-			})
+			}
+			if rk, ok := ranks[formatDate(it.TradeDate)]; ok {
+				item["rank"] = rk
+			}
+			out = append(out, item)
 		}
 		response.OK(c, gin.H{"code": code, "items": out})
 	}

@@ -46,9 +46,11 @@ func main() {
 	}
 	log.Info("数据库连接成功", zap.String("host", cfg.Database.Host))
 
-	// 3.5 自动迁移新增表（task_run / notify_config / app_config / morning_brief，与 init.sql 同构幂等）
+	// 3.5 自动迁移新增表/列（task_run / notify_config / app_config / morning_brief；
+	// Iteration 4 起加入 strategy / backtest_result，列扩展幂等，与 init.sql 同构）
 	if err := db.AutoMigrate(
-		&model.TaskRun{}, &model.NotifyConfig{}, &model.AppConfig{}, &model.MorningBrief{}); err != nil {
+		&model.TaskRun{}, &model.NotifyConfig{}, &model.AppConfig{}, &model.MorningBrief{},
+		&model.Strategy{}, &model.BacktestResult{}); err != nil {
 		log.Fatal("自动迁移失败", zap.Error(err))
 	}
 
