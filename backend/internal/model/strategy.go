@@ -59,7 +59,11 @@ const (
 // - 同一时间仅一个 status='active' 的策略（服务层强制）。
 type Strategy struct {
 	ID            uint64         `gorm:"primaryKey"`
-	Name          string         `gorm:"uniqueIndex;size:50;not null"`
+	// 用 `unique` 而非 `uniqueIndex`：GORM 的 MigrateColumnUnique 判断列唯一性用的是
+	// DB 实际列（生产 strategy.name 有唯一约束 → columnType.Unique()=true），若模型只写 uniqueIndex
+	// 而 field.Unique=false，GORM 会按默认名 uni_strategy_name 去 DROP 约束 → 42704（生产已踩）。
+	// `unique` 与 DB 现状对齐后两个分支都跳过，不增删任何约束/索引，升级/新装均安全。
+	Name          string         `gorm:"unique;size:50;not null"`
 	ZhName        string         `gorm:"size:50"` // 中文名（前端展示）
 	Description   string         `gorm:"type:text"`
 	Version       string         `gorm:"size:20;default:v1.0"`
