@@ -7,7 +7,7 @@ import { backtestApi, signalsApi, type BacktestJobItem } from '../../api'
 import { useApi } from '../../hooks/useApi'
 import { lineOpt } from '../../mock/chartOpt'
 
-const G8_HINT = 'T+1 成交假设待 2.2(G8) 后端补齐'
+const G8_DONE_HINT = 'T+1 开盘为保守假设（无未来函数），已支持（G8）'
 
 /** 回测收益为小数比例（0.382 = 38.2%）→ 带符号百分比 */
 function fmtBtPct(v?: number | null): string {
@@ -15,6 +15,8 @@ function fmtBtPct(v?: number | null): string {
   return `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%`
 }
 const signCls = (v?: number | null) => (v !== undefined && v !== null && v < 0 ? 'down' : 'up')
+/** fill_mode 后端小写 → 前端展示文案 */
+const fillModeLabel = (v?: string) => (v === 't1_open' ? 'T+1开盘' : v === 't_close' ? 'T日收盘' : '--')
 
 const BT_STATUS: Record<string, ['ok' | 'hold' | 'warn', string]> = {
   pending: ['hold', '排队中'],
@@ -28,7 +30,7 @@ export default function Backtest() {
   const [start, setStart] = useState('2019-01-01')
   const [end, setEnd] = useState(() => new Date().toISOString().slice(0, 10))
   const [topN, setTopN] = useState(20)
-  const [fillMode, setFillMode] = useState('T日收盘')
+  const [fillMode, setFillMode] = useState('T+1开盘')
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -63,7 +65,12 @@ export default function Backtest() {
     setSubmitting(true)
     setMsg(null)
     try {
-      const res = await backtestApi.submitBacktest({ start_date: start, end_date: end, top_n: topN })
+      const res = await backtestApi.submitBacktest({
+        start_date: start,
+        end_date: end,
+        top_n: topN,
+        fill_mode: fillMode === 'T+1开盘' ? 't1_open' : 't_close',
+      })
       setMsg({ ok: true, text: `回测任务已提交 job #${res.job_id}（${res.status}）` })
       setSelectedId(res.job_id)
       list.reload()
@@ -127,8 +134,8 @@ export default function Backtest() {
           </div>
           <div style={{ fontSize: 13, color: 'var(--txt3)', margin: '8px 0 14px' }}>
             {fillMode === 'T+1开盘'
-              ? `${G8_HINT}：当前后端仅支持 T 日收盘成交，提交时不传该参数`
-              : 'T+1 开盘为保守假设，可消除未来函数偏差'}
+              ? `${G8_DONE_HINT}；结果自动附 T vs T+1 年化偏差`
+              : 'T 日收盘为乐观假设（含未来函数），仅用于偏差对比'}
           </div>
           <button className="btn pri" style={{ width: '100%', justifyContent: 'center' }} onClick={submit} disabled={submitting || !strategy}>
             {submitting ? '提交中…' : '提交回测任务'}
@@ -170,6 +177,7 @@ export default function Backtest() {
                   <th>策略</th>
                   <th className="r">区间</th>
                   <th className="r">top_n</th>
+                  <th className="r">假设</th>
                   <th className="r">总收益</th>
                   <th className="r">年化</th>
                   <th className="r">最大回撤</th>
@@ -193,6 +201,7 @@ export default function Backtest() {
                       <td>{j.strategy_name}</td>
                       <td className="r num">{`${j.start_date}~${j.end_date}`}</td>
                       <td className="r num">{j.top_n}</td>
+                      <td className="r num">{fillModeLabel(j.fill_mode)}</td>
                       <td className={`r num ${signCls(j.total_return)}`}>{fmtBtPct(j.total_return)}</td>
                       <td className={`r num ${signCls(j.annualized_return)}`}>{fmtBtPct(j.annualized_return)}</td>
                       <td className="r num">{fmtBtPct(j.max_drawdown)}</td>
@@ -208,7 +217,7 @@ export default function Backtest() {
             </table>
           )}
           <div style={{ marginTop: 10, fontSize: 13, color: 'var(--txt3)' }}>
-            fill_mode / 偏差 / 换手字段{G8_HINT}，后端落地后自动点亮
+            fill_mode / T+1 偏差已点亮（G8）；换手字段待 Iteration 4
           </div>
         </div>
       </div>
@@ -217,7 +226,7 @@ export default function Backtest() {
       <div className="card">
         <h3>
           {d
-            ? `回测 #${d.id} · ${d.strategy_name} · ${d.start_date}~${d.end_date} · top_n ${d.top_n}`
+            ? `回测 #${d.id} · ${d.strategy_name} · ${d.start_date}~${d.end_date} · top_n ${d.top_n} · ${fillModeLabel(d.fill_mode)}`
             : '回测详情'}
           <span className="hint">
             {dStatus ? (
@@ -240,12 +249,13 @@ export default function Backtest() {
         ) : (
           <>
             <EChart option={navOption} height={280} />
-            <div className="grid" style={{ gridTemplateColumns: 'repeat(5,1fr)', marginTop: 14 }}>
+            <div className="grid" style={{ gridTemplateColumns: 'repeat(6,1fr)', marginTop: 14 }}>
               <Kpi lb="总收益" v={fmtBtPct(d.total_return)} vClass={signCls(d.total_return)} d={`基准 ${fmtBtPct(d.benchmark_return)}`} style={{ border: 0, background: 'var(--panel2)' }} />
               <Kpi lb="年化收益" v={fmtBtPct(d.annualized_return)} vClass={signCls(d.annualized_return)} d={`${d.trading_days} 个交易日`} style={{ border: 0, background: 'var(--panel2)' }} />
               <Kpi lb="最大回撤" v={fmtBtPct(d.max_drawdown)} d="全程" style={{ border: 0, background: 'var(--panel2)' }} />
               <Kpi lb="夏普" v={d.sharpe ? d.sharpe.toFixed(2) : '--'} d={`最终资产 ¥${d.final_value.toLocaleString('zh-CN', { maximumFractionDigits: 0 })}`} style={{ border: 0, background: 'var(--panel2)' }} />
               <Kpi lb="超额收益" v={fmtBtPct(d.excess_return)} vClass={signCls(d.excess_return)} d={`${d.trades} 笔交易 · ${d.positions} 只持仓`} style={{ border: 0, background: 'var(--panel2)' }} />
+              <Kpi lb="T+1偏差" v={fmtBtPct(d.t1_deviation)} vClass={signCls(d.t1_deviation)} d="年化（t1_open−t_close）" style={{ border: 0, background: 'var(--panel2)' }} />
             </div>
           </>
         )}

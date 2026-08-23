@@ -16,12 +16,18 @@ logger = logging.getLogger(__name__)
 class BacktestEngine:
     """回测引擎：逐日跑策略 → 按信号成交（含 T+1/涨跌停/手续费）→ 净值曲线
 
+    fill_mode 成交假设（Iteration 3 · G8）：
+    - t_close：信号 T 日收盘生成、T 日收盘价成交（乐观假设，含未来函数）
+    - t1_open：信号 T 日收盘生成、T+1 开盘价成交（保守假设，无未来函数）
+    t1_open 下 T 日信号暂存 pending_signals，T+1 日循环先执行昨日 pending
+    （以当日开盘价），再生成新信号入队。
+
     strategy 若实现 preload(start, end)（如 ReplayStrategy），引擎自动
-    在 run() 前调用；价格取价优先走 strategy.price_at（复用预加载数据）。
+    在 run() 前调用；价格取价优先走 strategy.price_at/open_at（复用预加载数据）。
     """
 
     def __init__(self, strategy: Strategy, start_date: str, end_date: str,
-                 db=None):
+                 db=None, fill_mode: str = "t_close"):
         if db is None:
             from app.db import get_session
             db = get_session()
@@ -29,9 +35,11 @@ class BacktestEngine:
         self.strategy = strategy
         self.start_date = start_date
         self.end_date = end_date
+        self.fill_mode = fill_mode
         self.portfolio = Portfolio(initial_cash=100000)
         self.broker = Broker()
         self.daily_returns = []
+        self.pending_signals: list = []  # t1_open：T 日信号待 T+1 执行
         self._benchmark_cache: Optional[dict] = None
 
     def _get_trading_dates(self) -> List[str]:
@@ -46,7 +54,7 @@ class BacktestEngine:
         return [d.isoformat() for d in rows]
 
     def _get_price(self, code: str, date: str) -> Optional[float]:
-        """当日真实价（不复权）；优先用策略预加载数据，回退查库"""
+        """当日真实收盘价（不复权）；优先用策略预加载数据，回退查库"""
         if hasattr(self.strategy, "price_at"):
             return self.strategy.price_at(code, date)
         close = self.db.execute(
@@ -54,6 +62,18 @@ class BacktestEngine:
                 DailyPrice.code == code, DailyPrice.trade_date == date)
         ).scalar()
         return float(close) if close is not None else None
+
+    def _get_fill_price(self, code: str, date: str) -> Optional[float]:
+        """成交价：t_close=当日收盘；t1_open=当日开盘（无 open 视为停牌/数据缺失）"""
+        if self.fill_mode == "t1_open":
+            if hasattr(self.strategy, "open_at"):
+                return self.strategy.open_at(code, date)
+            open_ = self.db.execute(
+                select(DailyPrice.open).where(
+                    DailyPrice.code == code, DailyPrice.trade_date == date)
+            ).scalar()
+            return float(open_) if open_ is not None else None
+        return self._get_price(code, date)
 
     def _get_prev_close(self, code: str, date: str) -> Optional[float]:
         """前一交易日收盘价，用于涨跌停判断"""
@@ -90,6 +110,12 @@ class BacktestEngine:
         for pos in self.portfolio.positions.values():
             pos.available_qty = pos.quantity
 
+    def _execute_pending(self, date: str):
+        """t1_open：执行上一交易日收盘生成的信号（以今日开盘价成交）"""
+        pending, self.pending_signals = self.pending_signals, []
+        for signal in pending:
+            self._process_signal(signal, date)
+
     def run(self) -> dict:
         """执行回测并返回报告；策略实现 preload 时先预加载"""
         preload = getattr(self.strategy, "preload", None)
@@ -99,13 +125,21 @@ class BacktestEngine:
             except TypeError:
                 preload()
         dates = self._get_trading_dates()
-        logger.info("回测区间 %s ~ %s，共 %s 个交易日", self.start_date,
-                    self.end_date, len(dates))
+        logger.info("回测区间 %s ~ %s，共 %s 个交易日（fill_mode=%s）",
+                    self.start_date, self.end_date, len(dates), self.fill_mode)
         for date in dates:
             self._unfreeze_t1(date)  # T+1：解冻上一交易日买入
+            if self.fill_mode == "t1_open":
+                # 先执行昨日（T-1 收盘生成的）信号：今日开盘价成交，无未来函数
+                self._execute_pending(date)
             signals = self.strategy.run(date)
-            for signal in signals:
-                self._process_signal(signal, date)
+            if self.fill_mode == "t1_open":
+                # T 日信号仅暂存，T+1 开盘执行；末日在窗口外，天然不成交
+                self.pending_signals = [
+                    s for s in signals if s.action in ("BUY", "SELL")]
+            else:
+                for signal in signals:
+                    self._process_signal(signal, date)
             # 记录每日净值（含基准对比）
             nav = self.portfolio.total_value
             benchmark = self._get_benchmark_nav(date)
@@ -115,7 +149,7 @@ class BacktestEngine:
 
     def _process_signal(self, signal: Signal, date: str):
         if signal.action == "BUY":
-            price = self._get_price(signal.code, date)
+            price = self._get_fill_price(signal.code, date)
             if price is None:  # 停牌/数据缺失：跳过
                 return
             qty = self._calc_quantity(price)
@@ -142,7 +176,7 @@ class BacktestEngine:
                     {"date": date, "code": signal.code, "action": "BUY",
                      "price": round(price, 2), "qty": filled})
         elif signal.action == "SELL":
-            price = self._get_price(signal.code, date)
+            price = self._get_fill_price(signal.code, date)
             pos = self.portfolio.positions.get(signal.code)
             if price is None or not pos or pos.available_qty <= 0:
                 # 停牌/无持仓/T+1 当日买入不可卖：跳过
@@ -177,6 +211,7 @@ class BacktestEngine:
         report = {"start": self.daily_returns[0]["date"],
                   "end": self.daily_returns[-1]["date"],
                   "trading_days": len(navs),
+                  "fill_mode": self.fill_mode,
                   "final_value": round(self.portfolio.total_value, 2),
                   "trades": len(self.portfolio.trades),
                   "positions": len(self.portfolio.positions),
