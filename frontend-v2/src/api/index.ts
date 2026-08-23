@@ -1,0 +1,13 @@
+/** API 层 barrel：http + 类型 + domain 模块 + 转换 */
+export { ApiError, http, API_BASE } from './http'
+export * from './types'
+export { settingsApi } from './settings'
+export { stocksApi } from './stocks'
+export { signalsApi } from './signals'
+export { tradeApi } from './trade'
+export { marketApi } from './market'
+export { opsApi } from './ops'
+export { briefApi } from './brief'
+export { backtestApi } from './backtest'
+export { llmApi } from './llm'
+export { mapAction, mapUniverse } from './transform'
