@@ -32,6 +32,9 @@ logs/
 data/
 backup*.sql
 
+# ---- 开发模式运行产物（host 直跑，不入库）----
+.dev/
+
 # ---- 部署产物（VM 本地状态，不入库）----
 deploy/images/
 deploy/release/
