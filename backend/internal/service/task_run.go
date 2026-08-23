@@ -51,6 +51,20 @@ func (s *TaskRunService) HasRun(taskName string, runDate time.Time) (bool, error
 	return n > 0, err
 }
 
+// GetLatest 指定任务最近一次执行记录；不存在返回 (nil, nil)
+func (s *TaskRunService) GetLatest(taskName string) (*model.TaskRun, error) {
+	var t model.TaskRun
+	err := s.db.Where("task_name = ?", taskName).
+		Order("run_date DESC, created_at DESC").First(&t).Error
+	if err == gorm.ErrRecordNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
 // ListRecent 最近任务执行记录（页面展示）
 func (s *TaskRunService) ListRecent(limit int) ([]model.TaskRun, error) {
 	if limit <= 0 || limit > 100 {

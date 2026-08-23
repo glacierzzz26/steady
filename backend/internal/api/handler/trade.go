@@ -11,8 +11,10 @@ import (
 )
 
 // GetTrades 成交列表（GET /trades?page=&page_size=）
+// G4：items 增加 name（join stock_basic）
 func GetTrades(tradeRepo *repository.TradeRepository,
-	accountRepo *repository.AccountRepository) gin.HandlerFunc {
+	accountRepo *repository.AccountRepository,
+	stockRepo *repository.StockRepository) gin.HandlerFunc {
 
 	return func(c *gin.Context) {
 		acc, err := accountRepo.GetPrimary()
@@ -37,12 +39,23 @@ func GetTrades(tradeRepo *repository.TradeRepository,
 			response.Fail(c, http.StatusInternalServerError, response.CodeInternalError, "查询失败")
 			return
 		}
+		// G4：批量补股票名称（一次 JOIN 避免 N+1）
+		codes := make([]string, len(items))
+		for i, t := range items {
+			codes[i] = t.Code
+		}
+		names, err := stockRepo.GetNames(codes)
+		if err != nil {
+			response.Fail(c, http.StatusInternalServerError, response.CodeInternalError, "查询失败")
+			return
+		}
 		out := make([]tradeDTO, 0, len(items))
 		for _, t := range items {
 			out = append(out, tradeDTO{
 				TradeID:    t.TradeID,
 				OrderID:    t.OrderID,
 				Code:       t.Code,
+				Name:       names[t.Code],
 				Direction:  t.Direction,
 				Price:      t.Price,
 				Quantity:   t.Quantity,

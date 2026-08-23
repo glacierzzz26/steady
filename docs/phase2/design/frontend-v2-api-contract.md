@@ -216,17 +216,21 @@ frontend-v2 把系统定位从「数据监控 + 模拟交易」升级为「个�
 ## 7. 执行状态跟踪
 
 > **2.1 前端接入已于 2026-08-23 完成**（Settings → Backtest 共 9 页接真实 API，`feat/frontend-v2-api` 分支）。缺字段一律按**数据诚实**原则标空态承接（不造假），后端补齐后前端**零返工自动点亮**。G1~G8 的**后端实现**属后续阶段（纯后端代码 + 免费 AkShare，见[数据缺口盘点](frontend-v2-数据缺口盘点.md)），不在 2.1 前端接入范围。
+>
+> **G1~G5/G7 后端实现已于 2026-08-23 按序落地并全链路验证通过**（见下表 ✅）；G6 采集经可行性论证后维持空态（见 G6 采集可行性注记）；G8 属 2.2 阶段未动。前端已接可选字段，零返工自动点亮。
 
 | 缺口 | 归属 | 前端空态(2.1) | 后端实现 |
 |---|---|---|---|
-| G1 /signals 因子分项 | 2.1 | ✅ 列标「—」待 G1 | ⬜ |
-| G2 /stocks 评分池 | 2.1 | ✅ 列标「—」待 G2 | ⬜ |
-| G3 详情因子得分 | 2.1 | ✅ 雷达「待 G3」 | ⬜ |
-| G4 orders/trades 名称 | 2.1 | ✅ name‖code 兜底 | ⬜ |
-| G5 数据健康检查 | 2.1 | ✅ 卡片「待 G5」 | ⬜ |
-| G6 简报表字段 | 2.1 | ✅ 北向/成交/恒生/A50「该能力未产出」 | ⬜（采集走免费 AkShare） |
-| G7 运维页 | 2.1 | ✅ backend/db 真实 + 其余灰显「待 G7」 | ⬜ |
+| G1 /signals 因子分项 | 2.1 | ✅ 列标「—」待 G1 | ✅ 2026-08-23：rank/trend/value/quality/risk/pe/chg20，735/735 排名与 reason 对账一致 |
+| G2 /stocks 评分池 | 2.1 | ✅ 列标「—」待 G2 | ✅ 2026-08-23：price/chg/amount/pe/pb/roe/score/rank/signal，缺数据如实空态 |
+| G3 详情因子得分 | 2.1 | ✅ 雷达「待 G3」 | ✅ 2026-08-23：factor_score（score/rank/signal/分项）+ /signals/:code rank |
+| G4 orders/trades 名称 | 2.1 | ✅ name‖code 兜底 | ✅ 2026-08-23：join stock_basic 批量补 name |
+| G5 数据健康检查 | 2.1 | ✅ 卡片「待 G5」 | ✅ 2026-08-23：/health/checks 7 项（含 pct 比例） |
+| G6 简报表字段 | 2.1 | ✅ 字段映射核对通过（真实 sections 对齐）；北向/两市成交/恒生/A50「该能力未产出」 | ⬜ 采集已论证：见下方 G6 采集可行性注记 |
+| G7 运维页 | 2.1 | ✅ backend/db 真实 + 其余灰显「待 G7」 | ✅ 2026-08-23：/health/services 6 服务探活 + /health/data-assets 21 表行数 |
 | G8 回测 T+1 可信度 | 2.2 | ✅ 表单保留、提交不传 | ⬜ |
 | G9 因子检验分析 | 2.3 | —（页面保留 mock） | ⬜ |
 | G10 因子 CRUD/试算/寻优 | 2.3 | —（页面保留 mock） | ⬜ |
 | G11 策略生命周期+风控 | 2.4 | —（页面保留 mock） | ⬜ |
+
+> **G6 采集可行性注记（2026-08-23 论证，akshare 1.18.94 实测）**：G6 简报表 3 个增强字段中，**北向资金 2024+ 交易所已停止披露**（`stock_hsgt_hist_em` 近期全 NaN；`stock_hsgt_fund_flow_summary_em` 返回 0.0 不可信）；**富时A50 在 akshare 无任何接口**（源码全量 grep 仅无关 SGX 命中；`index_global_spot_em` 的 fs 列表无 A50）；**两市成交**东财源 `stock_zh_index_daily_em`/`stock_zh_a_spot_em` 含成交额列、生产环境可采，但本开发机东财域名直连+代理均被墙（ProxyError/RemoteDisconnected 3×重试全失败）；**恒生指数**新浪源 `stock_hk_index_spot_sina` 实测可取（HSI 26009.459/+1.210），但已归档前端 Brief 页无恒生展示位（top 行仅 A50/北向/两市成交 3 个 KPI，隔夜外盘卡片仅渲染美股）。→ 按数据诚实原则，G6 维持「该能力未产出」空态，不写无法在本机验证的采集代码；待生产环境/东财可达后再落地采集（届时前端已接可选字段、零返工点亮）。

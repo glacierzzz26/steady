@@ -9,11 +9,12 @@ import (
 	"quant-system/backend/pkg/response"
 )
 
-// GetStockDetail 股票详情：基本信息 + 最新行情 + 财务摘要 + 日度估值（公告日最新）
-// 仅股票不存在返回 404；行情/财务/估值未回填时对应字段为 null（仍 200）
+// GetStockDetail 股票详情：基本信息 + 最新行情 + 财务摘要 + 日度估值 + 因子得分（公告日最新）
+// 仅股票不存在返回 404；行情/财务/估值/因子未回填时对应字段为 null（仍 200）
 func GetStockDetail(stockRepo *repository.StockRepository,
 	dailyRepo *repository.DailyRepository,
-	financialRepo *repository.FinancialRepository) gin.HandlerFunc {
+	financialRepo *repository.FinancialRepository,
+	signalRepo *repository.SignalRepository) gin.HandlerFunc {
 
 	return func(c *gin.Context) {
 		code := c.Param("code")
@@ -62,6 +63,23 @@ func GetStockDetail(stockRepo *repository.StockRepository,
 				TradeDate: formatDate(val.TradeDate),
 				PeTtm:     val.PeTtm,
 				Pb:        val.Pb,
+			}
+		}
+		// G3：因子得分（最新信号 + 排名 + 四因子分项；无信号时为 null）
+		fs, err := signalRepo.GetStockFactorScore(code)
+		if err != nil {
+			response.Fail(c, http.StatusInternalServerError, response.CodeInternalError, "查询失败")
+			return
+		}
+		if fs != nil {
+			dto.FactorScore = &factorScoreDTO{
+				Score:   fs.Score,
+				Rank:    fs.Rank,
+				Signal:  fs.Signal,
+				Trend:   fs.Trend,
+				Value:   fs.Value,
+				Quality: fs.Quality,
+				Risk:    fs.Risk,
 			}
 		}
 		response.OK(c, dto)

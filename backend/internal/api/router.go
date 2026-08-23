@@ -35,10 +35,13 @@ func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
 	v1 := r.Group("/api/v1")
 	{
 		v1.GET("/health", handler.HealthCheck(db))
+		v1.GET("/health/checks", handler.GetHealthChecks(taskRunSvc))
+		v1.GET("/health/services", handler.GetServices(db))
+		v1.GET("/health/data-assets", handler.GetDataAssets(db))
 
 		// 股票相关
-		v1.GET("/stocks", handler.GetStockList(stockRepo))
-		v1.GET("/stocks/:code", handler.GetStockDetail(stockRepo, dailyRepo, financialRepo))
+		v1.GET("/stocks", handler.GetStockList(stockRepo, signalRepo))
+		v1.GET("/stocks/:code", handler.GetStockDetail(stockRepo, dailyRepo, financialRepo, signalRepo))
 		v1.GET("/stocks/:code/financial", handler.GetFinancialList(financialRepo, stockRepo))
 		v1.GET("/kline/:code", handler.GetKline(dailyRepo, stockRepo))
 
@@ -51,10 +54,10 @@ func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
 		v1.GET("/account", handler.GetAccount(accountRepo, initialCash))
 		v1.GET("/account/nav", handler.GetAccountNav(navSvc, accountRepo))
 		v1.GET("/positions", handler.GetPositions(positionRepo, accountRepo, stockRepo))
-		v1.GET("/orders", handler.GetOrders(orderRepo, accountRepo))
+		v1.GET("/orders", handler.GetOrders(orderRepo, accountRepo, stockRepo))
 		v1.POST("/orders", handler.PlaceOrder(tradingSvc, accountRepo))
 		v1.DELETE("/orders/:id", handler.CancelOrder(tradingSvc, accountRepo))
-		v1.GET("/trades", handler.GetTrades(tradeRepo, accountRepo))
+		v1.GET("/trades", handler.GetTrades(tradeRepo, accountRepo, stockRepo))
 
 		// 指数基准 + 回测任务（Sprint 6）
 		v1.GET("/index/nav/:code", handler.GetIndexNav(dailyRepo))
