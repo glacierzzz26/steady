@@ -199,6 +199,8 @@ input[type="range"] { accent-color: var(--brand); width: 100%; }
 .wrow:last-child { border-bottom: 0; }
 .wrow .wn { display: flex; align-items: center; gap: 8px; }
 .wrow .wv { font-family: var(--mono); text-align: right; color: #A8C0FF; }
+/* 策略构建器：统一标签列宽（容纳 勾选框+中文名+英文名+徽标），所有滑杆等宽对齐 */
+.builder .wrow { grid-template-columns: 220px 1fr 60px; }
 
 /* timeline */
 .tl { position: relative; padding-left: 22px; }
@@ -213,6 +215,12 @@ input[type="range"] { accent-color: var(--brand); width: 100%; }
 .tl-item.fail::before { border-color: var(--up); }
 .tl-item .t { font-family: var(--mono); font-size: 12px; color: var(--txt3); }
 .tl-item .n { font-size: 13.5px; font-weight: 500; }
+/* 任务时间线展开/收起 */
+.tl-more {
+  margin-top: 2px; padding-top: 10px; border-top: 1px solid var(--line);
+  font-size: 13px; color: var(--brand); cursor: pointer; user-select: none;
+}
+.tl-more:hover { color: #A8C0FF; }
 
 .health { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.035); font-size: 13.5px; }
 .health:last-child { border: 0; }

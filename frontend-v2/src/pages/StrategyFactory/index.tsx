@@ -178,7 +178,7 @@ export default function StrategyFactory() {
 
       {/* 构建器 + 寻优 */}
       <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', marginBottom: 14 }}>
-        <div className="card">
+        <div className="card builder">
           <h3>
             策略构建器 · 多因子轮动 v2 (mf_v2)<span className="hint">骨架固定：轮动 + 缓冲带</span>
           </h3>

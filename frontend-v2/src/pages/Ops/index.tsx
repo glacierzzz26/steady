@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import Notice from '../../components/Notice'
 import { opsApi } from '../../api'
 import { useApi } from '../../hooks/useApi'
@@ -48,6 +49,12 @@ export default function Ops() {
   const backendOk = health.data?.status === 'ok'
   const dbOk = health.data?.db === 'ok'
 
+  // 任务时间线：默认仅展示最近一天，点击展开全部（runs 按 run_date 倒序返回）
+  const [expanded, setExpanded] = useState(false)
+  const firstDay = items[0]?.run_date ?? ''
+  const visible = expanded ? items : items.filter(it => it.run_date === firstDay)
+  const dayCount = new Set(items.map(it => it.run_date)).size
+
   return (
     <section className="page">
       <div className="grid" style={{ gridTemplateColumns: '1fr 1fr 1fr', marginBottom: 14 }}>
@@ -65,8 +72,9 @@ export default function Ops() {
           ) : items.length === 0 ? (
             <div className="empty">暂无任务记录</div>
           ) : (
+            <>
             <div className="tl">
-              {items.map(item => {
+              {visible.map(item => {
                 const [statusText, cls] = STATUS_TEXT[item.status] ?? [item.status, '']
                 const tm = item.created_at || item.run_date
                 return (
@@ -82,6 +90,14 @@ export default function Ops() {
                 )
               })}
             </div>
+            {dayCount > 1 && (
+              <div className="tl-more" onClick={() => setExpanded(e => !e)}>
+                {expanded
+                  ? `收起 · 仅显示 ${firstDay}`
+                  : `展开全部 · 近 ${dayCount} 天 · 共 ${items.length} 条`}
+              </div>
+            )}
+            </>
           )}
         </div>
 
