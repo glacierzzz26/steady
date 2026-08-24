@@ -7,7 +7,7 @@ import Seg from '../../components/Seg'
 import Tag from '../../components/Tag'
 import { mapAction, mapUniverse, stocksApi, type StockListQuery, type StockPoolItem } from '../../api'
 import { useApi } from '../../hooks/useApi'
-import { fmtChg, fmtPct, fmtWanYi } from '../../lib/format'
+import { fmtChg, fmtNum, fmtPct, fmtWanYi } from '../../lib/format'
 
 const POOL_PG = 12
 
@@ -29,14 +29,14 @@ const SORT_TITLE: Record<string, string> = { code: '待 G2', name: '待 G2', lis
 // G2 字段未产出时列头的 title 提示
 const G2_HINT = '待 G2 后端补齐评分/行情'
 
-/** G2 缺口单元格：缺失时显示 — 并带 title 提示 */
+/** G2 缺口单元格：缺失时显示 — 并带 title 提示；数值最多两位小数（功能建议 ⑤） */
 function G2Cell({ v, hint = G2_HINT }: { v?: number | null; hint?: string }) {
   return v === undefined || v === null || Number.isNaN(v) ? (
     <td className="r num muted" title={hint}>
       —
     </td>
   ) : (
-    <td className="r num">{v}</td>
+    <td className="r num">{fmtNum(v)}</td>
   )
 }
 

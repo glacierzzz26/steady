@@ -63,6 +63,15 @@ cd ~/steady-<新版本> && ./install.sh
 
 > ⚠️ 历史教训（2026-08-22 修复）：早期 install.sh 在**新目录**运行，因目录里无 `.env` 会生成新密码，且 compose 按目录名建新项目 → 新建空数据卷，升级数据"看起来丢了"。现已改为自动复用。
 
+## 数据库迁移
+
+生产库由 `init.sql` **只在首次初始化**时建表，升级复用数据卷、不复跑；生产又不用 AutoMigrate → 每次迭代往 schema 加列，旧库不会自动同步（历史上已踩两次 `SQLSTATE 42703 column ... does not exist`：strategy.name、backtest_job.fill_mode）。机制如下：
+
+- **install.sh 在 compose up 后自动调用 `scripts/migrate.sh`**，按序应用 `deploy/migrations/*.sql`：幂等、单事务（失败回滚）、`schema_migrations` 台账记录，已应用过的跳过。
+- **改 schema 的两条规矩**：① 同步更新 `deploy/postgres/init.sql`（全新装用）② 新增幂等迁移文件 `deploy/migrations/NNN_描述.sql`（旧库升级用），随 `build-release.sh` 的 config 包发到 VM。
+- 迁移 SQL 必须**幂等**（additive 用 `ADD COLUMN IF NOT EXISTS`；索引/约束变更用 `DROP ... IF EXISTS` + `CREATE` 结果态一致），因为可能在全新库（已含列）或手工已补列的环境重放。
+- 手动检查漂移：`./scripts/migrate.sh --check`（解析 init.sql 列定义 vs 现库 `information_schema`，有缺列退出码非 0）。
+
 ## 回滚
 
 ```bash

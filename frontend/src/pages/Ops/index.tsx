@@ -2,6 +2,7 @@ import { useState } from 'react'
 import Notice from '../../components/Notice'
 import { opsApi } from '../../api'
 import { useApi } from '../../hooks/useApi'
+import { fmtTask } from '../../lib/names'
 
 const G7_HINT = '待 G7 后端接口'
 
@@ -82,7 +83,7 @@ export default function Ops() {
                     <div className="t">
                       {tm.slice(5, 16)} · {statusText}
                     </div>
-                    <div className="n">{item.task_name}</div>
+                    <div className="n">{fmtTask(item.task_name)}</div>
                     {item.message && (
                       <div style={{ fontSize: 13.5, color: 'var(--txt3)' }}>{item.message}</div>
                     )}

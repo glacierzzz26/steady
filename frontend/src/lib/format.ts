@@ -9,6 +9,12 @@ export function fmtMoney(v?: number | null): string {
   return v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
+/** 通用数值：最多保留两位小数，去尾零（5 → "5"、3.14159 → "3.14"）。功能建议 ⑤ 全局统一 */
+export function fmtNum(v?: number | null, digits = 2): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return '--'
+  return String(parseFloat(v.toFixed(digits)))
+}
+
 /** 财务字段百分比（15.2 = 15.2%）直接拼 %；≤0 视为缺失（Go 空值序列化为 0） */
 export function fmtPct(v?: number | null): string {
   if (v === null || v === undefined || Number.isNaN(v) || v <= 0) return '--'

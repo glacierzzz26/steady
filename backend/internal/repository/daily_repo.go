@@ -114,3 +114,22 @@ func (r *DailyRepository) GetLatestFactor(code string) (float64, bool, error) {
 	}
 	return bar.AdjFactor, true, nil
 }
+
+// GetIndexQuotes 指数最新报价（每个 code 最近两个交易日，供收盘价 + 较上一交易日涨跌幅%），
+// 按 (code, trade_date ASC) 返回；某指数无数据则该 code 无行。codes 为空返回 nil。
+func (r *DailyRepository) GetIndexQuotes(codes []string) ([]model.DailyPrice, error) {
+	if len(codes) == 0 {
+		return nil, nil
+	}
+	var bars []model.DailyPrice
+	err := r.db.Raw(`
+		SELECT t.code, t.trade_date, t.open, t.high, t.low, t.close, t.volume, t.amount, t.adj_factor
+		FROM (
+			SELECT *, ROW_NUMBER() OVER (PARTITION BY code ORDER BY trade_date DESC) AS rn
+			FROM daily_price
+			WHERE code IN ?
+		) t
+		WHERE t.rn <= 2
+		ORDER BY t.code ASC, t.trade_date ASC`, codes).Scan(&bars).Error
+	return bars, err
+}

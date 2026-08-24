@@ -3,11 +3,12 @@ import EChart from '../../components/EChart'
 import Kpi from '../../components/Kpi'
 import Notice from '../../components/Notice'
 import Tag from '../../components/Tag'
-import { mapAction, marketApi, signalsApi, tradeApi, type IndexNavData } from '../../api'
+import { mapAction, marketApi, signalsApi, strategyApi, tradeApi, type IndexNavData } from '../../api'
 import { useApi } from '../../hooks/useApi'
 import { lineOpt } from '../../mock/chartOpt'
 import { steps } from '../../mock/data'
 import { fmtMoney, fmtRatioPct } from '../../lib/format'
+import { fmtName } from '../../lib/names'
 
 const G1_HINT = '待 G1 后端补齐因子分项/行情'
 const G5_HINT = '待 G5 后端补齐数据健康检查'
@@ -19,11 +20,14 @@ export default function Dash() {
   const buySig = useApi(() => signalsApi.getSignals({ action: 'BUY', page_size: 1 }), [])
   const sellSig = useApi(() => signalsApi.getSignals({ action: 'SELL', page_size: 1 }), [])
   const sigList = useApi(() => signalsApi.getSignals({ page_size: 8 }), [])
+  const strategies = useApi(() => strategyApi.getStrategies(), [])
+  // name → zh_name 映射（信号流头只带英文 strategy，展示补中文）
+  const zhBy = new Map((strategies.data?.items ?? []).map(s => [s.name, s.zh_name]))
 
   const navItems = nav.data?.items ?? []
   const start = navItems.length ? navItems[0].trade_date : undefined
   const end = navItems.length ? navItems[navItems.length - 1].trade_date : undefined
-  // 指数净值对齐账户净值窗口（start/end 就绪后才请求）
+  // 指数净值对齐账户净值窗口（start/end 就绪后才请求）：沪深300 + 上证指数（功能建议 ①）
   const idx = useApi<IndexNavData | null>(
     () =>
       start && end
@@ -31,24 +35,40 @@ export default function Dash() {
         : Promise.resolve(null),
     [start, end],
   )
+  const idxSz = useApi<IndexNavData | null>(
+    () =>
+      start && end
+        ? marketApi.getIndexNav('000001', { start, end })
+        : Promise.resolve(null),
+    [start, end],
+  )
 
   const navOption = useMemo(() => {
     const idxItems = idx.data?.items ?? []
-    const dates = [...new Set([...navItems.map(i => i.trade_date), ...idxItems.map(i => i.trade_date)])].sort()
+    const szItems = idxSz.data?.items ?? []
+    const dates = [
+      ...new Set([
+        ...navItems.map(i => i.trade_date),
+        ...idxItems.map(i => i.trade_date),
+        ...szItems.map(i => i.trade_date),
+      ]),
+    ].sort()
     const acctMap = new Map(navItems.map(i => [i.trade_date, i.nav]))
     const idxMap = new Map(idxItems.map(i => [i.trade_date, i.nav]))
+    const szMap = new Map(szItems.map(i => [i.trade_date, i.nav]))
     return lineOpt(
       {
         dates,
         series: [
           { name: '策略净值', data: dates.map(d => acctMap.get(d) ?? null) },
           { name: '沪深300', data: dates.map(d => idxMap.get(d) ?? null) },
+          { name: '上证指数', data: dates.map(d => szMap.get(d) ?? null) },
         ],
       },
-      ['#4C7DFF', '#8B93A7'],
+      ['#4C7DFF', '#8B93A7', '#F0B45A'],
       true,
     )
-  }, [nav.data, idx.data])
+  }, [nav.data, idx.data, idxSz.data])
 
   // 超额收益（年化近似）：两端点年化差（252 交易日）
   const excess = useMemo(() => {
@@ -127,7 +147,7 @@ export default function Dash() {
       <div className="grid" style={{ gridTemplateColumns: '2fr 1fr', marginBottom: 14 }}>
         <div className="card">
           <h3>
-            策略净值 vs 沪深300
+            策略净值 vs 指数
             <span className="hint">
               <span className="seg">
                 <button className="on">MAX</button>
@@ -224,7 +244,7 @@ export default function Dash() {
           <h3>
             今日信号流
             <span className="hint">
-              {sigList.data ? `${sigList.data.strategy} · ${sigDate}` : '加载中…'}
+              {sigList.data ? `${fmtName(zhBy.get(sigList.data.strategy), sigList.data.strategy)} · ${sigDate}` : '加载中…'}
             </span>
           </h3>
           {sigList.error ? (

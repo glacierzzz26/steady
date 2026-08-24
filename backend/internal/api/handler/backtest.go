@@ -27,30 +27,30 @@ type navPointDTO struct {
 
 // backtestJobDTO 回测任务单条（列表/详情共用；Result 为 nil 时指标字段不输出）
 type backtestJobDTO struct {
-	ID           uint64      `json:"id"`
-	StrategyName string      `json:"strategy_name"`
-	StartDate    string      `json:"start_date"`
-	EndDate      string      `json:"end_date"`
-	TopN         int         `json:"top_n"`
-	FillMode     string      `json:"fill_mode"` // 成交假设 t_close/t1_open
-	Status       string      `json:"status"`
-	Error        string      `json:"error"`
-	CreatedAt    string      `json:"created_at"`
-	FinishedAt   string      `json:"finished_at"`
+	ID           uint64 `json:"id"`
+	StrategyName string `json:"strategy_name"`
+	StartDate    string `json:"start_date"`
+	EndDate      string `json:"end_date"`
+	TopN         int    `json:"top_n"`
+	FillMode     string `json:"fill_mode"` // 成交假设 t_close/t1_open
+	Status       string `json:"status"`
+	Error        string `json:"error"`
+	CreatedAt    string `json:"created_at"`
+	FinishedAt   string `json:"finished_at"`
 	// 结果指标（Result 为 nil 时省略）
-	T1Deviation      float64      `json:"t1_deviation,omitempty"`
-	TotalReturn      float64      `json:"total_return,omitempty"`
-	AnnualizedReturn float64      `json:"annualized_return,omitempty"`
-	MaxDrawdown      float64      `json:"max_drawdown,omitempty"`
-	Sharpe           float64      `json:"sharpe,omitempty"`
-	TradingDays      int          `json:"trading_days,omitempty"`
-	FinalValue       float64      `json:"final_value,omitempty"`
-	Trades           int          `json:"trades,omitempty"`
-	Positions        int          `json:"positions,omitempty"`
-	Turnover         float64      `json:"turnover,omitempty"` // 年化单边换手（倍数/年）
-	Cost             float64      `json:"cost,omitempty"`     // 年化交易成本占比（1.2%=0.012）
-	BenchmarkReturn  float64      `json:"benchmark_return,omitempty"`
-	ExcessReturn     float64      `json:"excess_return,omitempty"`
+	T1Deviation      float64       `json:"t1_deviation,omitempty"`
+	TotalReturn      float64       `json:"total_return,omitempty"`
+	AnnualizedReturn float64       `json:"annualized_return,omitempty"`
+	MaxDrawdown      float64       `json:"max_drawdown,omitempty"`
+	Sharpe           float64       `json:"sharpe,omitempty"`
+	TradingDays      int           `json:"trading_days,omitempty"`
+	FinalValue       float64       `json:"final_value,omitempty"`
+	Trades           int           `json:"trades,omitempty"`
+	Positions        int           `json:"positions,omitempty"`
+	Turnover         float64       `json:"turnover,omitempty"` // 年化单边换手（倍数/年）
+	Cost             float64       `json:"cost,omitempty"`     // 年化交易成本占比（1.2%=0.012）
+	BenchmarkReturn  float64       `json:"benchmark_return,omitempty"`
+	ExcessReturn     float64       `json:"excess_return,omitempty"`
 	Nav              []navPointDTO `json:"nav,omitempty"`
 }
 
@@ -231,6 +231,78 @@ func indexNavItems(bars []model.DailyPrice) []indexNavItemDTO {
 		})
 	}
 	return items
+}
+
+// indexNames 行情概览指数名（topbar 三枚芯片；与 collector INDEX_NAMES 同源）
+var indexNames = map[string]string{
+	"sh000001": "上证指数",
+	"sh000300": "沪深300",
+	"sh000905": "中证500",
+}
+
+// indexQuoteDTO 指数报价单条（code/name/close/change_pct/trade_date）
+type indexQuoteDTO struct {
+	Code      string  `json:"code"`
+	Name      string  `json:"name"`
+	Close     float64 `json:"close"`
+	ChangePct float64 `json:"change_pct"` // 较上一交易日涨跌幅（%）
+	TradeDate string  `json:"trade_date"`
+}
+
+// GetIndexQuotes 指数行情概览（GET /index/quotes?codes=sh000001,sh000300,sh000905）。
+// 返回每个指数最新收盘 + 较上一交易日涨跌幅（%）；某指数无数据则跳过。
+func GetIndexQuotes(dailyRepo *repository.DailyRepository) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		codes := parseIndexCodes(c.Query("codes"))
+		if len(codes) == 0 {
+			response.OK(c, gin.H{"items": []indexQuoteDTO{}})
+			return
+		}
+		bars, err := dailyRepo.GetIndexQuotes(codes)
+		if err != nil {
+			response.Fail(c, http.StatusInternalServerError, response.CodeInternalError, "查询失败")
+			return
+		}
+		// 每 code 至多两行（升序 [prev, latest]）→ 涨跌幅 = latest/prev - 1
+		byCode := map[string][]model.DailyPrice{}
+		for _, b := range bars {
+			byCode[b.Code] = append(byCode[b.Code], b)
+		}
+		out := make([]indexQuoteDTO, 0, len(codes))
+		for _, code := range codes {
+			rows := byCode[code]
+			if len(rows) == 0 {
+				continue
+			}
+			latest := rows[len(rows)-1]
+			d := indexQuoteDTO{
+				Code:      code,
+				Name:      indexNames[code],
+				Close:     latest.Close,
+				TradeDate: formatDate(latest.TradeDate),
+			}
+			if len(rows) >= 2 && rows[len(rows)-2].Close > 0 {
+				d.ChangePct = (latest.Close - rows[len(rows)-2].Close) / rows[len(rows)-2].Close * 100
+			}
+			out = append(out, d)
+		}
+		response.OK(c, gin.H{"items": out})
+	}
+}
+
+// parseIndexCodes 解析逗号分隔指数码（去空、归一化 sh 前缀、去重、保序）
+func parseIndexCodes(s string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, 4)
+	for _, raw := range strings.Split(s, ",") {
+		code := normalizeIndexCode(strings.TrimSpace(raw))
+		if code == "" || seen[code] {
+			continue
+		}
+		seen[code] = true
+		out = append(out, code)
+	}
+	return out
 }
 
 // validIndexCode 指数代码校验：sh/sz 前缀 + 6 位数字（或裸 6 位，自动补 sh）

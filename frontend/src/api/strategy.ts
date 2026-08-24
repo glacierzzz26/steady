@@ -33,6 +33,8 @@ export const strategyApi = {
   /** 状态流转（POST /strategies/:name/switch，body {status}） */
   switchStrategy: (name: string, status: string) =>
     http.post<StrategyInfo>(`/strategies/${name}/switch`, { status }),
+  /** 删除策略（DELETE /strategies/:name；运行中/已有信号记录会被后端拒绝） */
+  deleteStrategy: (name: string) => http.del<{ deleted: string }>(`/strategies/${name}`),
   /** A/B 对比（GET /strategies/compare；pending 需轮询） */
   compareStrategies: (
     base: string,

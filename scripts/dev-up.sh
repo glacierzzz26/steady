@@ -5,7 +5,8 @@
 #   backend      Go，host 编译运行（go build → .dev/backend-bin），端口 8080
 #   collector    Python，host 系统 python3 运行（python -m app.tasks 调度器）
 #   quant-engine Python，host 系统 python3 运行（python -m app.tasks 调度器）
-#   frontend-v2  vite dev server，端口 5173（/api 代理到 127.0.0.1:8080）
+#   frontend     vite dev server，端口 5173（/api 代理到 127.0.0.1:8080）
+#   数据库迁移   scripts/migrate.sh 自动补齐旧库 schema（幂等，失败仅告警）
 #
 # 用法：
 #   ./scripts/dev-up.sh                # 全组件启动
@@ -26,6 +27,14 @@ set +a
 # 2. 停掉 Docker 代码容器（保留 postgres），避免端口冲突 / 逻辑打架
 echo "→ 停止 Docker 代码容器（保留 postgres）..."
 docker compose -f deploy/docker-compose.yml stop backend collector quant-engine frontend nginx >/dev/null 2>&1 || true
+
+# 2.5 数据库迁移（补旧库 schema 漂移，幂等；失败不阻塞，可稍后重跑）
+if docker ps --filter "name=quant-postgres" --format '{{.Names}}' | grep -q quant-postgres; then
+  echo "→ 数据库迁移（deploy/migrations/*.sql）..."
+  ./scripts/migrate.sh || echo "⚠️ 数据库迁移失败，可稍后重跑 ./scripts/migrate.sh"
+else
+  echo "→ 跳过数据库迁移（quant-postgres 未运行，先 docker compose -f deploy/docker-compose.yml up -d postgres）"
+fi
 
 _pid_alive() { [ -f "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null; }
 
@@ -59,12 +68,12 @@ else
   echo "→ 跳过 quant-engine（--no-pipeline）"
 fi
 
-# 6. frontend-v2（vite dev server）
+# 6. frontend（vite dev server）
 if _pid_alive "$DEV_DIR/vite.pid"; then
-  echo "→ frontend-v2 dev 已在运行（pid $(cat "$DEV_DIR/vite.pid")）"
+  echo "→ frontend dev 已在运行（pid $(cat "$DEV_DIR/vite.pid")）"
 else
-  echo "→ 启动 frontend-v2（vite dev）..."
-  ( cd "$ROOT/frontend-v2" && nohup npm run dev > "$ROOT/.dev/vite.log" 2>&1 & echo $! > "$ROOT/.dev/vite.pid" )
+  echo "→ 启动 frontend（vite dev）..."
+  ( cd "$ROOT/frontend" && nohup npm run dev > "$ROOT/.dev/vite.log" 2>&1 & echo $! > "$ROOT/.dev/vite.pid" )
 fi
 
 # 7. 健康检查 + 摘要
@@ -78,7 +87,7 @@ else
   echo "❌ backend     未启动（见 .dev/backend.log）"
 fi
 if _pid_alive "$DEV_DIR/vite.pid"; then
-  echo "✅ frontend-v2 http://localhost:5173  （dev 模式，HMR）"
+  echo "✅ frontend     http://localhost:5173  （dev 模式，HMR）"
 else
   echo "❌ frontend-v2 未启动（见 .dev/vite.log）"
 fi

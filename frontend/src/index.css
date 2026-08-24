@@ -91,6 +91,7 @@ body {
 .top-right { margin-left: auto; display: flex; align-items: center; gap: 14px; font-size: 13px; color: var(--txt2); }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border: 1px solid var(--line2); border-radius: 14px; font-size: 13px; }
 .chip.rest { color: var(--warn); border-color: rgba(233, 162, 59, 0.35); }
+.chip.live { color: var(--ok); border-color: rgba(47, 191, 113, 0.35); }
 .avatar {
   width: 30px; height: 30px; border-radius: 50%;
   background: linear-gradient(135deg, #4C7DFF, #6C5CE7);
@@ -140,6 +141,18 @@ td.r, th.r { text-align: right; }
 .btn.pri { background: var(--brand); border-color: var(--brand); color: #fff; }
 .btn.pri:hover { background: #3A6BF0; }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* 表格内操作入口（策略管理 查看/编辑/复制/状态流转/删除）：按钮化提升可发现性 */
+.act {
+  display: inline-flex; align-items: center;
+  padding: 2px 9px; border: 1px solid var(--line2); border-radius: 6px;
+  font-size: 12.5px; cursor: pointer; margin-right: 6px;
+  transition: background .15s, border-color .15s;
+}
+.act:hover { background: rgba(255, 255, 255, 0.06); border-color: var(--brand); color: var(--txt); }
+.act.ok { color: var(--ok); border-color: rgba(47, 191, 113, 0.3); }
+.act.warn { color: var(--warn); border-color: rgba(233, 162, 59, 0.3); }
+.act.danger { color: var(--down); border-color: rgba(240, 82, 79, 0.3); }
 
 .seg { display: inline-flex; border: 1px solid var(--line2); border-radius: 8px; overflow: hidden; }
 .seg button {

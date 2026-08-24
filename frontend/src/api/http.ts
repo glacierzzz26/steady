@@ -89,5 +89,6 @@ export const http = {
     request<T>('GET', path, undefined, params),
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
+  del: <T>(path: string) => request<T>('DELETE', path),
   raw,
 }

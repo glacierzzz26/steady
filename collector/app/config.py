@@ -26,8 +26,8 @@ BACKFILL_FINANCE_QUARTERS = _int("COLLECTOR_FINANCE_QUARTERS", 20)
 # 每日增量财务同步的报告期数（默认最近 4 个季度，覆盖财报季尾部披露）
 FINANCE_SYNC_QUARTERS = _int("COLLECTOR_FINANCE_QUARTERS_SYNC", 4)
 
-# 每日增量同步的指数（沪深300 / 中证500，作收益基准）
-INDEX_CODES = _str("COLLECTOR_INDEX_CODES", "sh000300,sh000905")
+# 每日增量同步的指数（上证指数 / 沪深300 / 中证500，作行情概览与收益基准）
+INDEX_CODES = _str("COLLECTOR_INDEX_CODES", "sh000001,sh000300,sh000905")
 
 # 每日增量同步：数据库无历史记录时的回退窗口（天）
 DAILY_FALLBACK_DAYS = _int("COLLECTOR_DAILY_FALLBACK_DAYS", 30)

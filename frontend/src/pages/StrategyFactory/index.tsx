@@ -4,6 +4,7 @@ import Notice from '../../components/Notice'
 import Tag from '../../components/Tag'
 import { strategyApi, type CompareResult, type CompareSide, type StrategyInfo } from '../../api'
 import { useApi } from '../../hooks/useApi'
+import { fmtName } from '../../lib/names'
 import { hmapOpt, lineOpt } from '../../mock/chartOpt'
 import { g } from '../../mock/random'
 
@@ -37,13 +38,16 @@ const STATUS_DESC: Record<string, string> = {
   paused: '已暂停 · 不参与每日信号生成',
   archived: '已归档冻结',
 }
-/** 合法下一步（单 active 不变量由后端强制） */
-const NEXT: Record<string, [string, string] | null> = {
-  draft: ['backtest', '推进回测'],
-  backtest: ['sample', '样本外验证'],
-  sample: ['active', '发布上线'],
-  active: ['paused', '暂停'],
-  paused: ['archived', '归档'],
+/** 合法下一步（单 active 不变量由后端强制；paused 可重新启用或归档，第一轮测试 #4 修复） */
+const NEXT: Record<string, [string, string][] | null> = {
+  draft: [['backtest', '推进回测']],
+  backtest: [['sample', '样本外验证']],
+  sample: [['active', '发布上线']],
+  active: [['paused', '暂停']],
+  paused: [
+    ['active', '重新启用'],
+    ['archived', '归档'],
+  ],
   archived: null,
 }
 
@@ -242,6 +246,17 @@ export default function StrategyFactory() {
       setMsg({ ok: false, text: e instanceof Error ? e.message : '状态流转失败' })
     }
   }
+  // 删除策略（第一轮测试 #2 补删除入口；运行中/已有信号记录后端会拒绝）
+  const removeStrategy = async (name: string) => {
+    if (!window.confirm(`确认删除策略 ${name}？运行中或已有信号记录的策略会被拒绝。`)) return
+    try {
+      await strategyApi.deleteStrategy(name)
+      setMsg({ ok: true, text: `已删除 ${name}` })
+      strategies.reload()
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof Error ? e.message : '删除失败' })
+    }
+  }
 
   const sum = weights.reduce((a, b) => a + b, 0)
   const active = itemList.find(s => s.status === 'active')
@@ -359,7 +374,7 @@ export default function StrategyFactory() {
           </div>
         )}
 
-        <div className="card planned">
+        <div className="card">
           <h3>新建策略草稿 <Tag type="plan" label="新" /></h3>
           <div style={{ fontSize: 14, color: 'var(--txt2)', lineHeight: 1.8 }}>
             轮动 + 缓冲带骨架固定。新建进入草稿状态，可配因子权重与风控参数；验证通过后沿状态机发布上线（单 active 不变量）。
@@ -395,7 +410,7 @@ export default function StrategyFactory() {
             <tbody>
               {itemList.map(s => {
                 const meta = STATUS_META[s.status ?? ''] ?? ['hold', s.status ?? '—']
-                const next = s.status ? NEXT[s.status] : null
+                const nexts = (s.status ? NEXT[s.status] : null) ?? []
                 return (
                   <tr key={s.name}>
                     <td>
@@ -405,19 +420,21 @@ export default function StrategyFactory() {
                     <td><Tag type={meta[0]} label={meta[1]} /></td>
                     <td style={{ color: 'var(--txt2)', fontSize: 13.5 }}>{STATUS_DESC[s.status ?? ''] ?? ''}</td>
                     <td className="r num">{s.latest_backtest_id ? `#${s.latest_backtest_id}` : '—'}</td>
-                    <td style={{ fontSize: 13.5 }}>
-                      <a style={{ color: '#A8C0FF', cursor: 'pointer', marginRight: 10 }} onClick={() => loadBuilder(s.name)}>
+                    <td style={{ fontSize: 13.5, whiteSpace: 'nowrap' }}>
+                      <span className="act" onClick={() => loadBuilder(s.name)}>
                         {s.status === 'draft' ? '编辑' : '查看'}
-                      </a>
-                      <a style={{ color: 'var(--txt2)', cursor: 'pointer', marginRight: 10 }} onClick={() => fork(s.name)}>复制</a>
-                      {next && (
-                        <a
-                          style={{ color: next[0] === 'active' ? 'var(--ok)' : 'var(--warn)', cursor: 'pointer', marginRight: 10 }}
-                          onClick={() => advance(s.name, next[0])}
+                      </span>
+                      <span className="act" onClick={() => fork(s.name)}>复制</span>
+                      {nexts.map(([to, label]) => (
+                        <span
+                          key={to}
+                          className={`act ${to === 'active' ? 'ok' : 'warn'}`}
+                          onClick={() => advance(s.name, to)}
                         >
-                          {next[1]}
-                        </a>
-                      )}
+                          {label}
+                        </span>
+                      ))}
+                      <span className="act danger" onClick={() => removeStrategy(s.name)}>删除</span>
                     </td>
                   </tr>
                 )
@@ -430,7 +447,7 @@ export default function StrategyFactory() {
         )}
         <div className="sec-note">
           状态流转：<b>草稿</b>（可编辑参数与因子池）→ <b>回测验证</b> → <b>样本外验证</b>（walk-forward 通过）→{' '}
-          <b style={{ color: 'var(--ok)' }}>运行中（正式使用 · 每日生成信号驱动模拟盘）</b> → 已暂停 / 已归档。切换运行中策略需二次确认，新旧策略平滑衔接：旧持仓按卖出缓冲规则自然退出，不强制清仓。
+          <b style={{ color: 'var(--ok)' }}>运行中（正式使用 · 每日生成信号驱动模拟盘）</b> → 已暂停（可<b>重新启用</b>或归档）。切换运行中策略需二次确认，新旧策略平滑衔接：旧持仓按卖出缓冲规则自然退出，不强制清仓。
         </div>
       </div>
 
@@ -553,13 +570,13 @@ export default function StrategyFactory() {
           <span>基准</span>
           <select style={{ minWidth: 140 }} value={abCfg.base} onChange={e => setAbCfg(c => ({ ...c, base: e.target.value }))}>
             {itemList.filter(s => s.status !== 'archived').map(s => (
-              <option key={s.name} value={s.name}>{s.name}{s.status === 'active' ? '（现行）' : ''}</option>
+              <option key={s.name} value={s.name}>{fmtName(s.zh_name, s.name)}{s.status === 'active' ? '（现行）' : ''}</option>
             ))}
           </select>
           <span>候选</span>
           <select style={{ minWidth: 140 }} value={abCfg.candidate} onChange={e => setAbCfg(c => ({ ...c, candidate: e.target.value }))}>
             {itemList.filter(s => s.status !== 'archived').map(s => (
-              <option key={s.name} value={s.name}>{s.name}</option>
+              <option key={s.name} value={s.name}>{fmtName(s.zh_name, s.name)}</option>
             ))}
           </select>
           <input type="date" value={abCfg.start} onChange={e => setAbCfg(c => ({ ...c, start: e.target.value }))} />

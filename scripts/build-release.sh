@@ -3,7 +3,7 @@
 # 生产只发 master：本脚本校验当前分支，非 master 直接拒绝。
 # 产出 deploy/release/steady-<日期>-<短SHA>/ 内含三件套：
 #   install.sh              安装脚本（VM 唯一入口）
-#   config.tar.gz           配置包（compose / nginx.conf / init.sql / config.yaml / .env.example / backup 脚本 / docs/llm 知识库）
+#   config.tar.gz           配置包（compose / nginx.conf / init.sql / config.yaml / .env.example / backup+migrate 脚本 / migrations 迁移 / docs/llm 知识库）
 #   steady-images.tar.gz    业务镜像包（collector / quant-engine / backend / frontend）
 # 传到 VM：scp -r 该目录 → cd 进去 → ./install.sh
 set -euo pipefail
@@ -43,17 +43,20 @@ docker save \
 
 echo "==> 3/4 组装配置包 -> config.tar.gz"
 # 目录结构对齐 run compose 的相对路径：解压到同一目录即可被容器挂载
-mkdir -p "$WORK/nginx" "$WORK/postgres" "$WORK/configs" "$WORK/scripts" "$WORK/docs/llm"
+mkdir -p "$WORK/nginx" "$WORK/postgres" "$WORK/configs" "$WORK/scripts" "$WORK/docs/llm" "$WORK/migrations"
 cp "$REPO_ROOT/deploy/docker-compose.run.yml" "$WORK/"
 cp "$REPO_ROOT/deploy/.env.example" "$WORK/"
 cp "$REPO_ROOT/deploy/nginx/nginx.conf" "$WORK/nginx/"
 cp "$REPO_ROOT/deploy/postgres/init.sql" "$WORK/postgres/"
 cp "$REPO_ROOT/backend/configs/config.yaml" "$WORK/configs/"
 cp "$REPO_ROOT/scripts/backup-db.sh" "$WORK/scripts/"
+cp "$REPO_ROOT/scripts/migrate.sh" "$WORK/scripts/"
+# 数据库迁移文件随发布包走（install.sh 5/6 步自动应用，补齐旧库 schema）
+cp "$REPO_ROOT/deploy/migrations/"*.sql "$WORK/migrations/" 2>/dev/null || true
 # LLM 知识库随发布包走（run compose 以 ./docs 挂载进 backend 容器）
 cp "$REPO_ROOT/docs/llm/术语表.md" "$WORK/docs/llm/"
 cp "$REPO_ROOT/docs/llm/项目知识.md" "$WORK/docs/llm/"
-chmod +x "$WORK/scripts/backup-db.sh"
+chmod +x "$WORK/scripts/backup-db.sh" "$WORK/scripts/migrate.sh"
 tar -czf "$RELDIR/config.tar.gz" -C "$WORK" .
 
 echo "==> 4/4 安装脚本"

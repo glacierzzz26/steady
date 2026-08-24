@@ -55,11 +55,11 @@ func (r *StrategyRepository) Create(s *model.Strategy) error {
 // Update 更新草稿字段（factor_weights/params/description/zh_name），并刷新 updated_at
 func (r *StrategyRepository) Update(s *model.Strategy) error {
 	return r.db.Model(s).Updates(map[string]interface{}{
-		"zh_name":       s.ZhName,
-		"description":   s.Description,
+		"zh_name":        s.ZhName,
+		"description":    s.Description,
 		"factor_weights": s.FactorWeights,
-		"params":        s.Params,
-		"updated_at":    clause.Expr{SQL: "NOW()"},
+		"params":         s.Params,
+		"updated_at":     clause.Expr{SQL: "NOW()"},
 	}).Error
 }
 
@@ -92,6 +92,18 @@ func (r *StrategyRepository) GetFactors() ([]model.FactorDefinition, error) {
 	var items []model.FactorDefinition
 	err := r.db.Order("weight DESC, name").Find(&items).Error
 	return items, err
+}
+
+// CountStrategySignals 该策略已有信号记录数（删除前置检查：strategy_signal 有 FK 引用 strategy.name）
+func (r *StrategyRepository) CountStrategySignals(name string) (int64, error) {
+	var n int64
+	err := r.db.Table("strategy_signal").Where("strategy_name = ?", name).Count(&n).Error
+	return n, err
+}
+
+// Delete 删除策略（service 层已做状态与信号引用检查）
+func (r *StrategyRepository) Delete(name string) error {
+	return r.db.Where("name = ?", name).Delete(&model.Strategy{}).Error
 }
 
 // GetLatestBacktestID 策略最近一次回测任务 id（策略卡「回测依据」展示用）；无返回 0
