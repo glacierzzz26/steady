@@ -6,7 +6,7 @@ import Tag from '../../components/Tag'
 import { backtestApi, strategyApi, type BacktestJobItem } from '../../api'
 import { fmtName } from '../../lib/names'
 import { useApi } from '../../hooks/useApi'
-import { lineOpt } from '../../mock/chartOpt'
+import { lineOpt, type LineSeriesDef } from '../../mock/chartOpt'
 
 const G8_DONE_HINT = 'T+1 开盘为保守假设（无未来函数），已支持（G8）'
 /** 年化单边换手（倍数/年，后端已年化） */
@@ -32,6 +32,29 @@ const BT_STATUS: Record<string, ['ok' | 'hold' | 'warn', string]> = {
   failed: ['warn', '失败'],
 }
 
+// ---- 历史任务横向对比（Iteration 4 遗留项） ----
+const MAX_CMP = 5
+const NAV_COLORS = ['#4C7DFF', '#2FBF71', '#F0B45A', '#C792EA', '#E86F9B']
+const BENCH_COLOR = '#8B93A7'
+
+interface CmpMetric {
+  label: string
+  raw: (j: BacktestJobItem) => number | null
+  fmt: (v: number | null) => string
+  best?: 'max' // best:'max'=越大越好（最大回撤为负，取最大即最接近 0），该行最佳列高亮
+}
+
+const CMP_METRICS: CmpMetric[] = [
+  { label: '总收益', raw: j => j.total_return ?? null, fmt: fmtBtPct, best: 'max' },
+  { label: '年化', raw: j => j.annualized_return ?? null, fmt: fmtBtPct, best: 'max' },
+  { label: '最大回撤', raw: j => j.max_drawdown ?? null, fmt: fmtBtPct, best: 'max' },
+  { label: '夏普', raw: j => j.sharpe ?? null, fmt: v => (v == null ? '--' : v.toFixed(2)), best: 'max' },
+  { label: '超额', raw: j => j.excess_return ?? null, fmt: fmtBtPct, best: 'max' },
+  { label: '年换手', raw: j => j.turnover ?? null, fmt: v => fmtTurnover(v ?? undefined) },
+  { label: '成本占比', raw: j => j.cost ?? null, fmt: v => fmtCost(v ?? undefined) },
+  { label: '交易数', raw: j => j.trades ?? null, fmt: v => (v == null ? '--' : String(v)) },
+]
+
 export default function Backtest() {
   const [strategy, setStrategy] = useState('')
   const [start, setStart] = useState('2019-01-01')
@@ -54,6 +77,71 @@ export default function Backtest() {
   const btRows = list.data?.items ?? []
   // name → zh_name 映射（回测历史表只存英文 strategy_name，展示时补中文）
   const zhBy = new Map(strategyOpts.map(s => [s.name, s.zh_name]))
+
+  // ---- 历史任务横向对比：勾选已完成任务（数据全部来自列表缓存，不新增请求） ----
+  const [cmpSel, setCmpSel] = useState<Set<number>>(new Set())
+  const [selNote, setSelNote] = useState<string | null>(null)
+  const toggleSel = (id: number) => {
+    setSelNote(null)
+    if (cmpSel.has(id)) {
+      const next = new Set(cmpSel)
+      next.delete(id)
+      setCmpSel(next)
+    } else if (cmpSel.size >= MAX_CMP) {
+      setSelNote(`最多对比 ${MAX_CMP} 条`)
+    } else {
+      const next = new Set(cmpSel)
+      next.add(id)
+      setCmpSel(next)
+    }
+  }
+  const selJobs = btRows.filter(j => cmpSel.has(j.id) && j.status === 'done')
+  const mixedAssumption = new Set(selJobs.map(j => j.fill_mode).filter(Boolean)).size > 1
+
+  // 净值叠加：每条归一化（nav/nav[0]），对齐全部选中任务日期的并集；基准取第一条含基准点的任务
+  const cmpNavOption = useMemo(() => {
+    if (selJobs.length < 2) return null
+    const dates = [...new Set(selJobs.flatMap(j => (j.nav ?? []).map(p => p.date)))].sort()
+    const series: LineSeriesDef[] = []
+    const colors: string[] = []
+    selJobs.forEach((j, i) => {
+      const pts = j.nav ?? []
+      const anchor = pts.find(p => p.nav > 0)?.nav
+      if (!anchor) return
+      const map = new Map(pts.filter(p => p.nav > 0).map(p => [p.date, p.nav / anchor]))
+      series.push({
+        name: `#${j.id} ${fmtName(zhBy.get(j.strategy_name), j.strategy_name)}`,
+        data: dates.map(d => map.get(d) ?? null),
+      })
+      colors.push(NAV_COLORS[i % NAV_COLORS.length])
+    })
+    const benchJob = selJobs.find(j => (j.nav ?? []).some(p => p.benchmark != null && p.benchmark > 0))
+    if (benchJob) {
+      const bpts = (benchJob.nav ?? []).filter(p => p.benchmark != null && p.benchmark > 0)
+      const anchor = bpts[0].benchmark!
+      const bmap = new Map(bpts.map(p => [p.date, p.benchmark! / anchor]))
+      series.push({ name: '沪深300 基准', data: dates.map(d => bmap.get(d) ?? null), w: 1.4 })
+      colors.push(BENCH_COLOR)
+    }
+    if (!series.length) return null
+    return lineOpt({ dates, series }, colors, false)
+  }, [selJobs, zhBy])
+
+  // 指标行最佳列（best:'max'），返回最佳列下标；无有效值返回 -1
+  const bestIdxOf = (m: CmpMetric) => {
+    if (!m.best) return -1
+    let best = -1
+    let bestV = -Infinity
+    selJobs.forEach((j, i) => {
+      const v = m.raw(j)
+      if (v === null || Number.isNaN(v)) return
+      if (v > bestV) {
+        bestV = v
+        best = i
+      }
+    })
+    return best
+  }
 
   const navOption = useMemo(() => {
     const n = detail.data?.nav ?? []
@@ -171,7 +259,7 @@ export default function Backtest() {
         <div className="card">
           <h3>
             回测历史
-            <span className="hint">近 20 条 · 点击行查看净值</span>
+            <span className="hint">近 20 条 · 点击行查看净值 · 勾选 ≥2 条已完成任务横向对比</span>
           </h3>
           {list.error ? (
             <Notice text={list.error} onRetry={list.reload} retrying={list.loading} />
@@ -183,6 +271,7 @@ export default function Backtest() {
             <table>
               <thead>
                 <tr>
+                  <th>对比</th>
                   <th>ID</th>
                   <th>策略</th>
                   <th className="r">区间</th>
@@ -207,6 +296,15 @@ export default function Backtest() {
                       title={j.error || '点击加载净值'}
                       style={{ cursor: 'pointer', ...(sel ? { background: 'rgba(76,125,255,.08)' } : {}) }}
                     >
+                      <td onClick={e => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={cmpSel.has(j.id)}
+                          disabled={j.status !== 'done'}
+                          title={j.status !== 'done' ? '仅已完成任务可对比' : undefined}
+                          onChange={() => toggleSel(j.id)}
+                        />
+                      </td>
                       <td className="num">#{j.id}</td>
                       <td>{fmtName(zhBy.get(j.strategy_name), j.strategy_name)}</td>
                       <td className="r num">{`${j.start_date}~${j.end_date}`}</td>
@@ -230,6 +328,100 @@ export default function Backtest() {
             fill_mode / T+1 偏差已点亮（G8）；年换手 / 成本占比已点亮（Iteration 4 §3.5）
           </div>
         </div>
+      </div>
+
+      {/* 历史任务横向对比 */}
+      <div className="card">
+        <h3>
+          历史任务横向对比
+          <span className="hint">
+            已选 {selJobs.length} 条 · 勾选 ≥2 条已完成任务并排对比
+            {selNote && <b style={{ color: 'var(--warn)', marginLeft: 8 }}>{selNote}</b>}
+          </span>
+          {selJobs.length > 0 && (
+            <button
+              className="act"
+              style={{ float: 'right' }}
+              onClick={() => {
+                setCmpSel(new Set())
+                setSelNote(null)
+              }}
+            >
+              清除选择
+            </button>
+          )}
+        </h3>
+        {mixedAssumption && selJobs.length >= 2 && (
+          <div style={{ fontSize: 13, color: 'var(--warn)', marginBottom: 10 }}>
+            ⚠️ 勾选混合了 T日收盘(t_close) 与 T+1开盘(t1_open) 假设，口径不同，对比仅供参考
+          </div>
+        )}
+        {selJobs.length < 2 ? (
+          <div className="empty" style={{ padding: '28px 0' }}>
+            {selJobs.length === 0
+              ? '在左侧历史列表勾选已完成任务，开启横向对比'
+              : '再勾选 1 条已完成任务即可对比'}
+          </div>
+        ) : (
+          <>
+            <table>
+              <thead>
+                <tr>
+                  <th>指标</th>
+                  {selJobs.map(j => (
+                    <th key={j.id} className="r">
+                      <div className="num">#{j.id}</div>
+                      <div>{fmtName(zhBy.get(j.strategy_name), j.strategy_name)}</div>
+                      <div style={{ fontSize: 12, color: 'var(--txt3)', fontWeight: 400 }}>
+                        {fillModeLabel(j.fill_mode)} · top_n {j.top_n}
+                      </div>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {CMP_METRICS.map(m => {
+                  const bi = bestIdxOf(m)
+                  return (
+                    <tr key={m.label}>
+                      <td style={{ color: 'var(--txt2)' }}>{m.label}</td>
+                      {selJobs.map((j, i) => {
+                        const v = m.raw(j)
+                        const isBest = m.best && v !== null && !Number.isNaN(v) && i === bi
+                        const sign = !isBest && v !== null && !Number.isNaN(v) ? signCls(v) : ''
+                        return (
+                          <td
+                            key={j.id}
+                            className={`r num ${sign}`}
+                            style={isBest ? { color: 'var(--ok)', fontWeight: 600 } : undefined}
+                          >
+                            {m.fmt(v)}
+                          </td>
+                        )
+                      })}
+                    </tr>
+                  )
+                })}
+                <tr>
+                  <td style={{ color: 'var(--txt2)' }}>区间</td>
+                  {selJobs.map(j => (
+                    <td key={j.id} className="r num">
+                      {j.start_date}~{j.end_date}
+                    </td>
+                  ))}
+                </tr>
+              </tbody>
+            </table>
+            {cmpNavOption && (
+              <>
+                <h4 style={{ fontSize: 14, margin: '14px 0 6px', color: 'var(--txt2)' }}>
+                  净值对比（归一化到 1.0）
+                </h4>
+                <EChart option={cmpNavOption} height={280} />
+              </>
+            )}
+          </>
+        )}
       </div>
 
       {/* 回测详情 */}
