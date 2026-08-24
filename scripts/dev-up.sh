@@ -64,7 +64,7 @@ if _pid_alive "$DEV_DIR/vite.pid"; then
   echo "→ frontend-v2 dev 已在运行（pid $(cat "$DEV_DIR/vite.pid")）"
 else
   echo "→ 启动 frontend-v2（vite dev）..."
-  ( cd "$ROOT/frontend-v2" && nohup npm run dev > "$ROOT/.dev/vite.log" 2>&1 & echo $! > "$ROOT/.dev/vite.pid" )
+  ( cd "$ROOT/frontend" && nohup npm run dev > "$ROOT/.dev/vite.log" 2>&1 & echo $! > "$ROOT/.dev/vite.pid" )
 fi
 
 # 7. 健康检查 + 摘要
