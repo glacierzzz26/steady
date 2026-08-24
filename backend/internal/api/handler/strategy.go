@@ -16,25 +16,25 @@ import (
 
 // strategyDTO 策略单条（列表/详情共用）
 type strategyDTO struct {
-	Name             string          `json:"name"`
-	ZhName           string          `json:"zh_name"`
-	Description      string          `json:"description"`
-	Version          string          `json:"version"`
-	Status           string          `json:"status"`
-	FactorWeights    datatypes.JSON  `json:"factor_weights"`
-	Params           datatypes.JSON  `json:"params"`
-	LatestBacktestID uint64          `json:"latest_backtest_id"`
+	Name             string         `json:"name"`
+	ZhName           string         `json:"zh_name"`
+	Description      string         `json:"description"`
+	Version          string         `json:"version"`
+	Status           string         `json:"status"`
+	FactorWeights    datatypes.JSON `json:"factor_weights"`
+	Params           datatypes.JSON `json:"params"`
+	LatestBacktestID uint64         `json:"latest_backtest_id"`
 }
 
 func toStrategyDTO(st service.StrategyItem) strategyDTO {
 	d := strategyDTO{
-		Name:          st.Name,
-		ZhName:        st.ZhName,
-		Description:   st.Description,
-		Version:       st.Version,
-		Status:        st.Status,
-		FactorWeights: st.FactorWeights,
-		Params:        st.Params,
+		Name:             st.Name,
+		ZhName:           st.ZhName,
+		Description:      st.Description,
+		Version:          st.Version,
+		Status:           st.Status,
+		FactorWeights:    st.FactorWeights,
+		Params:           st.Params,
 		LatestBacktestID: st.LatestBacktestID,
 	}
 	return d
@@ -122,6 +122,18 @@ func SwitchStrategy(strategySvc *service.StrategyService) gin.HandlerFunc {
 			return
 		}
 		response.OK(c, toStrategyDTO(service.StrategyItem{Strategy: *st}))
+	}
+}
+
+// DeleteStrategy 删除策略（DELETE /strategies/:name；第一轮测试 #2）
+func DeleteStrategy(strategySvc *service.StrategyService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if err := strategySvc.Delete(c.Param("name")); err != nil {
+			status, code, msg := strategyError(err)
+			response.Fail(c, status, code, msg)
+			return
+		}
+		response.OK(c, gin.H{"deleted": c.Param("name")})
 	}
 }
 
@@ -247,7 +259,9 @@ func strategyError(err error) (int, int, string) {
 	case errors.Is(err, service.ErrStrategyNotDraft),
 		errors.Is(err, service.ErrStrategyTransition),
 		errors.Is(err, service.ErrStrategyArchived),
-		errors.Is(err, service.ErrStrategyInvalidData):
+		errors.Is(err, service.ErrStrategyInvalidData),
+		errors.Is(err, service.ErrStrategyActiveNotDel),
+		errors.Is(err, service.ErrStrategyHasSignals):
 		return http.StatusBadRequest, response.CodeInvalidParam, err.Error()
 	default:
 		return http.StatusInternalServerError, response.CodeInternalError, "操作失败"

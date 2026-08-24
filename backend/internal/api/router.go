@@ -32,6 +32,7 @@ func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
 	backtestSvc := service.NewBacktestService(backtestRepo, strategyRepo)
 	strategySvc := service.NewStrategyService(strategyRepo, backtestSvc)
 	tushareSvc := service.NewTushareConfigService(db)
+	marketSvc := service.NewMarketStatusService(db)
 
 	// 基础路径 /api/v1
 	v1 := r.Group("/api/v1")
@@ -53,6 +54,7 @@ func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
 		v1.PUT("/strategies/:name", handler.UpdateStrategy(strategySvc))
 		v1.POST("/strategies/:name/versions", handler.ForkStrategy(strategySvc))
 		v1.POST("/strategies/:name/switch", handler.SwitchStrategy(strategySvc))
+		v1.DELETE("/strategies/:name", handler.DeleteStrategy(strategySvc))   // 第一轮测试：#2 补删除入口
 		v1.GET("/strategies/compare", handler.CompareStrategies(strategySvc)) // §3.3 A/B
 		v1.GET("/factors", handler.GetFactors(strategyRepo))
 		v1.GET("/signals", handler.GetSignals(signalRepo))
@@ -67,8 +69,10 @@ func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
 		v1.DELETE("/orders/:id", handler.CancelOrder(tradingSvc, accountRepo))
 		v1.GET("/trades", handler.GetTrades(tradeRepo, accountRepo, stockRepo))
 
-		// 指数基准 + 回测任务（Sprint 6）
+		// 市场状态 + 指数基准（右上角开市/休市 chip + 行情概览；Sprint 6 指数）
+		v1.GET("/market/status", handler.GetMarketStatus(marketSvc))
 		v1.GET("/index/nav/:code", handler.GetIndexNav(dailyRepo))
+		v1.GET("/index/quotes", handler.GetIndexQuotes(dailyRepo))
 		v1.GET("/backtests", handler.GetBacktests(backtestSvc))
 		v1.POST("/backtests", handler.CreateBacktest(backtestSvc))
 		v1.GET("/backtests/:id", handler.GetBacktestDetail(backtestSvc))

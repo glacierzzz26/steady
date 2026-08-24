@@ -6,6 +6,8 @@ import Seg from '../../components/Seg'
 import Tag from '../../components/Tag'
 import { mapAction, signalsApi, type SignalAction, type StrategyInfo } from '../../api'
 import { useApi } from '../../hooks/useApi'
+import { fmtNum } from '../../lib/format'
+import { fmtName } from '../../lib/names'
 
 const SIG_PG = 10
 const G1_HINT = '待 G1 后端补齐因子分项/行情'
@@ -34,14 +36,14 @@ function ParamRow({ k, v }: { k: string; v: unknown }) {
   )
 }
 
-/** G1 缺口列：缺失时显示 — 并带 title 提示 */
+/** G1 缺口列：缺失时显示 — 并带 title 提示；数值最多两位小数（功能建议 ⑤） */
 function G1Cell({ v, cls }: { v?: number | null; cls?: string }) {
   return v === undefined || v === null || Number.isNaN(v) ? (
     <td className={`r num muted ${cls ?? ''}`} title={G1_HINT}>
       —
     </td>
   ) : (
-    <td className={`r num ${cls ?? ''}`}>{v}</td>
+    <td className={`r num ${cls ?? ''}`}>{fmtNum(v)}</td>
   )
 }
 
@@ -50,7 +52,7 @@ function StrategyCard({ strat }: { strat?: StrategyInfo }) {
   const weights = Object.entries(strat.factor_weights ?? {})
   return (
     <div className="card">
-      <h3>策略 {strat.name}</h3>
+      <h3>策略 {fmtName(strat.zh_name, strat.name)}</h3>
       <table style={{ fontSize: 14 }}>
         <tbody>
           <tr>
@@ -103,6 +105,8 @@ export default function Signal() {
     () => signalsApi.getSignals({ action, page, page_size: SIG_PG }),
     [action, page],
   )
+  // name → zh_name 映射（信号明细头只带英文 strategy，展示补中文）
+  const zhBy = new Map((strategies.data?.items ?? []).map(s => [s.name, s.zh_name]))
   // KPI 计数（page_size=1 只取 total）
   const buy = useApi(() => signalsApi.getSignals({ action: 'BUY', page_size: 1 }), [])
   const sell = useApi(() => signalsApi.getSignals({ action: 'SELL', page_size: 1 }), [])
@@ -137,7 +141,7 @@ export default function Signal() {
           <span className="hint">
             {list.data?.trade_date ? (
               <span style={{ color: 'var(--txt3)' }}>
-                交易日期 {list.data.trade_date} · {list.data.strategy}
+                交易日期 {list.data.trade_date} · {fmtName(zhBy.get(list.data.strategy), list.data.strategy)}
               </span>
             ) : (
               <span style={{ color: 'var(--txt3)' }}>暂无信号</span>

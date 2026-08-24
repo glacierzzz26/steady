@@ -18,12 +18,14 @@ import (
 
 // 策略生命周期错误（handler 映射 400/404）
 var (
-	ErrStrategyNotFound    = errors.New("策略不存在")
-	ErrStrategyExists      = errors.New("策略名已存在")
-	ErrStrategyNotDraft    = errors.New("仅草稿状态可编辑")
-	ErrStrategyTransition  = errors.New("非法的状态流转")
-	ErrStrategyArchived    = errors.New("已归档策略不可编辑或激活")
-	ErrStrategyInvalidData = errors.New("factor_weights 必须为非空 JSON 对象")
+	ErrStrategyNotFound     = errors.New("策略不存在")
+	ErrStrategyExists       = errors.New("策略名已存在")
+	ErrStrategyNotDraft     = errors.New("仅草稿状态可编辑")
+	ErrStrategyTransition   = errors.New("非法的状态流转")
+	ErrStrategyArchived     = errors.New("已归档策略不可编辑或激活")
+	ErrStrategyInvalidData  = errors.New("factor_weights 必须为非空 JSON 对象")
+	ErrStrategyActiveNotDel = errors.New("运行中策略不可删除，请先暂停/归档")
+	ErrStrategyHasSignals   = errors.New("策略已有信号记录，不可删除")
 )
 
 // strategyTransitions 状态机允许的流转（draft → backtest → sample → active → paused/archived）
@@ -34,13 +36,13 @@ var strategyTransitions = map[string]map[string]bool{
 		model.StrategyArchived: true,
 	},
 	model.StrategyBacktest: {
-		model.StrategySample: true,
-		model.StrategyDraft:  true,
+		model.StrategySample:   true,
+		model.StrategyDraft:    true,
 		model.StrategyArchived: true,
 	},
 	model.StrategySample: {
-		model.StrategyActive: true,
-		model.StrategyDraft:  true,
+		model.StrategyActive:   true,
+		model.StrategyDraft:    true,
 		model.StrategyArchived: true,
 	},
 	model.StrategyActive: {
@@ -204,6 +206,26 @@ func (s *StrategyService) Switch(name, to string) (*model.Strategy, error) {
 		return nil, err
 	}
 	return s.Get(name)
+}
+
+// Delete 删除策略（第一轮测试 #2 补删除入口）。
+// 约束：运行中不可删（先暂停/归档）；已有信号记录不可删（strategy_signal FK 引用 + 历史留痕）。
+func (s *StrategyService) Delete(name string) error {
+	st, err := s.Get(name)
+	if err != nil {
+		return err
+	}
+	if st.Status == model.StrategyActive {
+		return ErrStrategyActiveNotDel
+	}
+	n, err := s.repo.CountStrategySignals(name)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return ErrStrategyHasSignals
+	}
+	return s.repo.Delete(name)
 }
 
 // StrategyInput 创建/更新请求体

@@ -1,5 +1,11 @@
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { marketApi, type IndexQuote, type MarketStatus } from '../api'
+import { useApi } from '../hooks/useApi'
+import { fmtChg } from '../lib/format'
 import { crumbs } from '../mock/data'
+
+/** 行情概览指数（topbar 芯片；与后端 /index/quotes 一致） */
+const QUOTE_CODES = ['sh000001', 'sh000300', 'sh000905']
 
 interface NavItem {
   to: string
@@ -45,6 +51,31 @@ const NAV: Array<{ label: string; items: NavItem[] }> = [
   },
 ]
 
+const WEEKDAY = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+
+function weekdayZh(date: string): string {
+  return WEEKDAY[new Date(date).getDay()]
+}
+
+/** 右上角市场状态 chip：交易日盘中→交易中；交易日休市时段→已收盘/午间；非交易日→休市 */
+function marketChip(s?: MarketStatus): { label: string; cls: string } {
+  if (!s) return { label: '● 状态加载中', cls: '' }
+  if (!s.is_trade_day) {
+    const wd = new Date(s.today).getDay()
+    return { label: `● 休市 · ${wd === 0 || wd === 6 ? '周末' : '休市日'}`, cls: 'rest' }
+  }
+  switch (s.market_phase) {
+    case 'open':
+      return { label: '● 交易中', cls: 'live' }
+    case 'pre_open':
+      return { label: '● 今日开市 · 未开盘', cls: 'live' }
+    case 'lunch_break':
+      return { label: '● 午间休市', cls: 'rest' }
+    default:
+      return { label: '● 今日已收盘', cls: 'rest' }
+  }
+}
+
 /** 路径 → 面包屑 key */
 function crumbKey(pathname: string): string {
   if (pathname.startsWith('/stocks/')) return 'stockd'
@@ -69,6 +100,17 @@ function crumbKey(pathname: string): string {
 export default function MainLayout() {
   const { pathname } = useLocation()
   const [title, sub] = crumbs[crumbKey(pathname)] ?? ['', '']
+  const mkt = useApi(() => marketApi.getStatus(), [])
+  const quotes = useApi(() => marketApi.getQuotes(QUOTE_CODES), [])
+  const chip = marketChip(mkt.data)
+
+  /** 指数芯片：真实行情；无数据/接口异常则不渲染（不做写死 mock） */
+  const quoteChips = (quotes.data?.items ?? []).map((q: IndexQuote) => (
+    <span className="chip" key={q.code} title={`${q.name} ${q.trade_date} 收盘 ${q.close}`}>
+      {q.name}{' '}
+      <b className={`num ${q.change_pct >= 0 ? 'up' : 'down'}`}>{fmtChg(q.change_pct)}</b>
+    </span>
+  ))
 
   return (
     <div className="app">
@@ -105,11 +147,15 @@ export default function MainLayout() {
           </div>
           <div className="row">
             <span>数据截至</span>
-            <span className="num">08-21 收盘</span>
+            <span className="num">{mkt.data?.last_trade_date ? `${mkt.data.last_trade_date.slice(5)} 收盘` : '—'}</span>
           </div>
           <div className="row">
             <span>下一交易日</span>
-            <span className="num">08-24 周一</span>
+            <span className="num">
+              {mkt.data?.next_trade_date
+                ? `${mkt.data.next_trade_date.slice(5)} ${weekdayZh(mkt.data.next_trade_date)}`
+                : '—'}
+            </span>
           </div>
         </div>
       </aside>
@@ -120,13 +166,10 @@ export default function MainLayout() {
           <span className="crumb">{title}</span>
           <span className="sub">{sub}</span>
           <div className="top-right">
-            <span className="chip rest">● 休市 · 周末</span>
-            <span className="chip">
-              沪深300 <b className="num up">+0.32%</b>
+            <span className={`chip ${chip.cls}`} title={mkt.error ? '市场状态接口暂不可用' : undefined}>
+              {chip.label}
             </span>
-            <span className="chip">
-              中证500 <b className="num down">-0.18%</b>
-            </span>
+            {quoteChips}
             <div className="avatar">主</div>
           </div>
         </div>

@@ -17,7 +17,7 @@ from app.sources import tushare
 logger = logging.getLogger(__name__)
 
 # 指数代码（新浪格式）→ 名称
-INDEX_NAMES = {"sh000300": "沪深300", "sh000905": "中证500"}
+INDEX_NAMES = {"sh000001": "上证指数", "sh000300": "沪深300", "sh000905": "中证500"}
 
 
 def build_rows(symbol: str, df: pd.DataFrame,

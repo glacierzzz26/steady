@@ -318,6 +318,16 @@ export interface SignalHistoryData {
   items: SignalHistoryItem[]
 }
 
+// ============ 市场状态（GET /market/status，右上角开市/休市 chip）============
+export interface MarketStatus {
+  today: string // YYYY-MM-DD（CST）
+  is_trade_day: boolean
+  market_phase: 'pre_open' | 'open' | 'lunch_break' | 'closed' | 'off_day'
+  phase_label: string // 未开盘 / 交易中 / 午间休市 / 已收盘 / 休市
+  last_trade_date: string // 上一交易日
+  next_trade_date: string // 下一交易日（>= today）
+}
+
 // ============ 指数基准 + 回测（契约 §4.9 / §4.10）============
 export interface IndexNavItem {
   trade_date: string
@@ -327,6 +337,19 @@ export interface IndexNavItem {
 export interface IndexNavData {
   code: string
   items: IndexNavItem[]
+}
+
+// ============ 指数行情概览（GET /index/quotes，topbar 三枚指数芯片）============
+export interface IndexQuote {
+  code: string // sh000001 / sh000300 / sh000905
+  name: string // 上证指数 / 沪深300 / 中证500
+  close: number // 最新收盘
+  change_pct: number // 较上一交易日涨跌幅（%）
+  trade_date: string
+}
+
+export interface IndexQuotesData {
+  items: IndexQuote[]
 }
 
 export type BacktestStatus = 'pending' | 'running' | 'done' | 'failed'

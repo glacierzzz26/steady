@@ -146,6 +146,28 @@ export function corrOpt(facs: string[], corr: number[][]): EChartsOption {
 }
 
 /** K 线 + 成交量 */
+/** K线 tooltip 中文渲染：开盘/收盘/最低/最高（替代 ECharts 默认英文 open/close/lowest/highest） */
+function klineTipFmt(ps: unknown): string {
+  const params = (Array.isArray(ps) ? ps : [ps]) as Array<{
+    axisValue?: string
+    seriesName: string
+    value: unknown
+  }>
+  const lines = [params[0]?.axisValue ?? '']
+  for (const p of params) {
+    if (p.seriesName === '日K' && Array.isArray(p.value) && p.value.length === 4) {
+      const [open, close, low, high] = p.value as number[]
+      const f = (x: number) => (x === null || x === undefined ? '--' : x.toFixed(2))
+      lines.push(`开盘: ${f(open)}　收盘: ${f(close)}`)
+      lines.push(`最低: ${f(low)}　最高: ${f(high)}`)
+    } else if (typeof p.value === 'number') {
+      const v = p.value
+      lines.push(`${p.seriesName}: ${v >= 10000 ? `${(v / 10000).toFixed(2)}万` : v.toFixed(2)}`)
+    }
+  }
+  return lines.join('<br/>')
+}
+
 export function klineOpt(kdates: string[], d: number[][], v: number[]): EChartsOption {
   const n = kdates.length
   // 默认显示最近 120 个交易日（全量十年可拖回）；主图与成交量轴联动
@@ -174,7 +196,7 @@ export function klineOpt(kdates: string[], d: number[][], v: number[]): EChartsO
         },
       },
     ],
-    tooltip: { trigger: 'axis', ...tip, axisPointer: { type: 'cross' } },
+    tooltip: { trigger: 'axis', ...tip, axisPointer: { type: 'cross' }, formatter: klineTipFmt },
     legend: { textStyle: { color: '#8B93A7', fontSize: 13 }, top: 0, data: ['MA5', 'MA20'] },
     xAxis: [
       { type: 'category', data: kdates, ...axis, axisLabel: { show: false } },

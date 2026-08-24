@@ -4,6 +4,7 @@ import Kpi from '../../components/Kpi'
 import Notice from '../../components/Notice'
 import Tag from '../../components/Tag'
 import { backtestApi, strategyApi, type BacktestJobItem } from '../../api'
+import { fmtName } from '../../lib/names'
 import { useApi } from '../../hooks/useApi'
 import { lineOpt } from '../../mock/chartOpt'
 
@@ -51,6 +52,8 @@ export default function Backtest() {
 
   const strategyOpts = strategies.data?.items ?? []
   const btRows = list.data?.items ?? []
+  // name → zh_name 映射（回测历史表只存英文 strategy_name，展示时补中文）
+  const zhBy = new Map(strategyOpts.map(s => [s.name, s.zh_name]))
 
   const navOption = useMemo(() => {
     const n = detail.data?.nav ?? []
@@ -111,7 +114,7 @@ export default function Backtest() {
             <option value="">请选择策略</option>
             {strategyOpts.map(s => (
               <option key={s.name} value={s.name}>
-                {s.name} · {s.status === 'active' ? '运行中' : s.status}
+                {fmtName(s.zh_name, s.name)} · {s.status === 'active' ? '运行中' : s.status}
               </option>
             ))}
           </select>
@@ -205,7 +208,7 @@ export default function Backtest() {
                       style={{ cursor: 'pointer', ...(sel ? { background: 'rgba(76,125,255,.08)' } : {}) }}
                     >
                       <td className="num">#{j.id}</td>
-                      <td>{j.strategy_name}</td>
+                      <td>{fmtName(zhBy.get(j.strategy_name), j.strategy_name)}</td>
                       <td className="r num">{`${j.start_date}~${j.end_date}`}</td>
                       <td className="r num">{j.top_n}</td>
                       <td className="r num">{fillModeLabel(j.fill_mode)}</td>
@@ -233,7 +236,7 @@ export default function Backtest() {
       <div className="card">
         <h3>
           {d
-            ? `回测 #${d.id} · ${d.strategy_name} · ${d.start_date}~${d.end_date} · top_n ${d.top_n} · ${fillModeLabel(d.fill_mode)}`
+            ? `回测 #${d.id} · ${fmtName(zhBy.get(d.strategy_name), d.strategy_name)} · ${d.start_date}~${d.end_date} · top_n ${d.top_n} · ${fillModeLabel(d.fill_mode)}`
             : '回测详情'}
           <span className="hint">
             {dStatus ? (

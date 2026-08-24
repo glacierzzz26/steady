@@ -36,10 +36,10 @@ func strategyDB(t *testing.T) *gorm.DB {
 	if err := db.Migrator().DropTable(&model.BacktestResult{}); err != nil {
 		t.Fatalf("清理 backtest_result 失败: %v", err)
 	}
-	if err := db.Migrator().DropTable(&model.Strategy{}, &model.BacktestJob{}); err != nil {
+	if err := db.Migrator().DropTable(&model.Strategy{}, &model.BacktestJob{}, &model.StrategySignal{}); err != nil {
 		t.Fatalf("清理测试表失败: %v", err)
 	}
-	if err := db.AutoMigrate(&model.Strategy{}, &model.BacktestJob{}, &model.BacktestResult{}); err != nil {
+	if err := db.AutoMigrate(&model.Strategy{}, &model.BacktestJob{}, &model.BacktestResult{}, &model.StrategySignal{}); err != nil {
 		t.Fatalf("AutoMigrate 失败: %v", err)
 	}
 	// backtest_job 幂等唯一键（生产在 init.sql，测试库 AutoMigrate 不建复合唯一索引）
@@ -103,7 +103,9 @@ func TestStrategyCreateAndEdit(t *testing.T) {
 	// 草稿可编辑
 	upd, err := svc.Update("mf_v2", StrategyInput{Params: json.RawMessage(`{"top_n":30,"buy_buffer":10}`)})
 	mustNoErr(t, err)
-	var params struct{ TopN int `json:"top_n"` }
+	var params struct {
+		TopN int `json:"top_n"`
+	}
 	if err := json.Unmarshal(upd.Params, &params); err != nil || params.TopN != 30 {
 		t.Errorf("更新后 top_n = %v, want 30", params.TopN)
 	}
@@ -179,6 +181,65 @@ func TestStrategyStateMachineAndSingleActive(t *testing.T) {
 	// 不存在 → ErrStrategyNotFound
 	_, err = svc.Get("nope")
 	mustErrIs(t, err, ErrStrategyNotFound)
+}
+
+// 第一轮测试 #4：已暂停的策略可重新启用（paused → active 恢复运行，旧 active 降级 paused）
+func TestStrategyPausedCanReactivate(t *testing.T) {
+	svc := newStrategySvc(t)
+	seedActive(t, svc, "multi_factor")
+
+	// 暂停 multi_factor 后重新启用
+	if _, err := svc.Switch("multi_factor", model.StrategyPaused); err != nil {
+		t.Fatalf("暂停失败: %v", err)
+	}
+	st, err := svc.Switch("multi_factor", model.StrategyActive)
+	mustNoErr(t, err)
+	if st.Status != model.StrategyActive {
+		t.Errorf("重新启用后应为 active, got %s", st.Status)
+	}
+	active, err := svc.repo.GetActive()
+	mustNoErr(t, err)
+	if active == nil || active.Name != "multi_factor" {
+		t.Errorf("GetActive = %+v, want multi_factor", active)
+	}
+}
+
+// 第一轮测试 #2：删除策略（草稿可删；运行中拒绝；已有信号记录拒绝）
+func TestStrategyDelete(t *testing.T) {
+	svc := newStrategySvc(t)
+	mustErrIs(t, svc.Delete("不存在"), ErrStrategyNotFound)
+
+	// 草稿可删除
+	_, err := svc.Create(StrategyInput{
+		Name: "tmp_draft", FactorWeights: json.RawMessage(`{"ma_trend":0.2}`),
+	})
+	mustNoErr(t, err)
+	mustNoErr(t, svc.Delete("tmp_draft"))
+	if _, err := svc.Get("tmp_draft"); !errors.Is(err, ErrStrategyNotFound) {
+		t.Errorf("删除后应不存在, got err=%v", err)
+	}
+
+	// 运行中不可删
+	seedActive(t, svc, "multi_factor")
+	mustErrIs(t, svc.Delete("multi_factor"), ErrStrategyActiveNotDel)
+
+	// 已有信号记录不可删（strategy_signal FK + 历史留痕）
+	db := strategyDB(t)
+	repo := repository.NewStrategyRepository(db)
+	svc2 := NewStrategyService(repo, NewBacktestService(repository.NewBacktestRepository(db), repo))
+	_, err = svc2.Create(StrategyInput{
+		Name: "sig_strategy", FactorWeights: json.RawMessage(`{"ma_trend":0.2}`),
+	})
+	mustNoErr(t, err)
+	// 直接向 strategy_signal 插入一条信号（模拟曾上线产生过信号）
+	if err := db.Exec(
+		`INSERT INTO strategy_signal (strategy_name, code, trade_date, score, action)
+		 VALUES (?, '600000', CURRENT_DATE, 60.0, 'BUY')`,
+		"sig_strategy",
+	).Error; err != nil {
+		t.Fatalf("插入信号失败: %v", err)
+	}
+	mustErrIs(t, svc2.Delete("sig_strategy"), ErrStrategyHasSignals)
 }
 
 func TestStrategyListLatestBacktestID(t *testing.T) {
