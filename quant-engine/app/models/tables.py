@@ -115,7 +115,30 @@ class FactorDefinition(Base):
     weight = Column(Numeric(5, 4))
     version = Column(String(20), default="v1.0")
     status = Column(String(10), default="active")
+    params = Column(JSON)  # G10 变体参数快照（如 ma_trend 的 {"short":10,"long":20}），迁移 003
     created_at = Column(DateTime, server_default=func.now())
+
+
+class FactorTrial(Base):
+    """G10 试算/寻优任务（DB 队列：Go 提交 pending → 引擎消费，对齐 backtest_job）
+
+    params 存参（迁移 003 契约）：
+      - 单组试算 {"start","end","params":{...}}
+      - 参数寻优 {"start","end","param_grid":{...}}
+    result 为检验结果 JSONB（trial: ic_series/icir/quantiles/monotonic；
+    optimize: 另含 heatmap 网格）。kind 由 params 是否含 param_grid 区分（不加列）。
+    """
+
+    __tablename__ = "factor_trial"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    factor_name = Column(String(50), nullable=False)
+    params = Column(JSON)
+    status = Column(String(16), default="pending")
+    result = Column(JSON)
+    error = Column(String)
+    created_at = Column(DateTime, server_default=func.now())
+    finished_at = Column(DateTime)
 
 
 class FactorStat(Base):

@@ -87,13 +87,6 @@ func (r *StrategyRepository) SwitchTx(name, to string) error {
 	})
 }
 
-// GetFactors 因子定义全量（构建器因子池：name/category/description/weight）
-func (r *StrategyRepository) GetFactors() ([]model.FactorDefinition, error) {
-	var items []model.FactorDefinition
-	err := r.db.Order("weight DESC, name").Find(&items).Error
-	return items, err
-}
-
 // CountStrategySignals 该策略已有信号记录数（删除前置检查：strategy_signal 有 FK 引用 strategy.name）
 func (r *StrategyRepository) CountStrategySignals(name string) (int64, error) {
 	var n int64

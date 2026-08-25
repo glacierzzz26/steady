@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS factor_definition (
     weight      DECIMAL(5,4),               -- 默认权重
     version     VARCHAR(20)   NOT NULL DEFAULT 'v1.0',  -- 版本号（2.3 因子研究）
     status      VARCHAR(10)   NOT NULL DEFAULT 'active',  -- draft/trial/verified/active/disabled
+    params      JSONB,                      -- 变体因子参数快照（2.3b FactorFactory，fork 随定义复制）
     created_at  TIMESTAMP     DEFAULT NOW()
 );
 
@@ -144,6 +145,22 @@ CREATE TABLE IF NOT EXISTS factor_corr (
     matrix      JSONB         NOT NULL,      -- [[...6x6...]] 因子两两相关性
     created_at  TIMESTAMP     DEFAULT NOW()
 );
+
+-- ------------------------------------------------------------
+-- 5.2 因子试算任务（2.3b FactorFactory：DB 队列，对齐 backtest_job 模式）
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS factor_trial (
+    id          BIGSERIAL     PRIMARY KEY,
+    factor_name VARCHAR(50)   NOT NULL REFERENCES factor_definition (name),
+    params      JSONB,                          -- 试算参数（窗口/持有期网格等）
+    status      VARCHAR(16)   NOT NULL DEFAULT 'pending',  -- pending/running/done/failed
+    result      JSONB,                          -- IC/ICIR/分层单调性/热力图数据
+    error       TEXT,
+    created_at  TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    finished_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_factor_trial_status ON factor_trial (status);
+CREATE INDEX IF NOT EXISTS idx_factor_trial_factor ON factor_trial (factor_name);
 
 -- ------------------------------------------------------------
 -- 6. 策略

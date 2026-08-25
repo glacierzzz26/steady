@@ -34,18 +34,31 @@ def _job(jid: int, **kw):
 
 
 def test_claim_job_atomic(db):
-    """claim 返回 pending 任务并原子置为 running；再次 claim 不重复领取"""
+    """claim 返回一个 pending 任务并原子置为 running；单行锁定（回归 2.3b
+    批量 claim 坑：不带 limit 的 UPDATE 会把所有 pending 一次置 running，
+    其余被静默挂起），剩余 pending 留待下一轮领取"""
     db.add(_job(1))
     db.add(_job(2, status="done"))
+    db.add(_job(3))
     db.commit()
 
     claimed = claim_job(db)
     assert claimed is not None
     assert claimed.status == "running"
+    assert claimed.id in (1, 3)
 
-    # 库中状态已变更（原子），done 不参与领取，无剩余 pending → None
+    # 库中状态已变更（原子），done 不参与领取；只应有一个 running、一个 pending 留存
     db.expire_all()
-    assert db.execute(select(BacktestJob).where(BacktestJob.id == claimed.id)).scalar_one().status == "running"
+    statuses = {
+        r.id: r.status for r in db.execute(
+            select(BacktestJob).where(BacktestJob.id.in_([1, 2, 3]))).scalars()
+    }
+    assert list(statuses.values()).count("running") == 1
+    assert list(statuses.values()).count("pending") == 1
+
+    # 下一轮领取剩余那个；全部清空后再 claim → None
+    claimed2 = claim_job(db)
+    assert claimed2 is not None and claimed2.id != claimed.id
     assert claim_job(db) is None
 
 

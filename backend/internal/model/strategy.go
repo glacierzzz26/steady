@@ -15,20 +15,33 @@ const (
 
 // FactorDefinition 因子定义（对应表 factor_definition）
 // 2.3 因子研究：version 版本号、status 状态机（draft/trial/verified/active/disabled，
-// 仅 active 参与评分池）。DDL 以 init.sql/002 迁移为准。
+// 仅 active 参与评分池）；2.3b 增 params 变体因子参数快照（G10 fork「含 params 快照」）。
+// 注意：json tag 必须小写——前端 FactorDefinition 类型按 name/category/... 读取，
+// 无 tag 时 encoding/json 会输出 Go 字段名（Name/Category），2.3a 遗留的潜在 bug。
+// DDL 以 init.sql/002+003 迁移为准。
 type FactorDefinition struct {
-	ID          uint64    `gorm:"primaryKey"`
-	Name        string    `gorm:"uniqueIndex;size:50;not null"`
-	Category    string    `gorm:"size:20"` // trend / value / quality / risk
-	Description string    `gorm:"type:text"`
-	Formula     string    `gorm:"type:text"`
-	Weight      float64   `gorm:"type:decimal(5,4)"`
-	Version     string    `gorm:"size:20;default:v1.0"`
-	Status      string    `gorm:"size:10;default:active"`
-	CreatedAt   time.Time
+	ID          uint64         `json:"id" gorm:"primaryKey"`
+	Name        string         `json:"name" gorm:"uniqueIndex;size:50;not null"`
+	Category    string         `json:"category" gorm:"size:20"` // trend / value / quality / risk
+	Description string         `json:"description" gorm:"type:text"`
+	Formula     string         `json:"formula" gorm:"type:text"`
+	Weight      float64        `json:"weight" gorm:"type:decimal(5,4)"`
+	Version     string         `json:"version" gorm:"size:20;default:v1.0"`
+	Status      string         `json:"status" gorm:"size:10;default:active"`
+	Params      datatypes.JSON `json:"params,omitempty" gorm:"type:jsonb"`
+	CreatedAt   time.Time      `json:"created_at"`
 }
 
 func (FactorDefinition) TableName() string { return "factor_definition" }
+
+// 因子状态（2.3 状态机：draft → trial → verified → active → disabled；仅 active 进评分池）
+const (
+	FactorStatusDraft    = "draft"
+	FactorStatusTrial    = "trial"
+	FactorStatusVerified = "verified"
+	FactorStatusActive   = "active"
+	FactorStatusDisabled = "disabled"
+)
 
 // FactorStat 因子检验统计（G9 FactorLab 数据源；quant-engine 预计算 / Go 读取聚合）
 // per-date 追加：每 (因子, 交易日) 一行；IC 系列为 T→T+{1,5,10,20,60} 横截面 Rank IC，
@@ -63,6 +76,26 @@ type FactorCorr struct {
 }
 
 func (FactorCorr) TableName() string { return "factor_corr" }
+
+// FactorTrial 因子试算任务（G10 FactorFactory；对应表 factor_trial，DB 队列）
+// 状态机 pending → running → done/failed（对齐 backtest_job 模式：Go 提交 pending，
+// quant-engine 消费写 result）。DDL 见 init.sql 5.2 节 / 003 迁移。
+// Params 为 JSONB 试算参数（trial: {"start","end",...单组参数}；
+// optimize: {"start","end","param_grid":{...}}，kind 由是否含 param_grid 区分）；
+// Result 为 JSONB 结果（trial: {"ic_series","icir","quantiles","monotonic","heatmap"?}；
+// optimize: {"windows","horizons","grid"}）。
+type FactorTrial struct {
+	ID         uint64         `gorm:"primaryKey;autoIncrement" json:"id"`
+	FactorName string         `gorm:"size:50;not null" json:"factor_name"`
+	Params     datatypes.JSON `gorm:"type:jsonb" json:"params"`
+	Status     string         `gorm:"size:16;not null;default:pending" json:"status"`
+	Result     datatypes.JSON `gorm:"type:jsonb" json:"result,omitempty"`
+	Error      string         `gorm:"type:text" json:"error"`
+	CreatedAt  time.Time      `json:"created_at"`
+	FinishedAt *time.Time     `json:"finished_at"`
+}
+
+func (FactorTrial) TableName() string { return "factor_trial" }
 
 // FactorValue 因子值（对应表 factor_value，横截面排名）
 type FactorValue struct {

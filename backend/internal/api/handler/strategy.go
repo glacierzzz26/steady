@@ -9,7 +9,6 @@ import (
 	"gorm.io/datatypes"
 
 	"quant-system/backend/internal/model"
-	"quant-system/backend/internal/repository"
 	"quant-system/backend/internal/service"
 	"quant-system/backend/pkg/response"
 )
@@ -234,18 +233,6 @@ func CompareStrategies(strategySvc *service.StrategyService) gin.HandlerFunc {
 			"candidate": toCompareSide(out.Cand),
 			"benchmark": toCompareBenchmark(out.Base),
 		})
-	}
-}
-
-// GetFactors 因子定义列表（GET /factors；StrategyFactory 构建器因子池）
-func GetFactors(repo *repository.StrategyRepository) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		items, err := repo.GetFactors()
-		if err != nil {
-			response.Fail(c, http.StatusInternalServerError, response.CodeInternalError, "查询失败")
-			return
-		}
-		response.OK(c, gin.H{"items": items})
 	}
 }
 
