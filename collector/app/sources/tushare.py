@@ -20,6 +20,7 @@
 每天个位数。积分提升后再逐步扩大按股票场景。
 """
 import logging
+import time
 from datetime import date, timedelta
 
 import pandas as pd
@@ -251,24 +252,42 @@ def daily_basic_snapshot(pro, trade_date, codes=None) -> list[dict]:
 # ---------- 指数 ----------
 
 def index_daily_rows(pro, symbol: str, start_date=None, end_date=None) -> list[dict]:
-    """新浪指数码 sh000300 → pro.index_daily → build_rows(index) 同形状行"""
+    """新浪指数码 sh000300 → pro.index_daily → build_rows(index) 同形状行
+
+    Tushare 120 积分档 index_daily 频率 1次/分钟：job_sync_index 循环毫秒级连拉
+    3 个指数时，第 2、3 个必然「频率超限」。命中该错误 sleep 60s 重试（最多
+    3 次），重试耗尽才抛错，由上层降级 AkShare（保住兜底）；非限流异常直接抛。
+    """
     start_date, end_date = _range(start_date, end_date, back_days=365, forward_days=0)
     tc = INDEX_TS_CODE.get(symbol, symbol.replace("sh", "") + ".SH")
-    df = pro.index_daily(ts_code=tc, start_date=_ymd(start_date), end_date=_ymd(end_date))
-    if df is None or df.empty:
-        return []
-    rows = []
-    for _, r in df.iterrows():
-        rows.append({
-            "code": symbol,
-            "trade_date": _to_date(r["trade_date"]),
-            "open": float(r["open"]), "high": float(r["high"]),
-            "low": float(r["low"]), "close": float(r["close"]),
-            "volume": int(r["vol"]) if pd.notna(r.get("vol")) else None,
-            "amount": float(r["amount"]) * 1000 if pd.notna(r.get("amount")) else None,
-            "adj_factor": None,
-        })
-    return rows
+    last_err = None
+    for attempt in range(3):
+        try:
+            df = pro.index_daily(ts_code=tc, start_date=_ymd(start_date),
+                                 end_date=_ymd(end_date))
+            if df is None or df.empty:
+                return []
+            rows = []
+            for _, r in df.iterrows():
+                rows.append({
+                    "code": symbol,
+                    "trade_date": _to_date(r["trade_date"]),
+                    "open": float(r["open"]), "high": float(r["high"]),
+                    "low": float(r["low"]), "close": float(r["close"]),
+                    "volume": int(r["vol"]) if pd.notna(r.get("vol")) else None,
+                    "amount": float(r["amount"]) * 1000 if pd.notna(r.get("amount")) else None,
+                    "adj_factor": None,
+                })
+            return rows
+        except Exception as e:
+            if "频率超限" not in str(e):
+                raise
+            last_err = e
+            if attempt < 2:
+                logger.warning("%s index_daily 频率超限(%s)，60s 后重试(%d/3)",
+                               symbol, e, attempt + 2)
+                time.sleep(60)
+    raise last_err
 
 
 # ---------- 交易日历 ----------
