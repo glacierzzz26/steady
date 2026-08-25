@@ -89,11 +89,16 @@ def icir(ic: pd.Series, min_periods: int = 5) -> float | None:
 def quantile_groups(s: pd.Series, q: int = QUANTILES) -> pd.Series:
     """横截面分 q 组（1=因子最优组，q=最差组）。
 
-    秩分位法（pct rank × q）：恒出满组、处理并列，避免 qcut 在极端并列下报错/降组。
+    基于秩位置均分：rank(method='first') 得唯一秩 1..N，按位置均匀分 q 桶，
+    恒出满组（N≥q）、对因子值并列鲁棒。
+    修正前实现 rank(pct=True, method='average') × q 截断：顶部有并列时并列股
+    pct<1.0、乘 q 截断后全部落入次优桶 → Q1（最优组）恒空、factor_stat.q1 全 NULL
+    （生产 484 天真实数据暴露，2026-08-26 修复）。
     """
-    pct = s.rank(pct=True, method="average")
-    bucket = (pct * q).clip(lower=1, upper=q).astype(int)  # 1=最差..q=最优
-    return q - bucket + 1
+    r = s.rank(method="first")              # 1..N，唯一秩
+    n = len(r)
+    bucket = (((r - 1) * q) // n).astype(int) + 1   # 位置桶 1..q（1=最低）
+    return q - bucket + 1                             # 翻转：1=最优
 
 
 def quantile_returns_by_date(normalized: pd.DataFrame, fwd_ret: pd.DataFrame,
