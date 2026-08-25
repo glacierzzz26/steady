@@ -217,7 +217,7 @@ frontend-v2 把系统定位从「数据监控 + 模拟交易」升级为「个�
 
 > **2.1 前端接入已于 2026-08-23 完成**（Settings → Backtest 共 9 页接真实 API，`feat/frontend-v2-api` 分支）。缺字段一律按**数据诚实**原则标空态承接（不造假），后端补齐后前端**零返工自动点亮**。G1~G8 的**后端实现**属后续阶段（纯后端代码 + 免费 AkShare，见[数据缺口盘点](frontend-v2-数据缺口盘点.md)），不在 2.1 前端接入范围。
 >
-> **G1~G5/G7 后端实现已于 2026-08-23 按序落地并全链路验证通过**（见下表 ✅）；**G8 回测 T+1 已随 Iteration 3 于同日落地验证**（见下表 + 归档 `../stages/回测校准.md`）；**G11 策略生命周期+风控已随 Iteration 4 于同日落地验证**（见下表 + 归档 `../stages/策略与风控.md`）；G6 采集经可行性论证后维持空态（见 G6 采集可行性注记）。前端已接可选字段，零返工自动点亮。
+> **G1~G5/G7 后端实现已于 2026-08-23 按序落地并全链路验证通过**（见下表 ✅）；**G8 回测 T+1 已随 Iteration 3 于同日落地验证**（见下表 + 归档 `../stages/回测校准.md`）；**G11 策略生命周期+风控已随 Iteration 4 于同日落地验证**（见下表 + 归档 `../stages/策略与风控.md`）；**G9 因子检验已随 2.3a 于 2026-08-25 落地验证**（见下表 + 归档 `../stages/2.3a-因子检验.md`）；G6 采集经可行性论证后维持空态（见 G6 采集可行性注记）。前端已接可选字段，零返工自动点亮。
 
 | 缺口 | 归属 | 前端空态(2.1) | 后端实现 |
 |---|---|---|---|
@@ -229,7 +229,7 @@ frontend-v2 把系统定位从「数据监控 + 模拟交易」升级为「个�
 | G6 简报表字段 | 2.1 | ✅ 字段映射核对通过（真实 sections 对齐）；北向/两市成交/恒生/A50「该能力未产出」 | ⬜ 采集已论证：见下方 G6 采集可行性注记 |
 | G7 运维页 | 2.1 | ✅ backend/db 真实 + 其余灰显「待 G7」 | ✅ 2026-08-23：/health/services 6 服务探活 + /health/data-assets 21 表行数 |
 | G8 回测 T+1 可信度 | 2.2 | ✅ 表单保留、提交不传 | ✅ 2026-08-23：fill_mode(t_close/t1_open)+t1_deviation，配对运行，11 个 fixture 用例，偏差报告 CLI，端到端验证通过（见归档 `../stages/回测校准.md`） |
-| G9 因子检验分析 | 2.3 | —（页面保留 mock） | ⬜ |
+| G9 因子检验分析 | 2.3 | ✅ FactorLab 已接真实 API（mock 移除） | ✅ 2026-08-25：`/factors` 扩展 version/status；`GET /factors/:name/stats`（IC 时序/ICIR/衰减/分层/单调性）+ `GET /factors/stats/correlation`（6×6 矩阵平均）；quant-engine `factor_research.py` 预计算 factor_stat/factor_corr 幂等写库；Go 仅读表+轻聚合（IC 单实现）。全链路契约 e2e 手工核对一致（见归档 `../stages/2.3a-因子检验.md`），并抓到并修复 2 个集成 bug（GORM 列名漂移 `ic5_d`/`ic_5d`、matrix 双重 JSON 编码） |
 | G10 因子 CRUD/试算/寻优 | 2.3 | —（页面保留 mock） | ⬜ |
 | G11 策略生命周期+风控 | 2.4 | ✅ StrategyFactory/Backtest 已接通（真实 API） | ✅ 2026-08-23：策略 CRUD/状态机/单 active/fork、`/strategies/compare` A/B（按策略名，见归档偏差注记）、风控落 Go 实盘+Python 回测、turnover/cost。95 Go / 68 Python 全绿。归档 `../stages/策略与风控.md` |
 

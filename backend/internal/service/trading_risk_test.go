@@ -21,8 +21,8 @@ import (
 
 // seedRiskBase 通用前置：扩展表迁移 + position 唯一索引 + active 策略 + 账户
 func seedRiskBase(t *testing.T, db *gorm.DB, params string) uint64 {
-	// ExecuteDay 还读 strategy / daily_price / stock_basic（GetSignals join / GetByCode）
-	if err := db.AutoMigrate(&model.Strategy{}, &model.DailyPrice{}, &model.StockBasic{}); err != nil {
+	// ExecuteDay 还读 strategy / daily_price / stock_basic / factor_value（GetSignals join / GetByCode）
+	if err := db.AutoMigrate(&model.Strategy{}, &model.DailyPrice{}, &model.StockBasic{}, &model.FactorValue{}); err != nil {
 		t.Fatalf("AutoMigrate 扩展表失败: %v", err)
 	}
 	if err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_position_account_code ON position (account_id, code)`).Error; err != nil {

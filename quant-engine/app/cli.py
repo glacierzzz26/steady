@@ -8,6 +8,8 @@
                                 [--fill-mode t_close|t1_open] [--save]
     python -m app.cli backtest-deviation [--start 2025-01-01]  # T vs T+1 偏差报告
                                 [--end 2026-08-20] [--top-n 20]
+    python -m app.cli factor-stats [--start 2025-01-01]  # 预计算因子检验统计
+                                [--end 2026-08-20]       # （factor_stat/factor_corr）
 """
 import argparse
 import logging
@@ -127,6 +129,25 @@ def cmd_backtest(args) -> bool:
     return True
 
 
+def cmd_factor_stats(args) -> bool:
+    """预计算因子检验统计（factor_stat/factor_corr，幂等 upsert，默认全历史）"""
+    from datetime import date as _date
+
+    from app.db import get_session
+    from app.factor_research import precompute_factor_stat
+
+    db = get_session()
+    result = precompute_factor_stat(
+        db, start=_date.fromisoformat(args.start) if args.start else None,
+        end=_date.fromisoformat(args.end) if args.end else None)
+    db.close()
+    if result.get("skipped"):
+        logger.error("因子检验预计算跳过：%s", result["skipped"])
+        return False
+    logger.info("因子检验预计算完成：%s", result)
+    return True
+
+
 def cmd_backtest_deviation(args) -> bool:
     """T vs T+1 偏差报告：同一区间跑两种成交假设，输出对比表（Iteration 3 交付物）"""
     from app.backtest.engine import BacktestEngine
@@ -184,6 +205,10 @@ def main():
     p_b.add_argument("--save", action="store_true",
                      help="提交回测任务并写入 backtest_job/backtest_result（默认仅打印报告）")
 
+    p_fs = sub.add_parser("factor-stats", help="预计算因子检验统计（factor_stat/factor_corr）")
+    p_fs.add_argument("--start", help="起始日 YYYY-MM-DD（默认 factor_value 最早日）")
+    p_fs.add_argument("--end", help="结束日 YYYY-MM-DD（默认 factor_value 最晚日）")
+
     p_d = sub.add_parser("backtest-deviation", help="T vs T+1 偏差报告")
     p_d.add_argument("--start", default=(date.today() - timedelta(days=365 * 2))
                      .isoformat(), help="起始日 YYYY-MM-DD（默认近 2 年）")
@@ -203,6 +228,8 @@ def main():
             ok = cmd_signals(args)
         elif args.cmd == "backtest":
             ok = cmd_backtest(args)
+        elif args.cmd == "factor-stats":
+            ok = cmd_factor_stats(args)
         elif args.cmd == "backtest-deviation":
             ok = cmd_backtest_deviation(args)
         elif args.cmd == "notify":

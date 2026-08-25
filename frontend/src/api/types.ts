@@ -261,17 +261,56 @@ export interface StrategiesData {
   items: StrategyInfo[]
 }
 
-// 因子定义（构建器因子池：GET /factors 真实 factor_definition）
+// 因子定义（构建器因子池：GET /factors 真实 factor_definition；2.3 补 version/status）
 export interface FactorDefinition {
   name: string
   category?: string
   description?: string
   formula?: string
   weight: number
+  version?: string
+  status?: string // draft/trial/verified/active/disabled（仅 active 参与评分池）
 }
 
 export interface FactorsData {
   items: FactorDefinition[]
+}
+
+// ============ 因子研究（2.3 G9 FactorLab，契约《因子研究闭环》§6.1）============
+export interface FactorStatPoint {
+  date: string // YYYY-MM-DD
+  ic: number | null // 所选 horizon 的当日 RankIC；尾部滞后为 null
+}
+
+export interface FactorDecayPoint {
+  horizon: number
+  ic: number | null
+}
+
+export interface FactorQuantile {
+  group: number // 1=因子最优组
+  ret: number | null // 组均前向收益（H=5）
+}
+
+/** GET /factors/:name/stats 响应 */
+export interface FactorStatsData {
+  factor: string
+  category?: string
+  range: { start: string; end: string; days: number }
+  horizon: number
+  ic_series: FactorStatPoint[]
+  icir: number | null
+  ic_mean: number | null
+  ic_std: number | null
+  ic_decay: FactorDecayPoint[]
+  quantiles: FactorQuantile[]
+  monotonic: number | null // Q1 跑赢 Q5 的交易日占比（0-1）
+}
+
+/** GET /factors/stats/correlation 响应 */
+export interface FactorCorrData {
+  factors: string[] // 6 因子规范序
+  matrix: Array<Array<number | null>> // 6×6 区间均值，无共现格为 null
 }
 
 // A/B 对比（§3.3 GET /strategies/compare）

@@ -99,7 +99,11 @@ class TradeCalendar(Base):
 
 
 class FactorDefinition(Base):
-    """因子定义（权重默认值来自 init.sql 预置）"""
+    """因子定义（权重默认值来自 init.sql 预置）
+
+    2.3 因子研究：version 版本号、status 状态机（draft/trial/verified/active/disabled，
+    仅 active 参与评分池）。DDL 以 init.sql/002 迁移为准。
+    """
 
     __tablename__ = "factor_definition"
 
@@ -109,6 +113,45 @@ class FactorDefinition(Base):
     description = Column(String)
     formula = Column(String)
     weight = Column(Numeric(5, 4))
+    version = Column(String(20), default="v1.0")
+    status = Column(String(10), default="active")
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class FactorStat(Base):
+    """因子检验统计（G9 FactorLab 数据源，quant-engine 预计算 / Go 读取聚合）
+
+    per-date 追加：每 (因子, 交易日) 一行，任意区间查询 = 读对应行，无缓存失效。
+    IC 系列为 T→T+{1,5,10,20,60} 横截面 Rank IC；q1..q5 为当日 5 分层组均
+    前向收益（H=5，q1=因子最优组）。
+    """
+
+    __tablename__ = "factor_stat"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    factor_name = Column(String(50), nullable=False)
+    trade_date = Column(Date, nullable=False)
+    ic_1d = Column(Numeric(12, 6))
+    ic_5d = Column(Numeric(12, 6))
+    ic_10d = Column(Numeric(12, 6))
+    ic_20d = Column(Numeric(12, 6))
+    ic_60d = Column(Numeric(12, 6))
+    q1 = Column(Numeric(12, 6))
+    q2 = Column(Numeric(12, 6))
+    q3 = Column(Numeric(12, 6))
+    q4 = Column(Numeric(12, 6))
+    q5 = Column(Numeric(12, 6))
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class FactorCorr(Base):
+    """因子两两相关矩阵（6×6，per-date，Go 读区间做矩阵平均）"""
+
+    __tablename__ = "factor_corr"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    trade_date = Column(Date, nullable=False)
+    matrix = Column(JSON)  # JSONB [[...6x6...]]，固定因子序见 factor_research.CORR_FACTORS
     created_at = Column(DateTime, server_default=func.now())
 
 

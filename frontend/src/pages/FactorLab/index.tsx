@@ -1,108 +1,214 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { EChartsOption } from 'echarts'
 import EChart from '../../components/EChart'
-import { corrOpt, decayOpt, genCorr, icBarOpt, lineOpt } from '../../mock/chartOpt'
-import { g, layerSeries, months } from '../../mock/random'
+import Notice from '../../components/Notice'
+import { factorApi } from '../../api'
+import type { FactorCorrData, FactorDefinition, FactorStatsData } from '../../api'
+import { corrOpt, decayOpt, icBarOpt, quintileOpt } from '../../mock/chartOpt'
 import { weightDefs } from '../../mock/data'
 
-/* ---- 因子卡数据 ---- */
-const factors = [
-  { zh: '均线趋势', en: 'ma_trend', status: 'warn', statusText: '存疑', ic: '0.021', icClass: '', meta: 'ICIR 0.18 · 二值信号', w: '80%' },
-  { zh: 'MACD信号', en: 'macd_signal', status: 'warn', statusText: '存疑', ic: '0.018', icClass: '', meta: 'ICIR 0.15 · 二值信号', w: '80%' },
-  { zh: '市盈率', en: 'pe_ratio', status: 'ok', statusText: '有效', ic: '-0.034', icClass: 'down', meta: 'ICIR 0.41 · 反向', w: '60%' },
-  { zh: '市净率', en: 'pb_ratio', status: 'ok', statusText: '有效', ic: '-0.029', icClass: 'down', meta: 'ICIR 0.35 · 反向', w: '60%' },
-  { zh: '盈利质量', en: 'roe_quality', status: 'ok', statusText: '有效', ic: '0.047', icClass: '', meta: 'ICIR 0.52 · 换手低', w: '80%' },
-  { zh: '负债风险', en: 'debt_risk', status: 'hold', statusText: '无效', ic: '-0.006', icClass: '', meta: 'ICIR 0.07 · 建议剔除', w: '40%' },
-]
+/* 因子中文名（后端 factor_definition 只有 name，zh 为展示层静态映射） */
+const FACTOR_ZH: Record<string, string> = {
+  ma_trend: '均线趋势', macd_signal: 'MACD信号', pe_ratio: '市盈率',
+  pb_ratio: '市净率', roe_quality: '盈利质量', debt_risk: '负债风险',
+}
 
-/* ---- mock 图表数据（模块级计算，保证稳定） ---- */
-const icBars = months.map(() => +g(-0.08, 0.14).toFixed(3))
-const cumIc = icBars.reduce<number[]>((acc, v) => [...acc, +(acc.length ? acc[acc.length - 1] + v : v).toFixed(3)], [])
-const icOption = icBarOpt(months, icBars, cumIc)
-const decayOption = decayOpt()
-const layerOption = lineOpt(
-  {
-    dates: months,
-    series: [
-      { name: 'Q1(最高)', data: layerSeries(92, 0.124), w: 2 },
-      { name: 'Q2', data: layerSeries(92, 0.071) },
-      { name: 'Q3', data: layerSeries(92, 0.042) },
-      { name: 'Q4', data: layerSeries(92, 0.018) },
-      { name: 'Q5(最低)', data: layerSeries(92, -0.023) },
-    ],
-  },
-  ['#F0524F', '#E9863F', '#E9C23B', '#5BBA6D', '#2FBF71'],
-  false,
-)
-const corrFacs = ['ma', 'macd', 'pe', 'pb', 'roe', 'debt']
-const corrOption = corrOpt(corrFacs, genCorr(corrFacs))
+/* 相关矩阵热力图短标签（规范序 6 因子） */
+const CORR_SHORT: Record<string, string> = {
+  ma_trend: 'ma', macd_signal: 'macd', pe_ratio: 'pe',
+  pb_ratio: 'pb', roe_quality: 'roe', debt_risk: 'debt',
+}
 
-const layerLegend = [
-  { c: '#F0524F', t: 'Q1 年化 +12.4%' },
-  { c: '#E9863F', t: 'Q2 年化 +7.1%' },
-  { c: '#E9C23B', t: 'Q3 年化 +4.2%' },
-  { c: '#5BBA6D', t: 'Q4 年化 +1.8%' },
-  { c: '#2FBF71', t: 'Q5 年化 -2.3%' },
-]
+interface LoadState { loading: boolean; error?: string }
+
+/* 卡片状态：ICIR 阈值 有效≥0.3 / 存疑≥0.1 / 无效；ic_mean 为负 → 反向（下挫色） */
+function cardView(s?: FactorStatsData): {
+  cls: string; text: string; meta: string; ic: string; down: boolean
+} {
+  if (!s || s.ic_mean == null) return { cls: 'hold', text: '无数据', meta: '暂无预计算', ic: '--', down: false }
+  const a = s.icir == null ? 0 : Math.abs(s.icir)
+  const cls = s.icir == null ? 'hold' : a >= 0.3 ? 'ok' : a >= 0.1 ? 'warn' : 'hold'
+  const text = s.icir == null ? '样本不足' : a >= 0.3 ? '有效' : a >= 0.1 ? '存疑' : '无效'
+  const dir = s.ic_mean < 0 ? '反向' : '正向'
+  const meta = s.icir == null ? '无有效样本' : `ICIR ${s.icir.toFixed(2)} · ${dir}`
+  return { cls, text, meta, ic: s.ic_mean.toFixed(3), down: s.ic_mean < 0 }
+}
 
 export default function FactorLab() {
+  const [factors, setFactors] = useState<FactorDefinition[]>()
+  const [statsMap, setStatsMap] = useState<Record<string, FactorStatsData>>({})
+  const [corr, setCorr] = useState<FactorCorrData>()
+  const [active, setActive] = useState('')
+  const [state, setState] = useState<LoadState>({ loading: true })
   const [weights, setWeights] = useState<number[]>(() => weightDefs.map(w => w[2]))
-  const sum = weights.reduce((a, b) => a + b, 0)
 
+  const load = useCallback(async () => {
+    setState({ loading: true, error: undefined })
+    try {
+      const [fl, cr] = await Promise.all([
+        factorApi.getFactors(),
+        factorApi.getFactorCorr(),
+      ])
+      const names = (fl.items ?? []).map(f => f.name)
+      // 每因子一份 stats（一次性给齐 FactorLab 页），失败单因子不拖垮整页
+      const st: Record<string, FactorStatsData> = {}
+      await Promise.all(
+        names.map(async n => {
+          try {
+            st[n] = await factorApi.getFactorStats(n)
+          } catch {
+            /* 单因子加载失败 → 卡片显示无数据，其余照常 */
+          }
+        }),
+      )
+      setFactors(fl.items)
+      setStatsMap(st)
+      setCorr(cr)
+      setActive(prev => (names.includes(prev) ? prev : names[0] ?? ''))
+      setState({ loading: false })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '加载失败'
+      setState({ loading: false, error: msg })
+    }
+  }, [])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  const activeStats = statsMap[active]
+  const sum = weights.reduce((a, b) => a + b, 0)
   const setWeight = (i: number, v: number) =>
     setWeights(prev => prev.map((w, j) => (j === i ? v : w)))
 
-  const factorCards = useMemo(
-    () =>
-      factors.map(f => (
-        <div className="fac" key={f.en}>
-          <div className="name" style={{ fontSize: 14 }}>
-            {f.zh} ({f.en}) <span className={`tag ${f.status}`}>{f.statusText}</span>
-          </div>
-          <div className={`ic20${f.icClass ? ' ' + f.icClass : ''}`}>{f.ic}</div>
-          <div className="meta">{f.meta}</div>
-          <div className="wbar">
-            <i style={{ width: f.w }} />
-          </div>
-        </div>
-      )),
-    [],
-  )
+  /* RankIC 时序（选中因子，日度 IC + 累计） */
+  const icChart = useMemo(() => {
+    const pts = (activeStats?.ic_series ?? []).filter(p => p.ic != null)
+    const dates = pts.map(p => p.date)
+    const bars = pts.map(p => p.ic as number)
+    const cum = bars.reduce<number[]>((acc, v) => [...acc, +(acc.length ? acc[acc.length - 1] + v : v)], [])
+    return { has: dates.length > 0, option: icBarOpt(dates, bars, cum) }
+  }, [activeStats])
+
+  /* IC 衰减：全部因子叠加（横轴预计算档位） */
+  const decayChart = useMemo(() => {
+    const first = Object.values(statsMap).find(s => (s.ic_decay?.length ?? 0) > 0)
+    if (!first) return { has: false, option: undefined as EChartsOption | undefined }
+    const dates = first.ic_decay.map(d => `${d.horizon}日`)
+    const series = (factors ?? [])
+      .map(f => ({ name: f.name, data: statsMap[f.name]?.ic_decay.map(d => d.ic) ?? [] }))
+      .filter(s => s.data.length > 0)
+    return { has: series.length > 0, option: decayOpt(dates, series) }
+  }, [statsMap, factors])
+
+  /* 分层收益（选中因子 Q1..Q5 组均前向收益，单调递减为佳） */
+  const quintileChart = useMemo(() => {
+    const q = activeStats?.quantiles ?? []
+    if (!q.length) return { has: false, option: undefined as EChartsOption | undefined }
+    return { has: true, option: quintileOpt(q.map(x => `Q${x.group}`), q.map(x => x.ret)) }
+  }, [activeStats])
+
+  /* 相关矩阵（6×6 区间均值；null 格显示为中性 0） */
+  const corrOption = useMemo(() => {
+    if (!corr || !corr.factors?.length) return undefined
+    const labels = corr.factors.map(f => CORR_SHORT[f] ?? f)
+    return corrOpt(labels, corr.matrix.map(row => row.map(v => (v == null ? 0 : v))))
+  }, [corr])
+
+  const rangeHint = activeStats ? `${activeStats.range.start} ~ ${activeStats.range.end}` : '暂无数据'
+  const monotonic = activeStats?.monotonic
+
+  if (state.loading && !factors) {
+    return (
+      <section className="page">
+        <div className="empty">加载中…</div>
+      </section>
+    )
+  }
+  if (state.error && !factors) {
+    return (
+      <section className="page">
+        <Notice text={state.error} onRetry={load} retrying={state.loading} />
+      </section>
+    )
+  }
+  if (!factors || !factors.length) {
+    return (
+      <section className="page">
+        <div className="empty">暂无因子定义（factor_definition 空）</div>
+      </section>
+    )
+  }
 
   return (
     <section className="page">
       <div className="grid fac-grid" style={{ marginBottom: 14 }}>
-        {factorCards}
+        {factors.map(f => {
+          const v = cardView(statsMap[f.name])
+          return (
+            <div
+              className={`fac${active === f.name ? ' sel' : ''}`}
+              key={f.name}
+              onClick={() => setActive(f.name)}
+              title={`${FACTOR_ZH[f.name] ?? f.name} · ${v.text} · 点击查看检验明细`}
+            >
+              <div className="name" style={{ fontSize: 14 }}>
+                {FACTOR_ZH[f.name] ?? f.name} <span className={`tag ${v.cls}`}>{v.text}</span>
+              </div>
+              <div className={`ic20${v.down ? ' down' : ''}`}>{v.ic}</div>
+              <div className="meta">{v.meta}</div>
+              <div className="wbar">
+                <i style={{ width: `${((f.weight ?? 0) * 100).toFixed(0)}%` }} />
+              </div>
+            </div>
+          )
+        })}
       </div>
 
       <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', marginBottom: 14 }}>
         <div className="card">
           <h3>
-            RankIC 时序 · roe_quality<span className="hint">月度 · 2019-01 ~ 2026-08</span>
+            RankIC 时序 · {active}
+            <span className="hint">日度 · {rangeHint}</span>
           </h3>
-          <EChart option={icOption} height={260} />
+          {icChart.has ? (
+            <EChart option={icChart.option} height={260} />
+          ) : (
+            <div className="empty">暂无预计算数据</div>
+          )}
         </div>
         <div className="card">
           <h3>
-            IC 衰减曲线<span className="hint">预测窗口 1~60 日</span>
+            IC 衰减曲线
+            <span className="hint">预测窗口 1~60 日 · 区间均值</span>
           </h3>
-          <EChart option={decayOption} height={260} />
+          {decayChart.has ? (
+            <EChart option={decayChart.option!} height={260} />
+          ) : (
+            <div className="empty">暂无预计算数据</div>
+          )}
         </div>
       </div>
 
       <div className="card" style={{ marginBottom: 14 }}>
         <h3>
-          分层回测 · roe_quality<span className="hint">Q1-Q5 等权组合 · 20日换仓 · 2019-2026</span>
+          分层收益 · {active}
+          <span className="hint">H=5 日前向 · 组均收益（Q1=因子最优组）</span>
         </h3>
-        <EChart option={layerOption} height={280} />
+        {quintileChart.has ? (
+          <EChart option={quintileChart.option!} height={280} />
+        ) : (
+          <div className="empty">暂无预计算数据</div>
+        )}
         <div className="legend" style={{ marginTop: 8 }}>
-          {layerLegend.map(l => (
-            <span className="li" key={l.t}>
-              <span className="sw" style={{ background: l.c }} />
-              {l.t}
+          {['#F0524F', '#E9863F', '#E9C23B', '#5BBA6D', '#2FBF71'].map((c, i) => (
+            <span className="li" key={i}>
+              <span className="sw" style={{ background: c }} />
+              Q{i + 1}
             </span>
           ))}
           <span className="li" style={{ marginLeft: 'auto', color: 'var(--ok)' }}>
-            单调性 ✓ Q1&gt;Q2&gt;Q3&gt;Q4&gt;Q5
+            单调性 · Q1 跑赢 Q5 {monotonic == null ? '--' : `${(monotonic * 100).toFixed(0)}%`}
           </span>
         </div>
       </div>
@@ -110,13 +216,19 @@ export default function FactorLab() {
       <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
         <div className="card">
           <h3>
-            因子相关性矩阵<span className="hint">Spearman · 周度</span>
+            因子相关性矩阵
+            <span className="hint">Spearman · 区间均值</span>
           </h3>
-          <EChart option={corrOption} height={250} />
+          {corrOption ? (
+            <EChart option={corrOption} height={250} />
+          ) : (
+            <div className="empty">暂无预计算数据</div>
+          )}
         </div>
         <div className="card">
           <h3>
-            权重实验台<span className="hint">拖动滑杆模拟重新配权 · 实时预览组合分</span>
+            权重实验台
+            <span className="hint">拖动滑杆模拟重新配权 · 实时预览组合分</span>
           </h3>
           <div>
             {weightDefs.map((w, i) => (

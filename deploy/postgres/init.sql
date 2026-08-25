@@ -95,6 +95,8 @@ CREATE TABLE IF NOT EXISTS factor_definition (
     description TEXT,
     formula     TEXT,
     weight      DECIMAL(5,4),               -- 默认权重
+    version     VARCHAR(20)   NOT NULL DEFAULT 'v1.0',  -- 版本号（2.3 因子研究）
+    status      VARCHAR(10)   NOT NULL DEFAULT 'active',  -- draft/trial/verified/active/disabled
     created_at  TIMESTAMP     DEFAULT NOW()
 );
 
@@ -113,6 +115,35 @@ CREATE TABLE IF NOT EXISTS factor_value (
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_factor_value
     ON factor_value (code, factor_name, trade_date);
+
+-- ------------------------------------------------------------
+-- 5.1 因子检验统计（2.3 因子研究：quant-engine 预计算 / Go 读取聚合）
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS factor_stat (
+    id          BIGSERIAL     PRIMARY KEY,
+    factor_name VARCHAR(50)   NOT NULL REFERENCES factor_definition (name),
+    trade_date  DATE          NOT NULL,
+    ic_1d       DECIMAL(12,6),               -- T→T+1 横截面 Rank IC
+    ic_5d       DECIMAL(12,6),               -- T→T+5
+    ic_10d      DECIMAL(12,6),
+    ic_20d      DECIMAL(12,6),
+    ic_60d      DECIMAL(12,6),
+    q1          DECIMAL(12,6),               -- 当日 5 分层组均前向收益（H=5，Q1=因子最优组）
+    q2          DECIMAL(12,6),
+    q3          DECIMAL(12,6),
+    q4          DECIMAL(12,6),
+    q5          DECIMAL(12,6),
+    created_at  TIMESTAMP     DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_factor_stat
+    ON factor_stat (factor_name, trade_date);
+
+CREATE TABLE IF NOT EXISTS factor_corr (
+    id          BIGSERIAL     PRIMARY KEY,
+    trade_date  DATE          NOT NULL UNIQUE,
+    matrix      JSONB         NOT NULL,      -- [[...6x6...]] 因子两两相关性
+    created_at  TIMESTAMP     DEFAULT NOW()
+);
 
 -- ------------------------------------------------------------
 -- 6. 策略
