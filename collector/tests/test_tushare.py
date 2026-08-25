@@ -6,6 +6,7 @@
 from datetime import date
 
 import pandas as pd
+import pytest
 
 from app.sources import tushare
 
@@ -115,3 +116,65 @@ def test_daily_pairs_hfq():
     assert list(raw.columns) == ["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"]
     assert raw.iloc[0]["成交额"] == 1.5e9
     assert hfq.iloc[0]["收盘"] == 1510.0 * 12.3456
+
+
+# ---------- 指数 index_daily：限流重试 ----------
+
+class FakeProIndex:
+    """index_daily 客户端桩：可按「先限流后成功 / 一直限流 / 非限流异常」配置"""
+
+    def __init__(self, behavior="then_success"):
+        self.behavior = behavior
+        self.calls = 0
+
+    def index_daily(self, ts_code=None, **kw):
+        self.calls += 1
+        if self.behavior == "then_success" and self.calls == 1:
+            raise RuntimeError("抱歉，您访问接口(index_daily)频率超限(1次/分钟)")
+        if self.behavior == "always_rate_limited":
+            raise RuntimeError("抱歉，您访问接口(index_daily)频率超限(1次/分钟)")
+        if self.behavior == "other_error":
+            raise RuntimeError("网络错误")
+        return pd.DataFrame([{
+            "ts_code": ts_code, "trade_date": "20260825",
+            "open": 4600.0, "high": 4660.0, "low": 4580.0, "close": 4620.0,
+            "vol": 2.4e7, "amount": 4.8e6,  # amount 千元
+        }])
+
+
+def _index_rows_for(symbol="sh000300"):
+    return tushare.index_daily_rows(FakeProIndex("then_success"), symbol,
+                                    date(2026, 8, 25), date(2026, 8, 25))
+
+
+def test_index_daily_rows_retries_on_rate_limit(monkeypatch):
+    """命中「频率超限」→ sleep 后重试，最终成功（sleep 只发生一次）"""
+    sleeps = []
+    monkeypatch.setattr(tushare.time, "sleep", lambda s: sleeps.append(s))
+    rows = _index_rows_for()
+    assert len(rows) == 1
+    assert rows[0]["code"] == "sh000300"
+    assert rows[0]["trade_date"] == date(2026, 8, 25)
+    assert sleeps == [60]
+
+
+def test_index_daily_rows_other_error_no_retry(monkeypatch):
+    """非限流异常直接抛，不重试、不 sleep"""
+    sleeps = []
+    monkeypatch.setattr(tushare.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="网络错误"):
+        tushare.index_daily_rows(FakeProIndex("other_error"), "sh000300",
+                                 date(2026, 8, 25), date(2026, 8, 25))
+    assert sleeps == []
+
+
+def test_index_daily_rows_raises_after_exhausted_retries(monkeypatch):
+    """持续限流 → 3 次尝试（2 次 sleep）后抛最后一个限流错误"""
+    sleeps = []
+    monkeypatch.setattr(tushare.time, "sleep", lambda s: sleeps.append(s))
+    pro = FakeProIndex("always_rate_limited")
+    with pytest.raises(RuntimeError, match="频率超限"):
+        tushare.index_daily_rows(pro, "sh000300",
+                                 date(2026, 8, 25), date(2026, 8, 25))
+    assert pro.calls == 3
+    assert sleeps == [60, 60]

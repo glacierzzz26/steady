@@ -97,20 +97,46 @@ export function icBarOpt(months: string[], icBars: number[], cumIc: number[]): E
   } as EChartsOption
 }
 
-/** IC 衰减曲线 */
-export function decayOpt(): EChartsOption {
+/** IC 衰减曲线（多因子叠加；x 为预计算档位如 1/5/10/20/60 日） */
+export function decayOpt(dates: string[], series: LineSeriesDef[]): EChartsOption {
+  const colors = ['#4C7DFF', '#2FBF71', '#E9A23B', '#F0524F', '#A8C0FF', '#B87BFF']
   return {
     grid: { left: 44, right: 16, top: 26, bottom: 28 },
     tooltip: { trigger: 'axis', ...tip },
-    legend: { textStyle: { color: '#8B93A7', fontSize: 13 }, top: 0, data: ['roe_quality', 'pe_ratio', 'ma_trend'] },
-    xAxis: { type: 'category', data: ['1日', '5日', '10日', '20日', '40日', '60日'], ...axis },
+    legend: {
+      textStyle: { color: '#8B93A7', fontSize: 13 }, top: 0,
+      data: series.map(s => s.name),
+    },
+    xAxis: { type: 'category', data: dates, ...axis },
     yAxis: { type: 'value', ...axis },
-    series: [
-      { name: 'roe_quality', type: 'line', data: [.052, .047, .041, .032, .021, .014], symbol: 'circle', symbolSize: 5, lineStyle: { width: 1.8, color: '#4C7DFF' }, itemStyle: { color: '#4C7DFF' } },
-      { name: 'pe_ratio', type: 'line', data: [-.038, -.034, -.029, -.022, -.015, -.009], symbol: 'circle', symbolSize: 5, lineStyle: { width: 1.8, color: '#2FBF71' }, itemStyle: { color: '#2FBF71' } },
-      { name: 'ma_trend', type: 'line', data: [.034, .025, .016, .009, .002, -.004], symbol: 'circle', symbolSize: 5, lineStyle: { width: 1.8, color: '#E9A23B' }, itemStyle: { color: '#E9A23B' } },
-    ],
-  }
+    series: series.map((s, i) => ({
+      name: s.name,
+      type: 'line',
+      data: s.data,
+      symbol: 'circle',
+      symbolSize: 5,
+      lineStyle: { width: 1.8, color: colors[i % colors.length] },
+      itemStyle: { color: colors[i % colors.length] },
+    })),
+  } as EChartsOption
+}
+
+/** 分层收益：Q1..Q5 组均前向收益柱状（Q1=因子最优组，单调递减为佳） */
+export function quintileOpt(labels: string[], rets: (number | null)[]): EChartsOption {
+  const colors = ['#F0524F', '#E9863F', '#E9C23B', '#5BBA6D', '#2FBF71']
+  return {
+    grid: { left: 52, right: 16, top: 26, bottom: 28 },
+    tooltip: { trigger: 'axis', ...tip },
+    xAxis: { type: 'category', data: labels, ...axis },
+    yAxis: { type: 'value', ...axis, axisLabel: { ...axis.axisLabel, formatter: (v: number) => v.toFixed(3) } },
+    series: [{
+      name: '组均前向收益',
+      type: 'bar',
+      data: rets,
+      barWidth: '46%',
+      itemStyle: { color: (p: { dataIndex: number }) => colors[p.dataIndex] || '#4C7DFF' },
+    }],
+  } as EChartsOption
 }
 
 /** 因子相关性矩阵（热力图） */

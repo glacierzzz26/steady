@@ -1,76 +1,412 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { EChartsOption } from 'echarts'
 import EChart from '../../components/EChart'
 import Kpi from '../../components/Kpi'
+import Notice from '../../components/Notice'
 import Seg from '../../components/Seg'
 import Tag from '../../components/Tag'
-import { ficBarOpt, hmapOpt } from '../../mock/chartOpt'
-import { g, months } from '../../mock/random'
+import { factorApi } from '../../api'
+import type {
+  FactorDefinition, FactorHeatmap, FactorStatus, FactorTrialDetail,
+  FactorTrialItem, FactorTrialsData,
+} from '../../api'
+import { ficBarOpt, quintileOpt } from '../../mock/chartOpt'
+import { tokens } from '../../theme'
 
-/* ---- 模板库 ---- */
-const templates = [
-  { zh: '20日动量', en: 'momentum_20', m: '动量 · 估计 IC 0.056 · 中低换手', tag: 'ok', tagText: '推荐' },
-  { zh: '60日动量', en: 'momentum_60', m: '动量 · 估计 IC 0.048', tag: 'hold', tagText: '备选' },
-  { zh: '20日波动率', en: 'volatility_20', m: '波动 · 反向 · 估计 IC -0.041', tag: 'hold', tagText: '备选' },
-  { zh: '换手率', en: 'turnover_rate', m: '流动性 · 反向 · 估计 IC -0.033', tag: 'hold', tagText: '备选' },
-  { zh: '毛利率', en: 'gross_margin', m: '质量 · 估计 IC 0.037', tag: 'hold', tagText: '备选' },
-  { zh: '营收同比增速', en: 'revenue_yoy', m: '成长 · 估计 IC 0.029', tag: 'hold', tagText: '备选' },
+/* 因子中文名（后端 factor_definition 只有 name，zh 为展示层静态映射） */
+const FACTOR_ZH: Record<string, string> = {
+  ma_trend: '均线趋势', macd_signal: 'MACD信号', pe_ratio: '市盈率',
+  pb_ratio: '市净率', roe_quality: '盈利质量', debt_risk: '负债风险',
+}
+
+/* 生命周期状态 → 中文/样式（对齐后端状态机 draft/trial/verified/active/disabled） */
+const STATUS_ZH: Record<string, { text: string; cls: 'ok' | 'warn' | 'hold' }> = {
+  draft: { text: '草稿', cls: 'hold' },
+  trial: { text: '试算中', cls: 'warn' },
+  verified: { text: '检验中', cls: 'warn' },
+  active: { text: '已上线', cls: 'ok' },
+  disabled: { text: '已停用', cls: 'hold' },
+}
+const TRIAL_ZH: Record<string, string> = { pending: '排队中', running: '运行中', done: '已完成', failed: '失败' }
+
+/* 向导 = 页面分区导航（任意新公式模板向导为产品愿景，设计 §4.3，见 sec-note） */
+const STEPS = [
+  { label: '因子池', anchor: 'ff-pool' },
+  { label: '参数配置', anchor: 'ff-config' },
+  { label: '试算检验', anchor: 'ff-trial' },
+  { label: '版本管理', anchor: 'ff-versions' },
+  { label: '参数寻优', anchor: 'ff-optimize' },
 ]
 
-const WIZARD = ['选择模板', '公式与参数', '预处理配置', '试算检验', '版本发布']
+interface LoadState { loading: boolean; error?: string }
 
-/* ---- 寻优热力图数据 ---- */
-const gwin = ['5', '10', '20', '30', '40', '60', '90']
-const ghor = ['持有1周', '持有2周', '持有1月', '持有2月']
-const gv = [.031, .044, .058, .056, .049, .041, .033]
-const gd: number[][] = []
-ghor.forEach((h, i) =>
-  gwin.forEach((w, j) => gd.push([j, i, +(gv[j] * (1 - 0.055 * i) + g(-0.004, 0.004)).toFixed(3)])),
-)
-const gridOption = hmapOpt(gwin, ghor, gd)
+/* ---- 参数契约（引擎权威，quant-engine factor_trial.py 头注释）----
+ * ma_trend：short/long（window 简写 → short，long 缺省 20）；macd_signal：fast/slow/signal；
+ * value/quality/risk 无计算参数（as-of 取值）。变体因子名 = 基础名 + "_" + 后缀。 */
+interface ParamDef { key: string; label: string; min: number; max: number; step: number; def: number }
+const PARAM_DEFS: Record<string, ParamDef[]> = {
+  ma_trend: [
+    { key: 'short', label: '短均线', min: 2, max: 60, step: 1, def: 5 },
+    { key: 'long', label: '长均线', min: 3, max: 120, step: 1, def: 20 },
+  ],
+  macd_signal: [
+    { key: 'fast', label: '快线', min: 2, max: 40, step: 1, def: 12 },
+    { key: 'slow', label: '慢线', min: 3, max: 60, step: 1, def: 26 },
+    { key: 'signal', label: '信号线', min: 2, max: 20, step: 1, def: 9 },
+  ],
+}
+const BASE_FACTORS = Object.keys(PARAM_DEFS)
+  .concat(['pe_ratio', 'pb_ratio', 'roe_quality', 'debt_risk'])
+  .sort((a, b) => b.length - a.length)
 
-/* ---- 试算 RankIC 迷你图 ---- */
-const fic = months.map(() => +(g(-0.05, 0.15)).toFixed(3))
-const ficOption = ficBarOpt(months, fic)
+/** 变体因子名 → 基础因子（引擎 resolve_base_factor 同规约：最长前缀匹配） */
+function baseOf(name: string): string {
+  return BASE_FACTORS.find(b => name === b || name.startsWith(b + '_')) ?? name
+}
 
-/* ---- 版本管理行 ---- */
-const versions = [
-  {
-    zh: '均线趋势', en: 'ma_trend', ver: 'v2.0', change: '二值信号 → MA5/MA20 连续偏离度',
-    ic: '0.021 → 0.048', status: 'warn', statusText: '检验中', ops: [['编辑', '#A8C0FF'], ['回滚 v1', 'var(--txt2)']],
-  },
-  {
-    zh: '20日动量', en: 'momentum_20', ver: 'v1.0', change: '新建 · 20日动量',
-    ic: '— → 0.056', status: 'ok', statusText: '已上线', ops: [['编辑', '#A8C0FF'], ['新版本', 'var(--txt2)'], ['停用', 'var(--warn)']],
-  },
-  {
-    zh: '盈利质量', en: 'roe_quality', ver: 'v1.1', change: 'TTM 化 · 消除季节性跳变',
-    ic: '0.041 → 0.047', status: 'ok', statusText: '已上线', ops: [['编辑', '#A8C0FF'], ['新版本', 'var(--txt2)'], ['停用', 'var(--warn)']],
-  },
-  {
-    zh: '负债风险', en: 'debt_risk', ver: 'v1.0', change: '资产负债率 · 分层无单调性',
-    ic: '-0.006', status: 'hold', statusText: '拟下线', ops: [['编辑', '#A8C0FF'], ['归档', 'var(--txt3)']],
-  },
-]
+/** 因子 params 快照 → 试算参数（window 简写 → short；缺省补经典值；无计算参数 → {}） */
+function factorParams(base: string, p?: Record<string, unknown> | null): Record<string, number> {
+  const defs = PARAM_DEFS[base]
+  if (!defs) return {}
+  const src = p && typeof p === 'object' ? p : {}
+  const out: Record<string, number> = {}
+  for (const d of defs) {
+    const v = d.key === 'short' && src.window != null ? src.window : src[d.key]
+    out[d.key] = typeof v === 'number' && Number.isFinite(v) ? v : d.def
+  }
+  return out
+}
 
-const corrRows = [
-  { name: 'roe_quality', rho: '0.31', tag: 'ok', tagText: '低冗余' },
-  { name: 'pe_ratio', rho: '-0.18', tag: 'ok', tagText: '低冗余' },
-  { name: 'ma_trend（旧）', rho: '0.44', tag: 'warn', tagText: '中度' },
-]
+/** 寻优网格默认候选：首参数给 3~4 个候选（默认寻优轴 = 第一个参数，引擎取取值最多者），
+ *  其余参数钉住当前值（引擎「其他键取各自网格首值」）；horizon 取 5/10/20 */
+function defaultGrid(base: string, p: Record<string, number>): Record<string, string> {
+  const defs = PARAM_DEFS[base] ?? []
+  const grid: Record<string, string> = {}
+  defs.forEach((d, i) => {
+    const v = p[d.key] ?? d.def
+    grid[d.key] = i === 0
+      ? [v - 3, v - 1, v + 1, v + 3].filter(x => x >= d.min && x <= d.max).join(',') || String(v)
+      : String(v)
+  })
+  grid.horizon = '5,10,20'
+  return grid
+}
 
-const preprocess = [
-  '去极值 Winsorize（1% / 99% 分位截断）',
-  '横截面秩排名（消除量纲与离群影响）',
-  '行业中性化（消除行业系统性偏差）',
-  '市值中性化（规避大小盘风格暴露）',
-]
+/** 逗号分隔候选串 → number[]（忽略空 / 非法段） */
+function parseGrid(s: Record<string, string>): Record<string, number[]> {
+  const out: Record<string, number[]> = {}
+  for (const [k, v] of Object.entries(s)) {
+    const arr = v.split(',').map(x => parseFloat(x.trim())).filter(Number.isFinite)
+    if (arr.length) out[k] = arr
+  }
+  return out
+}
+
+function fmtDate(d: Date): string {
+  return `${d.getFullYear()}-${`${d.getMonth() + 1}`.padStart(2, '0')}-${`${d.getDate()}`.padStart(2, '0')}`
+}
+
+const f3 = (v?: number | null) => (v == null ? '--' : v.toFixed(3))
+const f2 = (v?: number | null) => (v == null ? '--' : v.toFixed(2))
+
+/* 参数寻优热力图 option（null 格 = 无定义，不着色、tooltip 显「无定义」，不做 0 造假） */
+function heatmapOption(hm: FactorHeatmap): EChartsOption {
+  const x = hm.param_values.map(v => `${v}`)
+  const y = hm.horizons.map(h => `${h}日`)
+  const data: Array<[number, number, number | null]> = []
+  const nums: number[] = []
+  hm.grid.forEach((row, i) => row.forEach((ic, j) => {
+    data.push([j, i, ic])
+    if (ic != null) nums.push(ic)
+  }))
+  const lo = nums.length ? Math.min(...nums) : 0
+  const hi = nums.length ? Math.max(...nums) : 0
+  const tip = tokens.tooltip
+  return {
+    grid: { left: 64, right: 14, top: 26, bottom: 48 },
+    tooltip: {
+      ...tip,
+      formatter: (p: unknown) => {
+        const d = (p as { value: [number, number, number | null] }).value
+        const v = d[2] == null ? '无定义' : d[2].toFixed(3)
+        return `${y[d[1]]} × ${x[d[0]]}：<b>${v}</b>`
+      },
+    },
+    xAxis: { type: 'category', data: x },
+    yAxis: { type: 'category', data: y },
+    visualMap: {
+      min: lo, max: hi, calculable: false, orient: 'horizontal',
+      left: 'center', bottom: 0,
+      textStyle: { color: '#8B93A7', fontSize: 13 },
+      inRange: { color: ['#1B2230', '#4C7DFF', '#A8C0FF'] },
+      show: false,
+    },
+    series: [{
+      type: 'heatmap',
+      data,
+      itemStyle: { borderColor: '#0B0E14', borderWidth: 2 },
+      label: {
+        show: true, color: '#E6EAF2', fontSize: 13,
+        formatter: (p: { value: Array<number | null> }) =>
+          (p.value[2] == null ? '—' : p.value[2].toFixed(3).replace(/^0/, '')),
+      },
+    }],
+  } as EChartsOption
+}
 
 export default function FactorFactory() {
-  const [step, setStep] = useState(0)
-  const [tplIdx, setTplIdx] = useState(0)
-  const [win, setWin] = useState(20)
-  const [checked, setChecked] = useState<boolean[]>([true, true, false, false])
+  const [factors, setFactors] = useState<FactorDefinition[]>()
+  const [state, setState] = useState<LoadState>({ loading: true })
+  const [active, setActive] = useState('')
   const [statusFilter, setStatusFilter] = useState('全部')
+  const [step, setStep] = useState(0)
+
+  /* 参数配置（试算参数 + 区间；寻优网格候选独立于下方卡片） */
+  const [params, setParams] = useState<Record<string, number>>({})
+  const [optGrid, setOptGrid] = useState<Record<string, string>>({})
+  const [start, setStart] = useState(() => {
+    const d = new Date(); d.setFullYear(d.getFullYear() - 2); return fmtDate(d)
+  })
+  const [end, setEnd] = useState(() => fmtDate(new Date()))
+
+  /* 试算/寻优任务（提交 → 轮询 GET /factor-trials/:id） */
+  const [trialRes, setTrialRes] = useState<FactorTrialDetail>()
+  const [trialId, setTrialId] = useState<number>()
+  const [polling, setPolling] = useState(false)
+  const [trialErr, setTrialErr] = useState<string>()
+  const pollTimer = useRef<number>()
+
+  /* 版本表「最近试算」列（因子 → 最近任务状态 + done 的 ic_mean） */
+  const [trialMap, setTrialMap] = useState<Record<string, { status: string; ic?: number | null }>>({})
+
+  const [busy, setBusy] = useState<string>() // 'trial' | 'optimize' | 'sw:name' | 'fk:name' | 'del:name'
+  const activeRef = useRef('')
+
+  /* 每因子最近一条试算（列表 id 倒序 → 首次出现即最新） */
+  const latestOf = (tr: FactorTrialsData): Record<string, FactorTrialItem> => {
+    const latest: Record<string, FactorTrialItem> = {}
+    for (const t of tr.items ?? []) if (!latest[t.factor_name]) latest[t.factor_name] = t
+    return latest
+  }
+
+  const enrichTrialMap = useCallback(async (tr: FactorTrialsData) => {
+    const latest = latestOf(tr)
+    const map: Record<string, { status: string; ic?: number | null }> = {}
+    await Promise.all(Object.entries(latest).map(async ([name, t]) => {
+      if (t.status === 'done') {
+        try {
+          const d = await factorApi.getTrial(t.id)
+          map[name] = { status: 'done', ic: d.ic_mean ?? null }
+        } catch {
+          map[name] = { status: 'done' } /* 详情失败 → 表格只显示状态 */
+        }
+      }
+    }))
+    setTrialMap(prev => ({ ...prev, ...map }))
+  }, [])
+
+  const refreshTrials = useCallback(async () => {
+    try {
+      const tr = await factorApi.getTrials({ limit: 50 })
+      const latest = latestOf(tr)
+      const map: Record<string, { status: string; ic?: number | null }> = {}
+      for (const [name, t] of Object.entries(latest)) map[name] = { status: t.status }
+      setTrialMap(map)
+      void enrichTrialMap(tr)
+    } catch {
+      /* 试算历史加载失败不拖垮页面 */
+    }
+  }, [enrichTrialMap])
+
+  const stopPoll = useCallback(() => {
+    if (pollTimer.current) { window.clearTimeout(pollTimer.current); pollTimer.current = undefined }
+  }, [])
+
+  /* 轮询任务详情：pending/running 每 2.5s 重取；done/failed 落定 */
+  const loadTrial = useCallback(async (id: number) => {
+    stopPoll()
+    setTrialId(id)
+    setTrialErr(undefined)
+    setPolling(true)
+    const tick = async () => {
+      try {
+        const r = await factorApi.getTrial(id)
+        setTrialRes(r)
+        if (r.status === 'done' || r.status === 'failed') {
+          setPolling(false)
+          if (r.status === 'done') void refreshTrials()
+          return
+        }
+        pollTimer.current = window.setTimeout(tick, 2500)
+      } catch (e) {
+        setPolling(false)
+        setTrialErr(e instanceof Error ? e.message : '试算加载失败')
+      }
+    }
+    void tick()
+  }, [stopPoll, refreshTrials])
+
+  /* 选中因子：重置参数配置 + 载入该因子最近一次试算 */
+  const applyFactor = useCallback(async (name: string, f?: FactorDefinition) => {
+    setActive(name)
+    activeRef.current = name
+    const base = baseOf(name)
+    const p = factorParams(base, f?.params)
+    setParams(p)
+    setOptGrid(defaultGrid(base, p))
+    setTrialRes(undefined)
+    setTrialId(undefined)
+    setTrialErr(undefined)
+    stopPoll()
+    try {
+      const tr = await factorApi.getTrials({ factor_name: name, limit: 1 })
+      if (tr.items?.length) await loadTrial(tr.items[0].id)
+    } catch {
+      /* 最近试算加载失败 → 试算卡空态 */
+    }
+  }, [loadTrial, stopPoll])
+
+  const load = useCallback(async () => {
+    stopPoll()
+    setState({ loading: true, error: undefined })
+    try {
+      const [fl, tr] = await Promise.all([factorApi.getFactors(), factorApi.getTrials({ limit: 50 })])
+      setFactors(fl.items)
+      const keep = activeRef.current && fl.items.some(f => f.name === activeRef.current)
+        ? activeRef.current : (fl.items[0]?.name ?? '')
+      setActive(keep)
+      setState({ loading: false })
+      if (keep) void applyFactor(keep, fl.items.find(f => f.name === keep))
+      const latest = latestOf(tr)
+      const map: Record<string, { status: string; ic?: number | null }> = {}
+      for (const [name, t] of Object.entries(latest)) map[name] = { status: t.status }
+      setTrialMap(map)
+      void enrichTrialMap(tr)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '加载失败'
+      setState({ loading: false, error: msg })
+    }
+  }, [applyFactor, enrichTrialMap, stopPoll])
+
+  useEffect(() => { load() }, [load])
+  useEffect(() => () => stopPoll(), [stopPoll])
+
+  /* 页面分区导航：滚动高亮当前向导步骤 */
+  useEffect(() => {
+    const onScroll = () => {
+      let cur = 0
+      STEPS.forEach((s, i) => {
+        const el = document.getElementById(s.anchor)
+        if (el && el.getBoundingClientRect().top < 140) cur = i
+      })
+      setStep(cur)
+    }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [])
+
+  const jump = (anchor: string) => {
+    document.getElementById(anchor)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  /* ---- 提交试算 / 寻优 ---- */
+  const submitTrial = async () => {
+    if (!active || busy) return
+    setBusy('trial')
+    setTrialErr(undefined)
+    try {
+      const base = baseOf(active)
+      // value/quality/risk 无计算参数 → 省略 params 键（后端显式空对象会被拒）
+      const body = PARAM_DEFS[base] ? { params, start, end } : { start, end }
+      const r = await factorApi.createTrial(active, body)
+      await loadTrial(r.id)
+    } catch (e) {
+      setTrialErr(e instanceof Error ? e.message : '提交失败')
+    } finally {
+      setBusy(undefined)
+    }
+  }
+
+  const submitOptimize = async () => {
+    if (!active || busy) return
+    const base = baseOf(active)
+    const grid = parseGrid({ ...optGrid })
+    const paramGrid = PARAM_DEFS[base] ? grid : { horizon: grid.horizon ?? [5, 10, 20] }
+    if (Object.keys(paramGrid).length === 0) {
+      setTrialErr('寻优网格不能为空（每个参数候选至少一个数字）')
+      return
+    }
+    setBusy('optimize')
+    setTrialErr(undefined)
+    try {
+      const r = await factorApi.createOptimize(active, { param_grid: paramGrid, start, end })
+      await loadTrial(r.id)
+    } catch (e) {
+      setTrialErr(e instanceof Error ? e.message : '提交失败')
+    } finally {
+      setBusy(undefined)
+    }
+  }
+
+  /* ---- 版本管理操作（状态流转 / fork / 删除） ---- */
+  const opErr = (e: unknown, prefix: string) =>
+    setTrialErr(`${prefix}：${e instanceof Error ? e.message : '操作失败'}`)
+
+  const opSwitch = async (name: string, to: FactorStatus) => {
+    if (busy) return
+    setBusy(`sw:${name}`)
+    try { await factorApi.switchFactor(name, to); await load() }
+    catch (e) { opErr(e, `${name} 状态流转失败`) }
+    finally { setBusy(undefined) }
+  }
+  const opFork = async (name: string) => {
+    if (busy) return
+    setBusy(`fk:${name}`)
+    try { await factorApi.forkFactor(name); await load() }
+    catch (e) { opErr(e, `${name} 新版本失败`) }
+    finally { setBusy(undefined) }
+  }
+  const opDelete = async (name: string) => {
+    if (busy) return
+    if (!window.confirm(`确认删除草稿因子 ${name}？已有试算/评分/检验记录会被后端拒绝`)) return
+    setBusy(`del:${name}`)
+    try { await factorApi.deleteFactor(name); await load() }
+    catch (e) { opErr(e, `${name} 删除失败`) }
+    finally { setBusy(undefined) }
+  }
+
+  /* 每状态可用操作（按服务端状态机 factorTransitions 映射） */
+  const opsFor = (f: FactorDefinition): Array<{ label: string; color?: string; onClick: () => void }> => {
+    const dim = 'var(--txt2)'
+    switch (f.status) {
+      case 'draft':
+        return [
+          { label: '提交试算', onClick: () => void opSwitch(f.name, 'trial') },
+          { label: '新版本', color: dim, onClick: () => void opFork(f.name) },
+          { label: '删除', color: 'var(--warn)', onClick: () => void opDelete(f.name) },
+        ]
+      case 'trial':
+        return [
+          { label: '通过', onClick: () => void opSwitch(f.name, 'verified') },
+          { label: '回炉', color: dim, onClick: () => void opSwitch(f.name, 'draft') },
+        ]
+      case 'verified':
+        return [
+          { label: '上线', onClick: () => void opSwitch(f.name, 'active') },
+          { label: '回炉', color: dim, onClick: () => void opSwitch(f.name, 'draft') },
+        ]
+      case 'active':
+        return [
+          { label: '停用', color: 'var(--warn)', onClick: () => void opSwitch(f.name, 'disabled') },
+          { label: '新版本', color: dim, onClick: () => void opFork(f.name) },
+        ]
+      default:
+        return [
+          { label: '恢复草稿', color: dim, onClick: () => void opSwitch(f.name, 'draft') },
+          { label: '重新上线', onClick: () => void opSwitch(f.name, 'active') },
+        ]
+    }
+  }
 
   const statusSeg = useMemo(
     () => (
@@ -83,160 +419,214 @@ export default function FactorFactory() {
     [statusFilter],
   )
 
+  /* ---- 派生 ---- */
+  const activeFactor = factors?.find(f => f.name === active)
+  const base = baseOf(active)
+  const paramDefs = PARAM_DEFS[base] ?? []
+  const hmView = useMemo(() => (trialRes?.heatmap ? heatmapOption(trialRes.heatmap) : undefined), [trialRes])
+  const icChart = useMemo(() => {
+    const pts = (trialRes?.ic_series ?? []).filter(p => p.ic != null)
+    return { has: pts.length > 0, option: ficBarOpt(pts.map(p => p.date), pts.map(p => p.ic as number)) }
+  }, [trialRes])
+  const qChart = useMemo(() => {
+    const q = trialRes?.quantiles ?? []
+    return q.length
+      ? { has: true, option: quintileOpt(q.map(x => `Q${x.group}`), q.map(x => x.ret)) }
+      : { has: false, option: undefined as EChartsOption | undefined }
+  }, [trialRes])
+  const rangeHint = trialRes?.dates ? `${trialRes.dates.start} ~ ${trialRes.dates.end}` : '近 2 年区间'
+
+  if (state.loading && !factors) {
+    return (
+      <section className="page">
+        <div className="empty">加载中…</div>
+      </section>
+    )
+  }
+  if (state.error && !factors) {
+    return (
+      <section className="page">
+        <Notice text={state.error} onRetry={load} retrying={state.loading} />
+      </section>
+    )
+  }
+  if (!factors?.length) {
+    return (
+      <section className="page">
+        <div className="empty">暂无因子定义（factor_definition 空）</div>
+      </section>
+    )
+  }
+
   return (
     <section className="page">
-      {/* 五步向导 */}
+      {/* 分区导航（对齐页面五个区块） */}
       <div className="vstep">
-        {WIZARD.map((s, i) => (
-          <div key={s} className={`st${i === step ? ' on' : ''}`} onClick={() => setStep(i)}>
+        {STEPS.map((s, i) => (
+          <div key={s.label} className={`st${i === step ? ' on' : ''}`} onClick={() => jump(s.anchor)}>
             <span className="no">STEP {i + 1}</span>
-            {s}
+            {s.label}
           </div>
         ))}
       </div>
 
       <div className="grid" style={{ gridTemplateColumns: '270px 1fr 320px', marginBottom: 14 }}>
-        {/* 模板库 */}
-        <div className="card">
+        {/* 因子池 */}
+        <div className="card" id="ff-pool">
           <h3>
-            因子模板库<span className="hint">点击载入编辑器</span>
+            因子定义池<span className="hint">点击载入参数配置</span>
           </h3>
-          {templates.map((t, i) => (
-            <div key={t.en} className={`tpl${i === tplIdx ? ' on' : ''}`} onClick={() => setTplIdx(i)}>
-              <div>
-                {t.zh} ({t.en})
-                <div className="m">{t.m}</div>
+          {factors.map(f => {
+            const b = baseOf(f.name)
+            const st = STATUS_ZH[f.status ?? ''] ?? { text: f.status ?? '', cls: 'hold' as const }
+            return (
+              <div
+                key={f.name}
+                className={`tpl${active === f.name ? ' on' : ''}`}
+                onClick={() => void applyFactor(f.name, f)}
+              >
+                <div>
+                  {FACTOR_ZH[b] ?? f.name} <span className="nm-en">{f.name}</span> {f.version}
+                  <div className="m">
+                    分类 {f.category ?? '--'} · 权重 {(f.weight ?? 0).toFixed(2)}
+                  </div>
+                </div>
+                <Tag type={st.cls} label={st.text} />
               </div>
-              <Tag type={t.tag as 'ok' | 'hold'} label={t.tagText} />
-            </div>
-          ))}
+            )
+          })}
           <div className="sec-note">
-            模板覆盖常见因子族，公式可直接改写为自定义表达式。ma_trend 二值化改造（→ 连续偏离度）同样走这条流程，改造结果进入版本对比。
+            factor_definition 全量（6 基础因子 + fork 变体）。任意新公式模板向导为产品愿景（设计 §4.3）。
           </div>
         </div>
 
-        {/* 编辑器 */}
-        <div className="card">
+        {/* 参数配置 */}
+        <div className="card" id="ff-config">
           <h3>
-            因子编辑器 · {templates[tplIdx].zh} ({templates[tplIdx].en})
-            <span className="hint">草稿 · 未保存 · v1.0</span>
+            参数配置 · {FACTOR_ZH[base] ?? active}
+            <span className="hint">对已有因子参数化重算 · {active}</span>
           </h3>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.2fr .8fr 1fr', gap: 10, marginBottom: 12 }}>
-            <div>
-              <div style={{ fontSize: 13, color: 'var(--txt3)', marginBottom: 4 }}>中文名称</div>
-              <input type="text" defaultValue={templates[tplIdx].zh} style={{ width: '100%' }} />
-            </div>
-            <div>
-              <div style={{ fontSize: 13, color: 'var(--txt3)', marginBottom: 4 }}>英文标识（唯一 · 创建后不可改）</div>
-              <input
-                type="text"
-                defaultValue={templates[tplIdx].en}
-                style={{ width: '100%', color: 'var(--txt2)', fontFamily: 'var(--mono)' }}
-              />
-            </div>
-            <div>
-              <div style={{ fontSize: 13, color: 'var(--txt3)', marginBottom: 4 }}>分类</div>
-              <select style={{ width: '100%' }}>
-                <option>动量</option>
-                <option>趋势</option>
-                <option>价值</option>
-                <option>质量</option>
-                <option>风险</option>
-              </select>
-            </div>
-            <div>
-              <div style={{ fontSize: 13, color: 'var(--txt3)', marginBottom: 4 }}>方向</div>
-              <select style={{ width: '100%' }}>
-                <option>越大越好</option>
-                <option>越小越好</option>
-              </select>
-            </div>
+          <div style={{ display: 'flex', gap: 14, fontSize: 13, color: 'var(--txt2)', marginBottom: 8, flexWrap: 'wrap' }}>
+            <span>分类 {activeFactor?.category ?? '--'}</span>
+            <span>版本 {activeFactor?.version ?? '--'}</span>
+            <span>状态 <Tag type={STATUS_ZH[activeFactor?.status ?? '']?.cls ?? 'hold'} label={STATUS_ZH[activeFactor?.status ?? '']?.text ?? activeFactor?.status ?? '--'} /></span>
+            <span>权重 {(activeFactor?.weight ?? 0).toFixed(2)}</span>
           </div>
-          <div style={{ fontSize: 13, color: 'var(--txt3)', marginBottom: 5 }}>
-            因子表达式（前复权日线，仅可引用 T 日及之前数据，防未来函数由引擎强制）
-          </div>
-          <div className="codebox">
-            <span className="cm"># 20日动量：近20日累计涨幅（横截面比较用）</span>
-            {'\n'}momentum_20 = close_adj / close_adj.<span className="fn">shift</span>(
-            <b style={{ color: '#E9A23B' }}>{win}</b>) - 1
-          </div>
-          <div style={{ display: 'flex', gap: 16, margin: '12px 0 2px' }}>
-            <div style={{ flex: 1.4 }}>
-              <div style={{ fontSize: 13, color: 'var(--txt3)' }}>
-                回看窗口 <b className="num" style={{ color: '#A8C0FF' }}>{win}</b> 日
-              </div>
-              <input type="range" min={5} max={120} value={win} onChange={e => setWin(+e.target.value)} />
+          {activeFactor?.formula && (
+            <div className="codebox" style={{ fontSize: 13, whiteSpace: 'pre-wrap', marginBottom: 10 }}>
+              {activeFactor.formula}
             </div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, color: 'var(--txt3)' }}>数据源</div>
-              <select style={{ width: '100%' }}>
-                <option>daily_price · 前复权</option>
-                <option>daily_valuation</option>
-                <option>financial_indicator</option>
-              </select>
+          )}
+          {paramDefs.length ? (
+            <div style={{ marginBottom: 12 }}>
+              {paramDefs.map(d => (
+                <div key={d.key} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                  <div style={{ fontSize: 13, color: 'var(--txt3)', width: 86 }}>
+                    {d.label}（{d.key}）
+                  </div>
+                  <input
+                    type="number"
+                    min={d.min}
+                    max={d.max}
+                    step={d.step}
+                    value={params[d.key] ?? d.def}
+                    onChange={e => {
+                      const v = +e.target.value
+                      if (Number.isFinite(v)) setParams(prev => ({ ...prev, [d.key]: v }))
+                    }}
+                    style={{ width: 90, fontFamily: 'var(--mono)' }}
+                  />
+                  <span style={{ fontSize: 12, color: 'var(--txt3)' }}>{d.min} ~ {d.max}</span>
+                </div>
+              ))}
             </div>
+          ) : (
+            <div className="sec-note" style={{ marginBottom: 12 }}>
+              {base} 无计算参数（as-of 取值），试算直接使用因子原定义，参数输入不适用。
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10, flexWrap: 'wrap' }}>
+            <input type="date" value={start} onChange={e => setStart(e.target.value)} style={{ width: 132 }} />
+            <span style={{ color: 'var(--txt3)', fontSize: 13 }}>至</span>
+            <input type="date" value={end} onChange={e => setEnd(e.target.value)} style={{ width: 132 }} />
+            <button className="btn pri" onClick={() => void submitTrial()} disabled={!!busy}>
+              {busy === 'trial' ? '提交中…' : '发起试算'}
+            </button>
+            <button className="btn" onClick={() => void submitOptimize()} disabled={!!busy}>
+              发起寻优
+            </button>
           </div>
-          <div style={{ fontSize: 13, color: 'var(--txt3)', margin: '10px 0 2px' }}>横截面预处理</div>
-          {preprocess.map((p, i) => (
-            <div className="crow" key={p} onClick={() => setChecked(prev => prev.map((c, j) => (j === i ? !c : c)))}>
-              <button className={`cbox${checked[i] ? ' on' : ''}`}>✓</button>
-              {p}
-            </div>
-          ))}
-          <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
-            <button className="btn">保存草稿</button>
-            <button className="btn">语法校验</button>
-            <button className="btn">另存为新版本</button>
-            <button className="btn pri">发起试算（约 2 分钟）</button>
+          {trialErr && (
+            <div style={{ color: 'var(--warn)', fontSize: 13, marginTop: 4, lineHeight: 1.6 }}>⚠ {trialErr}</div>
+          )}
+          <div className="sec-note">
+            区间上限 5 年；试算与 FactorLab 同口径（winsorize → 百分位 → 方向调整，IC 数学单实现）。
+            公式编辑器与任意新公式为产品愿景，当前仅支持对已有因子的参数化重算（设计 §4.3）。
           </div>
         </div>
 
         {/* 试算结果 */}
-        <div className="card">
+        <div className="card" id="ff-trial">
           <h3>
-            试算结果<span className="hint">2021-01 ~ 2026-08</span>
+            试算结果 · {FACTOR_ZH[base] ?? active}
+            <span className="hint">{rangeHint}</span>
           </h3>
-          <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
-            <Kpi lb="RankIC 均值" v="0.056" vStyle={{ fontSize: 20 }} d="达标 > 0.03" dClass="up" style={{ border: 0, background: 'var(--panel2)' }} />
-            <Kpi lb="ICIR" v="0.61" vStyle={{ fontSize: 20 }} d="达标 > 0.3" dClass="up" style={{ border: 0, background: 'var(--panel2)' }} />
-          </div>
-          <EChart option={ficOption} height={150} />
-          <div style={{ fontSize: 13, color: 'var(--txt3)', margin: '10px 0 4px' }}>
-            与现有因子相关性（|ρ|&gt;0.6 建议替换而非叠加）
-          </div>
-          <table style={{ fontSize: 14 }}>
-            <tbody>
-              {corrRows.map(r => (
-                <tr key={r.name}>
-                  <td style={{ color: 'var(--txt2)' }}>{r.name}</td>
-                  <td className="r num">{r.rho}</td>
-                  <td className="r">
-                    <Tag type={r.tag as 'ok' | 'warn'} label={r.tagText} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div
-            style={{
-              marginTop: 12,
-              fontSize: 13,
-              color: 'var(--ok)',
-              background: 'rgba(47,191,113,.08)',
-              border: '1px solid rgba(47,191,113,.25)',
-              borderRadius: 8,
-              padding: '8px 10px',
-              lineHeight: 1.7,
-            }}
-          >
-            检验通过：IC 与 ICIR 均达标，且与现有因子低冗余 → 可进入版本发布
-          </div>
+          {polling && (
+            <div className="empty">
+              {trialRes?.status === 'running'
+                ? '引擎计算中…（约 1~2 分钟，请稍候）'
+                : '任务排队中…（引擎每 5 分钟消费一次）'}
+            </div>
+          )}
+          {!polling && trialRes?.status === 'failed' && (
+            <Notice text={trialRes.error || '试算失败'} />
+          )}
+          {!polling && trialRes?.status === 'done' && trialRes.heatmap && (
+            <div className="empty">最近一次为参数寻优任务，热力图见「参数寻优」卡片</div>
+          )}
+          {!polling && trialRes?.status === 'done' && trialRes.ic_series && (
+            <>
+              <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
+                <Kpi
+                  lb="RankIC 均值"
+                  v={f3(trialRes.ic_mean)}
+                  vStyle={{ fontSize: 20 }}
+                  d={trialRes.ic_mean != null && trialRes.ic_mean > 0.03 ? '达标 > 0.03' : '阈值 0.03'}
+                  dClass={trialRes.ic_mean != null && trialRes.ic_mean > 0.03 ? 'up' : undefined}
+                  style={{ border: 0, background: 'var(--panel2)' }}
+                />
+                <Kpi
+                  lb="ICIR"
+                  v={f2(trialRes.icir)}
+                  vStyle={{ fontSize: 20 }}
+                  d={trialRes.icir != null && Math.abs(trialRes.icir) > 0.3 ? '达标 > 0.3' : '阈值 0.3'}
+                  dClass={trialRes.icir != null && Math.abs(trialRes.icir) > 0.3 ? 'up' : undefined}
+                  style={{ border: 0, background: 'var(--panel2)' }}
+                />
+              </div>
+              {icChart.has ? <EChart option={icChart.option} height={140} /> : <div className="empty">无 IC 序列</div>}
+              <div style={{ fontSize: 12.5, color: 'var(--txt2)', margin: '10px 0 2px', lineHeight: 1.9 }}>
+                单调性（Q1 跑赢 Q5）{' '}
+                <b className="num">{trialRes.monotonic == null ? '--' : `${(trialRes.monotonic * 100).toFixed(0)}%`}</b>
+                <span style={{ marginLeft: 12 }}>IC 衰减</span>{' '}
+                {(trialRes.ic_decay ?? []).map(d => (
+                  <span key={d.horizon} className="num" style={{ marginLeft: 6 }}>
+                    H{d.horizon}={d.ic == null ? '--' : d.ic.toFixed(2)}
+                  </span>
+                ))}
+              </div>
+              {qChart.has ? <EChart option={qChart.option!} height={180} /> : null}
+            </>
+          )}
+          {!polling && !trialRes && (
+            <div className="empty">选择因子并发起试算 / 寻优，结果实时轮询展示</div>
+          )}
         </div>
       </div>
 
       <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
         {/* 版本管理 */}
-        <div className="card">
+        <div className="card" id="ff-versions">
           <h3>
             因子版本管理
             <span className="hint">每次修改都是新版本 · 可回滚 · 可对比 · {statusSeg}</span>
@@ -246,54 +636,101 @@ export default function FactorFactory() {
               <tr>
                 <th>因子</th>
                 <th>版本</th>
-                <th>变更内容</th>
-                <th className="r">IC 变化</th>
+                <th>参数快照</th>
+                <th className="r">最近试算</th>
                 <th>状态</th>
                 <th>操作</th>
               </tr>
             </thead>
             <tbody>
-              {versions
-                .filter(v => statusFilter === '全部' || v.statusText === statusFilter)
-                .map(v => (
-                  <tr key={v.en}>
-                    <td>
-                      <b>{v.zh}</b> <span className="nm-en">{v.en}</span>
-                    </td>
-                    <td className="num">{v.ver}</td>
-                    <td style={{ fontSize: 13.5, color: 'var(--txt2)' }}>{v.change}</td>
-                    <td className="r num up">{v.ic}</td>
-                    <td>
-                      <Tag type={v.status as 'ok' | 'warn' | 'hold'} label={v.statusText} />
-                    </td>
-                    <td style={{ fontSize: 13.5 }}>
-                      {v.ops.map(([label, color], i) => (
-                        <a key={label} style={{ color, cursor: 'pointer', marginRight: 8 }}>
-                          {label}
-                        </a>
-                      ))}
-                    </td>
-                  </tr>
-                ))}
+              {factors
+                .filter(f => statusFilter === '全部' || (STATUS_ZH[f.status ?? '']?.text ?? f.status) === statusFilter)
+                .map(f => {
+                  const st = STATUS_ZH[f.status ?? ''] ?? { text: f.status ?? '', cls: 'hold' as const }
+                  const tr = trialMap[f.name]
+                  const hasParams = f.params && typeof f.params === 'object' && Object.keys(f.params).length
+                  return (
+                    <tr key={f.name} onClick={() => void applyFactor(f.name, f)} style={{ cursor: 'pointer' }}>
+                      <td>
+                        <b>{FACTOR_ZH[baseOf(f.name)] ?? f.name}</b> <span className="nm-en">{f.name}</span>
+                      </td>
+                      <td className="num">{f.version ?? '--'}</td>
+                      <td style={{ fontSize: 12.5, color: 'var(--txt2)', fontFamily: 'var(--mono)' }}>
+                        {hasParams ? JSON.stringify(f.params) : '—'}
+                      </td>
+                      <td className="r num">
+                        {tr?.status === 'done'
+                          ? (tr.ic == null ? '--' : f3(tr.ic))
+                          : (tr ? TRIAL_ZH[tr.status] ?? '--' : '—')}
+                      </td>
+                      <td><Tag type={st.cls} label={st.text} /></td>
+                      <td style={{ fontSize: 13.5 }} onClick={e => e.stopPropagation()}>
+                        {opsFor(f).map(o => (
+                          <a key={o.label} style={{ color: o.color ?? '#A8C0FF', cursor: 'pointer', marginRight: 8 }} onClick={o.onClick}>
+                            {o.label}
+                          </a>
+                        ))}
+                      </td>
+                    </tr>
+                  )
+                })}
             </tbody>
           </table>
           <div className="sec-note">
-            状态流转：<b>草稿</b>（可自由编辑）→ <b>试算中</b>（锁定公式，跑 IC/分层）→ <b>检验中</b>（人工复核）→{' '}
-            <b style={{ color: 'var(--ok)' }}>已上线（可被策略引用 · 正式使用）</b> → 已停用。规则：①
-            新版本须通过 IC/ICIR + 分层单调性双检验，并与旧版本同期对比；② 已上线且被运行中策略引用的因子不可直接停用，需先在策略工厂解除引用；③
+            状态流转：<b>草稿</b>（可自由编辑）→ <b>试算中</b>（锁定公式，跑 IC/分层）→{' '}
+            <b>检验中</b>（人工复核）→ <b style={{ color: 'var(--ok)' }}>已上线（可被策略引用 · 正式使用）</b> → 已停用。
+            新版本（fork）自动生成 <span className="nm-en">_v2/_v3…</span> 并携带 params 快照；删除仅草稿，已有试算/评分/检验记录则拒。
             上线后旧版本保留 90 天供回滚。
           </div>
         </div>
 
         {/* 参数寻优 */}
-        <div className="card">
+        <div className="card" id="ff-optimize">
           <h3>
-            参数寻优 · momentum 窗口 × 持有期<span className="hint">RankIC 热力图 · 2019-2026</span>
+            参数寻优 · {FACTOR_ZH[base] ?? active}
+            <span className="hint">参数轴 × 持有期 IC 均值 · 区间见上方</span>
           </h3>
-          <EChart option={gridOption} height={250} />
-          <div className="sec-note">
-            解读：20~40 日窗口均有稳定 IC，说明因子对参数不敏感（好信号）；若只有孤立一格发亮，大概率过拟合，不建议采用该参数。
+          <div style={{ marginBottom: 10 }}>
+            {paramDefs.map(d => (
+              <div key={d.key} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+                <div style={{ fontSize: 13, color: 'var(--txt3)', width: 86 }}>
+                  {d.label}（{d.key}）
+                </div>
+                <input
+                  type="text"
+                  value={optGrid[d.key] ?? ''}
+                  onChange={e => setOptGrid(prev => ({ ...prev, [d.key]: e.target.value }))}
+                  placeholder="候选值逗号分隔，如 3,5,10"
+                  style={{ flex: 1, fontFamily: 'var(--mono)' }}
+                />
+              </div>
+            ))}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+              <div style={{ fontSize: 13, color: 'var(--txt3)', width: 86 }}>持有期 horizon</div>
+              <input
+                type="text"
+                value={optGrid.horizon ?? ''}
+                onChange={e => setOptGrid(prev => ({ ...prev, horizon: e.target.value }))}
+                placeholder="候选日数逗号分隔，如 5,10,20"
+                style={{ flex: 1, fontFamily: 'var(--mono)' }}
+              />
+            </div>
+            <button className="btn pri" onClick={() => void submitOptimize()} disabled={!!busy}>
+              {busy === 'optimize' ? '提交中…' : '发起寻优'}
+            </button>
           </div>
+          {hmView ? (
+            <EChart option={hmView} height={250} />
+          ) : polling && trialRes?.status !== 'done' ? (
+            <div className="empty">寻优计算中…</div>
+          ) : trialRes?.heatmap == null && trialRes?.status === 'done' ? (
+            <div className="empty">最近一次为单组试算，无热力图</div>
+          ) : (
+            <div className="sec-note">
+              解读：轴 = 取值最多的计算参数。若参数轴多格均有稳定 IC，说明因子对参数不敏感（好信号）；
+              只有孤立一格发亮大概率过拟合，不建议采用该参数。
+            </div>
+          )}
         </div>
       </div>
     </section>

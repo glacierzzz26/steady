@@ -83,14 +83,18 @@ def create_job(db, start: date, end: date, top_n: int = 20,
 
 
 def claim_job(db) -> BacktestJob | None:
-    """原子领取一个 pending 任务（UPDATE ... WHERE status='pending' RETURNING）"""
-    # 注：SQLAlchemy 2.0 的 update() 不支持 order_by；多任务并发的极端场景下
-    # 领取顺序不保证，但消费循环会一轮全部处理，顺序无关紧要
+    """原子领取一个 pending 任务（UPDATE ... WHERE status='pending' RETURNING）
+
+    必须用子查询把 UPDATE 锁到单行（ORDER BY id LIMIT 1，FIFO 领取）：不带
+    limit 的 update().returning() 是批量更新——会把所有 pending 一次置 running，
+    RETURNING 只取回第一行，其余行被静默挂起永不消费（2.3b 在 factor_trial
+    消费循环 e2e 抓到同类坑，此处同款一并修复；多任务并发时按 id 顺序领取）。
+    """
+    sub = select(BacktestJob.id).where(BacktestJob.status == "pending") \
+        .order_by(BacktestJob.id).limit(1).scalar_subquery()
     row = db.execute(
-        update(BacktestJob)
-        .where(BacktestJob.status == "pending")
-        .values(status="running")
-        .returning(BacktestJob)
+        update(BacktestJob).where(BacktestJob.id == sub)
+        .values(status="running").returning(BacktestJob)
     ).first()
     if row is None:
         return None

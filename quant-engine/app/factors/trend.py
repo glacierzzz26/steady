@@ -17,12 +17,16 @@ def ma_trend(close: pd.Series, short: int = 5, long: int = 20) -> pd.Series:
     return res
 
 
-def macd_signal(close: pd.Series) -> pd.Series:
-    """MACD 信号因子：DIF > DEA 为 1，否则 0"""
-    ema12 = close.ewm(span=12).mean()
-    ema26 = close.ewm(span=26).mean()
-    dif = ema12 - ema26
-    dea = dif.ewm(span=9).mean()
+def macd_signal(close: pd.Series, fast: int = 12, slow: int = 26,
+                signal: int = 9) -> pd.Series:
+    """MACD 信号因子：DIF > DEA 为 1，否则 0
+
+    fast/slow/signal 为 G10 参数化重算的可调参数（默认经典 12/26/9）。
+    """
+    ema_fast = close.ewm(span=fast).mean()
+    ema_slow = close.ewm(span=slow).mean()
+    dif = ema_fast - ema_slow
+    dea = dif.ewm(span=signal).mean()
     return (dif > dea).astype(int)
 
 

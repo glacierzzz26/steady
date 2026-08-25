@@ -29,8 +29,12 @@ func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
 	tradeRepo := repository.NewTradeRepository(db)
 	backtestRepo := repository.NewBacktestRepository(db)
 	strategyRepo := repository.NewStrategyRepository(db)
+	factorRepo := repository.NewFactorRepository(db)
 	backtestSvc := service.NewBacktestService(backtestRepo, strategyRepo)
 	strategySvc := service.NewStrategyService(strategyRepo, backtestSvc)
+	factorStatsSvc := service.NewFactorStatsService(factorRepo)
+	factorSvc := service.NewFactorService(factorRepo)
+	factorTrialSvc := service.NewFactorTrialService(factorSvc, factorRepo)
 	tushareSvc := service.NewTushareConfigService(db)
 	marketSvc := service.NewMarketStatusService(db)
 
@@ -56,7 +60,20 @@ func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
 		v1.POST("/strategies/:name/switch", handler.SwitchStrategy(strategySvc))
 		v1.DELETE("/strategies/:name", handler.DeleteStrategy(strategySvc))   // 第一轮测试：#2 补删除入口
 		v1.GET("/strategies/compare", handler.CompareStrategies(strategySvc)) // §3.3 A/B
-		v1.GET("/factors", handler.GetFactors(strategyRepo))
+		// 2.3 因子研究（G9 FactorLab 统计 + G10 FactorFactory 生命周期）
+		// 静态段先注册，避免与 /factors/:name 通配冲突（gin 路由树）
+		v1.GET("/factors", handler.ListFactors(factorSvc))
+		v1.POST("/factors", handler.CreateFactor(factorSvc))
+		v1.GET("/factors/stats/correlation", handler.GetFactorCorrelation(factorStatsSvc))
+		v1.GET("/factors/:name/stats", handler.GetFactorStats(factorStatsSvc))
+		v1.PUT("/factors/:name", handler.UpdateFactor(factorSvc))
+		v1.DELETE("/factors/:name", handler.DeleteFactor(factorSvc))
+		v1.POST("/factors/:name/versions", handler.ForkFactor(factorSvc))
+		v1.POST("/factors/:name/switch", handler.SwitchFactor(factorSvc))
+		v1.POST("/factors/:name/trial", handler.CreateFactorTrial(factorTrialSvc))
+		v1.POST("/factors/:name/optimize", handler.CreateFactorOptimize(factorTrialSvc))
+		v1.GET("/factor-trials", handler.ListFactorTrials(factorTrialSvc))
+		v1.GET("/factor-trials/:id", handler.GetFactorTrial(factorTrialSvc))
 		v1.GET("/signals", handler.GetSignals(signalRepo))
 		v1.GET("/signals/:code", handler.GetSignalsByCode(signalRepo, stockRepo))
 

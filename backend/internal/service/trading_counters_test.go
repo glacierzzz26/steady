@@ -24,8 +24,8 @@ func TestExecuteDayCounters(t *testing.T) {
 	d := consistencyDay(t, "2026-08-20")
 	dPrev := consistencyDay(t, "2026-08-19")
 
-	// ExecuteDay 还读 strategy / daily_price / stock_basic（GetSignals join），freshDB 未迁移 → 补建表
-	if err := db.AutoMigrate(&model.Strategy{}, &model.DailyPrice{}, &model.StockBasic{}); err != nil {
+	// ExecuteDay 还读 strategy / daily_price / stock_basic / factor_value（GetSignals join），freshDB 未迁移 → 补建表
+	if err := db.AutoMigrate(&model.Strategy{}, &model.DailyPrice{}, &model.StockBasic{}, &model.FactorValue{}); err != nil {
 		t.Fatalf("AutoMigrate 扩展表失败: %v", err)
 	}
 	// savePosition 的 Upsert 走 ON CONFLICT (account_id, code)，AutoMigrate 不建唯一索引

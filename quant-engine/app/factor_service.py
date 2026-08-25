@@ -130,6 +130,54 @@ def factor_raw_value(factor: str, inp: dict, trade_date: date) -> float | None:
     raise ValueError(f"未知因子: {factor}")
 
 
+# ---- G10 参数化重算（2.3b）：对已有因子按 params 重算原始值 ----
+# 设计定稿 §4.3：试算/寻优定位为「已有因子参数化重算 + 检验」，不解析任意公式。
+# 各基础因子可调参数（缺省即经典值）：
+#   ma_trend     {"short": int, "long": int}          短/长均线窗口（默认 5/20）
+#   macd_signal  {"fast": int, "slow": int, "signal": int}  默认 12/26/9
+#   value/quality/risk 因子无计算参数（as-of 取值），params 忽略。
+PARAM_DEFAULTS = {
+    "ma_trend": {"short": 5, "long": 20},
+    "macd_signal": {"fast": 12, "slow": 26, "signal": 9},
+}
+
+
+def parametrized_params(base: str, params: dict | None) -> dict:
+    """params（None 或部分键）→ 该基础因子的完整参数字典（缺省补经典值）
+
+    只认该因子 schema 内的键（value/quality/risk 无计算参数 → 恒 {}）：
+    - ma_trend  {"short","long"}；接受 "window" 简写 → short（long 缺省 20，
+      保持 MA5/MA20 结构；设计 §6.2 寻优例 {"window":[...],"horizon":[...]} 即走此键）
+    - macd_signal {"fast","slow","signal"}
+    """
+    defaults = PARAM_DEFAULTS.get(base)
+    if defaults is None:
+        return {}
+    out = dict(defaults)
+    if params:
+        for k, v in params.items():
+            if not isinstance(v, (int, float)):
+                continue
+            kk = "short" if (k == "window" and base == "ma_trend") else k
+            if kk in out:
+                out[kk] = int(v)
+    return out
+
+
+def factor_raw_value_parametrized(factor: str, inp: dict, trade_date: date,
+                                  params: dict | None) -> float | None:
+    """变体因子在 trade_date 的原始值（参数化重算；非趋势因子忽略 params 走原路径）"""
+    p = parametrized_params(factor, params)
+    if factor == "ma_trend":
+        s = ma_trend(inp["close"], short=p["short"], long=p["long"])
+        return None if s.empty or pd.isna(s.iloc[-1]) else float(s.iloc[-1])
+    if factor == "macd_signal":
+        s = macd_signal(inp["close"], fast=p["fast"], slow=p["slow"], signal=p["signal"])
+        return None if s.empty else float(s.iloc[-1])
+    # value/quality/risk：无计算参数，走已验证原路径
+    return factor_raw_value(factor, inp, trade_date)
+
+
 def normalize_cross_section(raw: dict[str, float | None], direction: str
                             ) -> dict[str, tuple[float, int, float]]:
     """横截面归一化 → {code: (value, rank, normalized)}

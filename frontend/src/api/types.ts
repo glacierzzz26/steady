@@ -261,17 +261,142 @@ export interface StrategiesData {
   items: StrategyInfo[]
 }
 
-// 因子定义（构建器因子池：GET /factors 真实 factor_definition）
+// 因子定义（构建器因子池：GET /factors 真实 factor_definition；2.3 补 version/status，
+// 2.3b 补 params 变体参数快照 + created_at）
 export interface FactorDefinition {
   name: string
-  category?: string
+  category?: string // trend / value / quality / risk
   description?: string
   formula?: string
   weight: number
+  version?: string
+  status?: string // draft/trial/verified/active/disabled（仅 active 参与评分池）
+  params?: Record<string, unknown> | null // 变体因子参数快照（如 {"window":10}）；value 类为 null
+  created_at?: string
 }
 
 export interface FactorsData {
   items: FactorDefinition[]
+}
+
+// ============ 因子研究（2.3 G9 FactorLab，契约《因子研究闭环》§6.1）============
+export interface FactorStatPoint {
+  date: string // YYYY-MM-DD
+  ic: number | null // 所选 horizon 的当日 RankIC；尾部滞后为 null
+}
+
+export interface FactorDecayPoint {
+  horizon: number
+  ic: number | null
+}
+
+export interface FactorQuantile {
+  group: number // 1=因子最优组
+  ret: number | null // 组均前向收益（H=5）
+}
+
+/** GET /factors/:name/stats 响应 */
+export interface FactorStatsData {
+  factor: string
+  category?: string
+  range: { start: string; end: string; days: number }
+  horizon: number
+  ic_series: FactorStatPoint[]
+  icir: number | null
+  ic_mean: number | null
+  ic_std: number | null
+  ic_decay: FactorDecayPoint[]
+  quantiles: FactorQuantile[]
+  monotonic: number | null // Q1 跑赢 Q5 的交易日占比（0-1）
+}
+
+/** GET /factors/stats/correlation 响应 */
+export interface FactorCorrData {
+  factors: string[] // 6 因子规范序
+  matrix: Array<Array<number | null>> // 6×6 区间均值，无共现格为 null
+}
+
+// ============ 因子工厂（2.3b G10，契约《因子研究闭环》§6.2）============
+export type FactorStatus = 'draft' | 'trial' | 'verified' | 'active' | 'disabled'
+export type FactorTrialStatus = 'pending' | 'running' | 'done' | 'failed'
+
+/** 新建/编辑因子请求（POST/PUT /factors；name 仅创建时用） */
+export interface FactorUpsert {
+  name?: string
+  category?: string
+  description?: string
+  formula?: string
+  weight?: number
+  params?: Record<string, unknown>
+}
+
+/** 状态流转请求（POST /factors/:name/switch；状态机 draft→trial→verified→active→disabled） */
+export interface FactorSwitchInput {
+  status: FactorStatus
+}
+
+/** factor_trial 队列任务（GET /factor-trials 列表项；id 倒序） */
+export interface FactorTrialItem {
+  id: number
+  factor_name: string
+  params: Record<string, unknown> | null // {"start","end","params":{...}} / {"start","end","param_grid":{...}}
+  status: FactorTrialStatus
+  result?: Record<string, unknown> | null
+  error: string
+  created_at: string
+  finished_at: string | null
+}
+
+export interface FactorTrialsData {
+  items: FactorTrialItem[]
+}
+
+/** 单组参数试算请求（POST /factors/:name/trial；params 缺省取因子 params 快照，
+ *  value/quality/risk 无计算参数 → 省略 params 键，勿发显式空对象） */
+export interface FactorTrialSubmit {
+  params?: Record<string, number>
+  start: string // YYYY-MM-DD
+  end: string
+}
+
+/** 参数寻优请求（POST /factors/:name/optimize；param_grid = 参数候选 × horizon 候选） */
+export interface FactorOptimizeSubmit {
+  param_grid: Record<string, number[]>
+  start: string
+  end: string
+}
+
+/** 提交成功（trial/optimize 同形状：{id, status}） */
+export interface FactorTrialCreated {
+  id: number
+  status: FactorTrialStatus
+}
+
+/** 参数寻优热力图：轴 = 取值最多的计算参数（同数并列按字典序）；
+ *  grid[i][j] = 参数值 i × 持有期 j 的区间 IC 均值；无计算参数轴时为 "base" 单行 */
+export interface FactorHeatmap {
+  param: string
+  param_values: (number | string)[]
+  horizons: number[]
+  grid: (number | null)[][]
+}
+
+/** GET /factor-trials/:id 响应：pending/running → {status}；failed → {status,error}；
+ *  done → {status, ...result 展开}（trial: ic_series/icir/quantiles/monotonic/heatmap?；
+ *  optimize: heatmap） */
+export interface FactorTrialDetail extends FactorTrialCreated {
+  error?: string
+  factor?: string
+  params?: Record<string, unknown> | null
+  dates?: { start: string; end: string }
+  ic_series?: FactorStatPoint[]
+  ic_mean?: number | null
+  ic_std?: number | null
+  icir?: number | null
+  ic_decay?: FactorDecayPoint[]
+  quantiles?: FactorQuantile[]
+  monotonic?: number | null
+  heatmap?: FactorHeatmap
 }
 
 // A/B 对比（§3.3 GET /strategies/compare）

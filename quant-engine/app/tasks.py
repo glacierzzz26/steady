@@ -170,6 +170,25 @@ def job_consume_backtests():
         db.close()
 
 
+def job_consume_factor_trials():
+    """G10 试算/寻优任务消费者：每 5 分钟领取 pending 并落库（复用 backtest_job 模式）
+
+    只读 factor_value/行情/估值/财务，不写 factor_value，与 19:00 评分任务并行安全。
+    """
+    from app.factor_trial import consume_pending_trials
+
+    db = get_session()
+    try:
+        consume_pending_trials()
+        record_task(db, "factor_trial", date.today(), "success", "试算任务消费完成")
+    except Exception:
+        logger.exception("试算任务消费失败")
+        db.rollback()
+        record_task(db, "factor_trial", date.today(), "failed", "试算任务消费异常")
+    finally:
+        db.close()
+
+
 def job_data_quality():
     """18:30 数据健康检查：7 项体检结果写 task_run 台账（notify_scheduler 18:35 推送）。
     执行成功即记 success（发现问题是产出而非失败）；job 崩溃才记 failed。"""
@@ -196,6 +215,35 @@ def job_data_quality():
         db.close()
 
 
+def job_precompute_factor_stat():
+    """19:05 预计算因子检验统计（2.3 G9：factor_stat/factor_corr，幂等 upsert）
+
+    读取 factor_value + daily_price 全历史重算（区间内每因子每日 IC/分层 + 6 因子
+    相关矩阵），ON CONFLICT upsert —— 数据回填/补齐后重跑即自动填满尾部。
+    """
+    from app.factor_research import precompute_factor_stat
+
+    db = get_session()
+    try:
+        result = precompute_factor_stat(db)
+        if result.get("skipped"):
+            logger.warning("因子检验预计算跳过：%s", result["skipped"])
+            record_task(db, "factor_stat", date.today(), "skipped", result["skipped"])
+            return
+        record_task(db, "factor_stat", date.today(), "success",
+                    f"预计算完成（{len(result.get('factors', {}))} 因子）",
+                    detail={"factors": result.get("factors", {}),
+                            "dates": result.get("dates"),
+                            "corr_dates": result.get("corr_dates")})
+        logger.info("因子检验预计算完成：%s", result)
+    except Exception:
+        logger.exception("因子检验预计算失败")
+        db.rollback()
+        record_task(db, "factor_stat", date.today(), "failed", "因子检验预计算异常")
+    finally:
+        db.close()
+
+
 def job_morning_brief():
     """09:10 早盘简报（热点采集 + 昨日回顾 + 今日计划，Issue #4）。
     非交易日/无行情 skip；组装逻辑见 app/morning_brief.py。"""
@@ -209,8 +257,10 @@ if __name__ == "__main__":
 
     scheduler.add_job(job_morning_brief, "cron", hour=9, minute=10)
     scheduler.add_job(job_calc_factors, "cron", hour=19, minute=0)
+    scheduler.add_job(job_precompute_factor_stat, "cron", hour=19, minute=5)
     scheduler.add_job(job_generate_signals, "cron", hour=19, minute=30)
     scheduler.add_job(job_consume_backtests, "interval", minutes=5)
+    scheduler.add_job(job_consume_factor_trials, "interval", minutes=5)
     scheduler.add_job(job_data_quality, "cron", hour=18, minute=30)
     scheduler.add_job(notify_tick, "interval", minutes=1)
 
