@@ -116,8 +116,16 @@ def test_quantile_returns_monotone():
     fwd_df = pd.DataFrame([fwd] * 3, index=DATES, columns=stocks)
     qr = quantile_returns_by_date(norm, fwd_df, q=5)
     means = qr.mean()
-    assert means[1] == pytest.approx(0.01)             # Q1=最优股 S9 → 0.01
+    assert means[1] == pytest.approx(0.0095)           # Q1=最优前 2 股 → (0.009+0.01)/2
     assert list(means) == sorted(means, reverse=True)  # 严格单调递减
+
+
+def test_quantile_groups_top_ties_full_groups():
+    """回归（2026-08-26 生产 2 年数据暴露）：顶部并列不再吞掉 Q1，恒出满组。"""
+    s = pd.Series([0.1 + 0.01 * i for i in range(30)] + [1.0] * 5)  # 30 递增值 + 顶部 5 个并列
+    g = quantile_groups(s, 5)
+    assert set(g.unique()) == {1, 2, 3, 4, 5}          # 全组非空
+    assert g[s.idxmax()] == 1                          # 并列顶部整体落 Q1
 
 
 # ---------- 因子相关性 ----------
