@@ -73,9 +73,15 @@ def test_fetch_calls_both_adjusts(monkeypatch):
     assert len(rows) == 3
 
 
+def _clear_factor_cache():
+    daily_mod._FACTOR_CACHE.clear()
+
+
 def test_baostock_hybrid_factor_from_tushare(monkeypatch):
     """混合模式（§2.2）：OHLCV 走 BaoStock，adj_factor 被 Tushare 覆盖——
-    BaoStock 派生因子全池 51% 有分段阶跃（平安/天齐缺陷），不能作因子唯一来源"""
+    BaoStock 派生因子全池 51% 有分段阶跃（平安/天齐缺陷），不能作因子唯一来源。
+    因子按交易日批量（factor_map_by_date 1 次调用全市场），不逐股拉取。"""
+    _clear_factor_cache()
     monkeypatch.setattr(daily_mod, "baostock_enabled", lambda: True)
     monkeypatch.setattr(daily_mod.baostock, "get_session", lambda: object())
     # BaoStock 原始行情 + 其派生的 hfq（hfq/raw = 6.26，应被 Tushare 覆盖）
@@ -84,8 +90,14 @@ def test_baostock_hybrid_factor_from_tushare(monkeypatch):
     monkeypatch.setattr(daily_mod.baostock, "daily_pairs",
                         lambda sess, code, s, e: (raw, hfq))
     monkeypatch.setattr(daily_mod.tushare, "make_pro", lambda db: object())
-    monkeypatch.setattr(daily_mod.tushare, "factor_map", lambda pro, code, s, e: {
-        "2026-08-01": 8.8825, "2026-08-02": 8.8825, "2026-08-03": 8.8825})
+    by_date_calls = []
+
+    def fake_by_date(pro, trade_date):
+        by_date_calls.append(trade_date)
+        # 按交易日返回全市场因子（ts_code 键控）
+        return {"600519.SH": 8.8825, "000001.SZ": 150.7263}
+
+    monkeypatch.setattr(daily_mod.tushare, "factor_map_by_date", fake_by_date)
 
     rows = DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
     assert len(rows) == 3
@@ -94,11 +106,38 @@ def test_baostock_hybrid_factor_from_tushare(monkeypatch):
     # OHLCV 仍来自 BaoStock
     assert [r["close"] for r in rows] == [10.0, 10.5, 11.0]
     assert rows[0]["trade_date"] == date(2026, 8, 1)
+    # 按窗口内交易日批量拉取（3 个交易日 = 3 次调用，非逐股）
+    assert by_date_calls == ["2026-08-01", "2026-08-02", "2026-08-03"]
+
+
+def test_baostock_hybrid_factor_cache_reuse(monkeypatch):
+    """因子缓存跨股票复用：同一交易日的第二次 fetch 不重复调 Tushare
+    （每日同步 5000 只股票同窗口 → 全市场仅 1 次 adj_factor 调用）"""
+    _clear_factor_cache()
+    monkeypatch.setattr(daily_mod, "baostock_enabled", lambda: True)
+    monkeypatch.setattr(daily_mod.baostock, "get_session", lambda: object())
+    monkeypatch.setattr(daily_mod.baostock, "daily_pairs",
+                        lambda sess, code, s, e: (make_hist(closes=(10.0, 10.5, 11.0)),
+                                                  make_hist(closes=(62.6, 65.7, 68.9))))
+    monkeypatch.setattr(daily_mod.tushare, "make_pro", lambda db: object())
+    by_date_calls = []
+
+    def fake_by_date(pro, trade_date):
+        by_date_calls.append(trade_date)
+        return {"600519.SH": 8.8825, "000001.SZ": 150.7263}
+
+    monkeypatch.setattr(daily_mod.tushare, "factor_map_by_date", fake_by_date)
+
+    DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
+    DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
+    # 第二次 fetch 全部命中缓存：仍是 3 次批量调用（每个交易日 1 次）
+    assert by_date_calls == ["2026-08-01", "2026-08-02", "2026-08-03"]
 
 
 def test_baostock_hybrid_no_tushare_falls_through(monkeypatch):
     """混合模式缺 Tushare 因子源 → 降级 Tushare 全路径（保因子连续性，不落
     BaoStock 派生因子）"""
+    _clear_factor_cache()
     monkeypatch.setattr(daily_mod, "baostock_enabled", lambda: True)
     monkeypatch.setattr(daily_mod.baostock, "get_session", lambda: object())
     monkeypatch.setattr(daily_mod.baostock, "daily_pairs",

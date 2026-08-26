@@ -5,8 +5,15 @@ adj_factor 仍走 Tushare（BaoStock 派生因子 51% 有分段阶跃、平安/�
 见 docs/phase2/design/数据源评估-BaoStock.md §2.2，不能作因子唯一来源）；
 失败降级 Tushare → 东财（stock_zh_a_hist）→ 新浪（stock_zh_a_daily）。
 新浪成交量单位为股，统一转手（/100）。
+
+因子拉取策略（2026-08-27 修正）：adj_factor 免费档限频苛刻（prod 5次/天、
+dev 1次/小时），**逐股 factor_map() 在全市场同步第一只就打爆配额**，原混合路径
+实际永远降级 AkShare。改为**按交易日批量**：`adj_factor(trade_date=) 一次覆盖
+全市场`，按窗口内缺失日期逐日补模块级缓存（1 天 1 次调用），同一次同步后续股票
+全部命中缓存。
 """
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
@@ -22,6 +29,32 @@ from app.models.tables import DailyPrice
 from app.sources import baostock, tushare
 
 logger = logging.getLogger(__name__)
+
+# Tushare 因子按交易日批量缓存（限频 5次/天 → 1 天 1 次调用全市场，绝不逐股）。
+# key = "YYYY-MM-DD" → {ts_code: float}；历史因子不可变，缓存可跨进程长期复用，
+# 仅用大小上限兜底内存。
+_FACTOR_CACHE: dict[str, dict[str, float]] = {}
+_FACTOR_LOCK = threading.Lock()
+_MAX_FACTOR_CACHE_DATES = 30
+
+
+def _fill_factor_cache(pro, dates) -> None:
+    """为窗口内缺失的交易日批量补因子缓存（每日期 1 次 adj_factor 调用）
+
+    一次每日同步的窗口通常只有 1 个新交易日 → 全市场仅 1 次调用，其余股票全命中
+    缓存；限频命中/数据未就绪抛异常时由调用方整段降级 Tushare → AkShare。
+    """
+    with _FACTOR_LOCK:
+        for d in dates:
+            if d not in _FACTOR_CACHE:
+                fac = tushare.factor_map_by_date(pro, d)
+                if fac:  # 空结果（Tushare 未就绪）不缓存，避免被永久记住而不再重试
+                    _FACTOR_CACHE[d] = fac
+        if len(_FACTOR_CACHE) > _MAX_FACTOR_CACHE_DATES:
+            # dict 保插入序：淘汰最旧日期，只留最近 _MAX_FACTOR_CACHE_DATES 个
+            for d in list(_FACTOR_CACHE)[:-_MAX_FACTOR_CACHE_DATES]:
+                _FACTOR_CACHE.pop(d, None)
+
 
 # AkShare 列名 → 内部字段
 COLUMN_MAP = {
@@ -143,6 +176,7 @@ class DailyCollector(BaseCollector):
         # BaoStock 混合主源（阶段 1 开关）：OHLCV 走 BaoStock，adj_factor 走 Tushare。
         # BaoStock 派生因子全池 51% 有分段阶跃（平安虚假调整/天齐配股滞后为实证缺陷），
         # 不能作因子唯一来源（§2.2 复核结论）；因子缺失时整段降级 Tushare 保住连续性。
+        # 因子按交易日批量拉取（_fill_factor_cache）：限频 5次/天 → 1 天 1 次全市场。
         if baostock_enabled():
             sess = baostock.get_session()
             if sess is not None:
@@ -153,14 +187,19 @@ class DailyCollector(BaseCollector):
                     pro = tushare.make_pro(self.db)
                     if pro is None:
                         raise RuntimeError(f"{code} 混合模式缺 Tushare 因子源")
-                    fmap = tushare.factor_map(pro, code, start_date, end_date)
-                    if not fmap:
-                        raise RuntimeError(f"{code} Tushare 复权因子为空")
                     rows = build_rows(code, raw, hfq)
+                    dates = sorted({str(r["trade_date"]) for r in rows})
+                    _fill_factor_cache(pro, dates)
+                    ts_code = tushare.ts_code(code)
                     for r in rows:
-                        f = fmap.get(str(r["trade_date"]))
+                        f = _FACTOR_CACHE.get(str(r["trade_date"]), {}).get(ts_code)
                         if f is not None:
                             r["adj_factor"] = round(f, 4)
+                        elif r["volume"]:
+                            # 有成交却缺因子：绝不让 BaoStock 派生因子混入（§2.2），
+                            # 整段降级 Tushare 保因子连续性
+                            raise RuntimeError(
+                                f"{code} {r['trade_date']} 缺 Tushare 因子")
                     logger.info("%s BaoStock OHLCV + Tushare 因子 %s 条", code, len(rows))
                     return rows
                 except Exception as e:

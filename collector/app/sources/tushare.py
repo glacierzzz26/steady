@@ -152,17 +152,34 @@ def daily_pairs(pro, code: str, start_date, end_date):
 
 
 def factor_map(pro, code: str, start_date, end_date) -> dict:
-    """复权因子序列 → {YYYY-MM-DD: float}
+    """复权因子序列 → {YYYY-MM-DD: float}（逐股，限频苛刻，仅回填/单股补缺用）
 
     供 daily 采集器混合模式（§2.2 复核结论）：OHLCV 走 BaoStock（逐位一致），
     adj_factor 走 Tushare——BaoStock 派生因子全池 51% 有分段阶跃、平安/天齐为
     已实证缺陷（虚假调整 / 配股滞后），不能作因子唯一来源。
+
+    ⚠️ adj_factor 免费档限频苛刻（prod 5次/天、dev 1次/小时），**逐股调用在
+    全市场每日同步里第一只就打爆配额**——生产混合模式必须用 factor_map_by_date()
+    按交易日批量，勿在此路径逐股拉取（见 factor_map_by_date 说明）。
     """
     tc = ts_code(code)
     fac = pro.adj_factor(ts_code=tc, start_date=_ymd(start_date), end_date=_ymd(end_date))
     if fac is None or fac.empty:
         return {}
     return {_iso(r["trade_date"]): float(r["adj_factor"]) for _, r in fac.iterrows()}
+
+
+def factor_map_by_date(pro, trade_date) -> dict:
+    """某交易日全市场复权因子 → {ts_code: float}（1 次调用覆盖全市场）
+
+    混合模式按窗口内缺失交易日逐日批量补缓存（1 天 1 次调用，绝不逐股）——
+    adj_factor 免费档限频苛刻（prod 实测 5次/天 + 1次/分钟，dev 1次/小时），
+    逐股调用在全市场同步里不可行；按日批量把每日增量压到 1 次调用。
+    """
+    fac = pro.adj_factor(trade_date=_ymd(trade_date))
+    if fac is None or fac.empty:
+        return {}
+    return {r["ts_code"]: float(r["adj_factor"]) for _, r in fac.iterrows()}
 
 
 # ---------- 按日期：全市场行情快照（每日增量主路径） ----------
