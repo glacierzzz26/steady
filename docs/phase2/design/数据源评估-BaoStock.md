@@ -131,7 +131,8 @@ BaoStock（`pip install baostock`，v0.9.30；自定义 TCP 协议，免费无 t
   - **对账结果**：OHLCV 逐位一致 ✅；adj_factor 未通过（51% 阶跃，含 000001 虚假调整 / 002466 配股滞后两个实证缺陷）→ **放行范围收窄为混合方案**。
   - **混合方案已落地**：`daily.py` BaoStock 分支 = 「OHLCV 走 BaoStock + adj_factor 走 Tushare」。**因子按交易日批量拉取**（`tushare.factor_map_by_date()` 1 次调用全市场 + 模块级缓存）——**2026-08-27 生产验证暴露 `adj_factor` 免费档限频苛刻（prod 实测 5次/天+1次/分钟、dev 1次/小时），原逐股 `factor_map()` 在全市场同步第一只就打爆配额、混合路径实际永远降级 AkShare，故重构为批量**（`daily.py` `_fill_factor_cache`，测试锁定缓存复用）。因子缺失时整段降级 Tushare 保连续性（`tests/test_daily.py` 三例混合测试锁定）。**dev 库因子列已用 Tushare 覆盖**（茅台 7.6693→8.8825，平安/天齐缺陷消除），复核：全池因子比值 dev/prod 偏移 0 只 >0.01%。
   - **生产 08-24 因子损坏事件（2026-08-27 发现并修复）**：Tushare 全市场 glitch——08-24 当日无任何真实分红（BaoStock 分红核对），但 **606/799 只**复权因子单向尖刺（74 只 >1%，最高 ±50%），隔日 08-25 全自愈；旧 Tushare snapshot 路径忠实落库。**孤立尖刺规则**修复（f(D) 与两侧邻日均不同才修；真实除权 f(D)==f(D+1) 天然跳过）prod+dev，复核：窗口内 >1% 尖刺归零、dev/prod 因子逐位比对 14,392 行 0 偏差。
-  - **生产翻转**：待阶段 2 统一回填 + 灰度。dev 现已 = 混合终态（BaoStock OHLCV + Tushare 因子）。
+  - **生产翻转（daily+calendar，2026-08-27）**：`steady-20260827-66508db`（批量+61s 错峰）部署，`BAOSTOCK_ENABLED=1`，容器健康、BaoStock 可达、降级链端到端正确。**混合腿（Tushare 因子成功返回）生产实时观测因 adj_factor 配额耗尽未在验证窗口完成**——代码路径已由单测锁定 + 日志证明进混合分支发 `factor_map_by_date`，后台监控在配额重置时自动补跑。归档 [`../stages/BaoStock迁移-阶段1.md`](../stages/BaoStock迁移-阶段1.md)。
+  - **生产翻转（阶段 2）**：待 valuation/finance/index/stock_basic 切换后统一回填 + 灰度。dev 现已 = 混合终态（BaoStock OHLCV + Tushare 因子）。
 - **阶段 2**：`valuation`/`finance`/`index`/`stock_basic`(保留 industry 来源) 逐个切换 → 生产回填 + 上线。hotspot/外盘层不动。
 - **阶段 3（可选）**：Tushare 降为纯兜底，去掉 token 与 120/min 依赖；G6 两市成交顺带用 BaoStock `sum(amount)` 点亮。
 
