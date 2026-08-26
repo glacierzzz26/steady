@@ -14,6 +14,7 @@ dev 1次/小时），**逐股 factor_map() 在全市场同步第一只就打爆�
 """
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
@@ -45,11 +46,15 @@ def _fill_factor_cache(pro, dates) -> None:
     缓存；限频命中/数据未就绪抛异常时由调用方整段降级 Tushare → AkShare。
     """
     with _FACTOR_LOCK:
-        for d in dates:
-            if d not in _FACTOR_CACHE:
-                fac = tushare.factor_map_by_date(pro, d)
-                if fac:  # 空结果（Tushare 未就绪）不缓存，避免被永久记住而不再重试
-                    _FACTOR_CACHE[d] = fac
+        need = [d for d in dates if d not in _FACTOR_CACHE]
+        for i, d in enumerate(need):
+            fac = tushare.factor_map_by_date(pro, d)
+            if fac:  # 空结果（Tushare 未就绪）不缓存，避免被永久记住而不再重试
+                _FACTOR_CACHE[d] = fac
+            if i < len(need) - 1:
+                # prod 实测 adj_factor 限频 1次/分钟：多日期窗口必须错开，
+                # 否则首个多日窗口在 1 分钟内连发 N 次调用直接打爆配额
+                time.sleep(61)
         if len(_FACTOR_CACHE) > _MAX_FACTOR_CACHE_DATES:
             # dict 保插入序：淘汰最旧日期，只留最近 _MAX_FACTOR_CACHE_DATES 个
             for d in list(_FACTOR_CACHE)[:-_MAX_FACTOR_CACHE_DATES]:

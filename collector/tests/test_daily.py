@@ -2,11 +2,18 @@
 from datetime import date
 
 import pandas as pd
+import pytest
 
 from app.collectors import daily as daily_mod
 from app.collectors.daily import (DailyCollector, build_rows, fetch_pair,
                                   normalize_sina, sina_symbol)
 from tests.helpers import multi_values
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    """混合批量因子在多日期窗口间有 61s 限频错峰——测试里换成 no-op"""
+    monkeypatch.setattr(daily_mod.time, "sleep", lambda s: None)
 
 
 def make_hist(closes=(10.0, 10.5, 11.0), start="2026-08-01"):
