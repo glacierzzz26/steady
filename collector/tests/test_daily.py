@@ -73,6 +73,50 @@ def test_fetch_calls_both_adjusts(monkeypatch):
     assert len(rows) == 3
 
 
+def test_baostock_hybrid_factor_from_tushare(monkeypatch):
+    """混合模式（§2.2）：OHLCV 走 BaoStock，adj_factor 被 Tushare 覆盖——
+    BaoStock 派生因子全池 51% 有分段阶跃（平安/天齐缺陷），不能作因子唯一来源"""
+    monkeypatch.setattr(daily_mod, "baostock_enabled", lambda: True)
+    monkeypatch.setattr(daily_mod.baostock, "get_session", lambda: object())
+    # BaoStock 原始行情 + 其派生的 hfq（hfq/raw = 6.26，应被 Tushare 覆盖）
+    raw = make_hist(closes=(10.0, 10.5, 11.0))
+    hfq = make_hist(closes=(62.6, 65.7, 68.9))
+    monkeypatch.setattr(daily_mod.baostock, "daily_pairs",
+                        lambda sess, code, s, e: (raw, hfq))
+    monkeypatch.setattr(daily_mod.tushare, "make_pro", lambda db: object())
+    monkeypatch.setattr(daily_mod.tushare, "factor_map", lambda pro, code, s, e: {
+        "2026-08-01": 8.8825, "2026-08-02": 8.8825, "2026-08-03": 8.8825})
+
+    rows = DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
+    assert len(rows) == 3
+    # adj_factor 来自 Tushare，而非 BaoStock 派生的 6.26
+    assert [r["adj_factor"] for r in rows] == [8.8825, 8.8825, 8.8825]
+    # OHLCV 仍来自 BaoStock
+    assert [r["close"] for r in rows] == [10.0, 10.5, 11.0]
+    assert rows[0]["trade_date"] == date(2026, 8, 1)
+
+
+def test_baostock_hybrid_no_tushare_falls_through(monkeypatch):
+    """混合模式缺 Tushare 因子源 → 降级 Tushare 全路径（保因子连续性，不落
+    BaoStock 派生因子）"""
+    monkeypatch.setattr(daily_mod, "baostock_enabled", lambda: True)
+    monkeypatch.setattr(daily_mod.baostock, "get_session", lambda: object())
+    monkeypatch.setattr(daily_mod.baostock, "daily_pairs",
+                        lambda sess, code, s, e: (make_hist(), make_hist()))
+    # 无 Tushare token：make_pro → None → BaoStock 分支抛错 → 降级路径
+    monkeypatch.setattr(daily_mod.tushare, "make_pro", lambda db: None)
+    calls = []
+
+    def fake_hist(symbol, period, start_date, end_date, adjust):
+        calls.append(adjust)
+        return make_hist()
+
+    monkeypatch.setattr(daily_mod.ak, "stock_zh_a_hist", fake_hist)
+    rows = DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
+    assert calls == ["", "hfq"]  # 一路降到 AkShare
+    assert len(rows) == 3
+
+
 def test_sina_symbol():
     assert sina_symbol("600519") == "sh600519"
     assert sina_symbol("000001") == "sz000001"

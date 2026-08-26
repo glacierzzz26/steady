@@ -1,0 +1,275 @@
+"""BaoStock 数据源适配层（阶段 1：daily + calendar；设计复刻 sources/tushare.py）
+
+设计原则：
+- 无 token / 无外部依赖，`get_session()` 恒可用（依赖缺失时返回 None，采集器跳过）；
+- baostock 是自定义 TCP 协议，**进程内全局单 socket**（context.default_socket）：
+  `login()` 建连一次，后续所有查询复用同一连接；登录 2~40s 不等。因此会话为
+  **懒登录单例 + 失效重连**，`get_session()` 返回缓存实例，逐只循环只登录一次；
+- 各查询返回与 Tushare/AkShare **同形状**的数据（上层 build_rows / save / 清洗 /
+  重试逻辑完全不动）；调用失败抛异常 → 采集器降级 Tushare → AkShare；
+- socket 全程套超时（`socket.setdefaulttimeout`），防止库内阻塞 connect/recv 挂死
+  （曾卡死整批补救的同类问题；baostock 本身不设超时）。
+
+复权语义（8/26 用 600519 茅台 / 689009 九号实测确认，勿再踩）：
+- `adjustflag="1"` = **后复权**：茅台 8/26 close=9991.51（=原始 1302.8 × 累计因子
+  7.67），与 Tushare adj_factor / 东财 hfq 同口径 → 派生 adj_factor 必须用它；
+- `adjustflag="2"` = 前复权：最新日 = 原始价，用它派生 adj_factor 会在最新日得 1.0，
+  历史全部错（九号实测差 6.4%）；
+- `adjustflag="3"` = 不复权（入库 close 用这个）。
+
+单位：BaoStock 成交量=股（→ ÷100 转手，对齐东财/Tushare），成交额=元（无需换算）。
+"""
+import logging
+import socket
+import threading
+import time
+from datetime import date, timedelta
+from typing import Callable
+
+import pandas as pd
+
+try:
+    import baostock as bs
+except ImportError:  # baostock 未安装：本层退化，采集器跳过 BaoStock
+    bs = None
+
+try:
+    from app.config import BAOSTOCK_RETRIES, BAOSTOCK_RETRY_DELAY, BAOSTOCK_TIMEOUT
+except ImportError:  # 旧部署无这些配置项：用内置默认值（本层保持独立可跑）
+    BAOSTOCK_TIMEOUT = 60
+    BAOSTOCK_RETRIES = 1
+    BAOSTOCK_RETRY_DELAY = 2
+
+logger = logging.getLogger(__name__)
+
+# 成功码
+_BSERR_SUCCESS = "0"
+
+# 连接级错误码：命中即判定会话失效 → 重连重试（其余为参数/数据错误，直接抛）
+_CONN_CODES = {
+    "10001001",  # 未登录
+    "10002001",  # 网络错误
+    "10002002",  # 网络连接失败
+    "10002003",  # 网络连接超时
+    "10002004",  # 接收时连接断开
+    "10002005",  # 网络发送失败
+    "10002006",  # 网络发送超时
+    "10002007",  # 网络接收错误
+    "10002008",  # 网络接收超时
+}
+
+_session: "BaoStockSession | None" = None
+_session_lock = threading.Lock()
+
+
+class _SocketTimeout:
+    """给 baostock 的阻塞 socket 套超时的上下文管理器（防止 connect/recv 挂死）。
+
+    baostock 在 login 与 send_msg 内新建 socket，均不带 timeout。这里在调用前后
+    设置/恢复进程级默认超时，让新建 socket 继承超时，超时后抛 socket.timeout，
+    由会话按「连接失效」重连，而非无限阻塞。
+    """
+
+    def __init__(self, seconds: float):
+        self.seconds = seconds
+
+    def __enter__(self):
+        self._prev = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(self.seconds)
+        return self
+
+    def __exit__(self, *exc):
+        socket.setdefaulttimeout(self._prev)
+        return False
+
+
+class BaoStockSession:
+    """BaoStock 会话：懒登录 + 连接失效重连 + socket 超时。
+
+    baostock 全局单 socket 非线程安全，所有查询经 self._lock 串行化。
+    """
+
+    def __init__(self, timeout: float = BAOSTOCK_TIMEOUT,
+                 retries: int = BAOSTOCK_RETRIES,
+                 retry_delay: float = BAOSTOCK_RETRY_DELAY):
+        self._connected = False
+        self._lock = threading.Lock()
+        self.timeout = timeout
+        self.retries = retries
+        self.retry_delay = retry_delay
+
+    # ---------- 连接管理 ----------
+
+    def _login(self):
+        """登录并置为已连接；失败抛异常（采集器降级下游源）"""
+        with _SocketTimeout(self.timeout):
+            lg = bs.login()
+        code = str(getattr(lg, "error_code", "?"))
+        if code != _BSERR_SUCCESS:
+            raise RuntimeError(f"BaoStock 登录失败({code}:{getattr(lg, 'error_msg', '')})")
+        self._connected = True
+        logger.info("BaoStock 登录成功")
+
+    def _ensure(self):
+        if bs is None:
+            raise RuntimeError("baostock 未安装")
+        if not self._connected:
+            self._login()
+
+    def _call(self, qfunc: Callable, *args, **kwargs):
+        """调用查询函数并套 socket 超时"""
+        with _SocketTimeout(self.timeout):
+            return qfunc(*args, **kwargs)
+
+    # ---------- 查询入口（重连重试） ----------
+
+    def query(self, qfunc: Callable, *args, **kwargs):
+        """执行一次查询；连接级失败自动重连重试，其余失败直接抛。
+
+        返回 baostock ResultData（error_code == "0" 已确认）。
+        """
+        last: Exception | None = None
+        for attempt in range(self.retries + 1):
+            try:
+                with self._lock:
+                    self._ensure()
+                    rs = self._call(qfunc, *args, **kwargs)
+            except Exception as e:  # socket 超时 / 连接异常 / 登录失败
+                self._connected = False
+                last = e
+                if attempt < self.retries:
+                    time.sleep(self.retry_delay)
+                    continue
+                raise RuntimeError(
+                    f"BaoStock {getattr(qfunc, '__name__', qfunc)} 网络异常: {e}") from e
+            if rs is None:
+                self._connected = False
+                last = RuntimeError("BaoStock 查询返回 None")
+                if attempt < self.retries:
+                    time.sleep(self.retry_delay)
+                    continue
+                raise last
+            code = str(rs.error_code)
+            if code == _BSERR_SUCCESS:
+                return rs
+            name = getattr(qfunc, "__name__", str(qfunc))
+            if code in _CONN_CODES and attempt < self.retries:
+                self._connected = False
+                time.sleep(self.retry_delay)
+                continue
+            raise RuntimeError(f"BaoStock {name} 失败({code}:{rs.error_msg})")
+
+    def close(self):
+        if bs is not None and self._connected:
+            try:
+                bs.logout()
+            except Exception:
+                pass
+        self._connected = False
+
+
+# ---------- 模块级会话单例（逐只循环共享一次登录） ----------
+
+def get_session() -> BaoStockSession | None:
+    """返回进程级 BaoStock 会话单例；依赖缺失 → None（采集器跳过）"""
+    global _session
+    if bs is None:
+        return None
+    with _session_lock:
+        if _session is None:
+            _session = BaoStockSession()
+        return _session
+
+
+def _reset_session():
+    """测试用：重置单例（close 旧会话）"""
+    global _session
+    with _session_lock:
+        if _session is not None:
+            _session.close()
+        _session = None
+
+
+# ---------- 工具 ----------
+
+def bs_code(code: str) -> str:
+    """股票代码 → BaoStock 带市场前缀格式（600519→sh.600519 / 000001→sz.000001 / 830001→bj.830001）"""
+    code = str(code)
+    if code.startswith("6"):
+        return "sh." + code
+    if code.startswith(("8", "4", "9")):
+        return "bj." + code
+    return "sz." + code
+
+
+def _ymd(d) -> str:
+    """date / str → BaoStock 需要的 YYYY-MM-DD"""
+    if isinstance(d, date):
+        return d.strftime("%Y-%m-%d")
+    return str(d).replace("/", "-")
+
+
+def _rs_to_df(rs) -> pd.DataFrame:
+    """ResultData → DataFrame（翻页聚合；字段用 rs.fields 命名）"""
+    if rs is None:
+        return pd.DataFrame()
+    rows = []
+    while rs.error_code == _BSERR_SUCCESS and rs.next():
+        rows.append(rs.get_row_data())
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows, columns=list(rs.fields))
+
+
+# ---------- 按股票：日行情（raw + 后复权，对齐东财中文列） ----------
+
+def daily_pairs(sess: BaoStockSession, code: str, start_date, end_date):
+    """不复权 + 后复权 → (raw_df, hfq_df)，列为东财格式（中文）
+
+    build_rows 期望：raw 含 日期/开盘/最高/最低/收盘/成交量/成交额；
+    hfq 含 日期/收盘（后复权价）。单位：成交量 股→手（/100），成交额 元 原样。
+    """
+    b = bs_code(code)
+    s, e = _ymd(start_date), _ymd(end_date)
+    fields = "date,open,high,low,close,volume,amount"
+    raw_rs = sess.query(bs.query_history_k_data_plus, b, fields,
+                        start_date=s, end_date=e, frequency="d", adjustflag="3")
+    raw = _rs_to_df(raw_rs)
+    if raw.empty:
+        return raw, pd.DataFrame()
+    hfq_rs = sess.query(bs.query_history_k_data_plus, b, "date,close",
+                        start_date=s, end_date=e, frequency="d", adjustflag="1")
+    hfq = _rs_to_df(hfq_rs)
+    if hfq.empty:
+        raise RuntimeError(f"{code} BaoStock 后复权未返回数据（不复权有 {len(raw)} 行）")
+
+    raw = raw.rename(columns={
+        "date": "日期", "open": "开盘", "high": "最高", "low": "最低",
+        "close": "收盘", "volume": "成交量", "amount": "成交额",
+    })
+    raw["成交量"] = raw["成交量"].astype(float) / 100  # 股 → 手
+    hfq = hfq.rename(columns={"date": "日期", "close": "收盘"})
+    return raw[["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"]], hfq
+
+
+# ---------- 交易日历 ----------
+
+def trade_cal_rows(sess: BaoStockSession, start_date=None, end_date=None) -> list[dict]:
+    """交易日历（is_trading_day=1 才入库，对齐现有「只有交易日」语义）"""
+    today = date.today()
+    if start_date is None:
+        start_date = today - timedelta(days=730)
+    if end_date is None:
+        end_date = today + timedelta(days=365)
+    rs = sess.query(bs.query_trade_dates,
+                    start_date=_ymd(start_date), end_date=_ymd(end_date))
+    rows = []
+    for _, r in _rs_to_df(rs).iterrows():
+        if str(r["is_trading_day"]) != "1":
+            continue
+        rows.append({
+            "cal_date": date.fromisoformat(str(r["calendar_date"])),
+            "is_open": True,
+            "exchange": "SSE",
+        })
+    return rows

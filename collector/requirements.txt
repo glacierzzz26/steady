@@ -1,5 +1,6 @@
 akshare>=1.14
 tushare>=1.4
+baostock>=0.9.30
 pandas>=2.2
 numpy>=1.26
 SQLAlchemy>=2.0

@@ -39,6 +39,19 @@ DAILY_SYNC_INTERVAL = _int("COLLECTOR_DAILY_INTERVAL", 1)
 # （曾卡死同步），这里统一兜底；超时抛异常走降级/重试，而非无限等待。
 REQUEST_TIMEOUT = _int("COLLECTOR_REQUEST_TIMEOUT", 15)
 
+# BaoStock 主源开关（阶段 1：dev 开启验证，prod 保持 Tushare 直到对账通过后放行）
+BAOSTOCK_ENABLED = os.getenv("BAOSTOCK_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+# BaoStock 单次 socket 超时（秒）：登录/查询共用，防库内阻塞 connect/recv 挂死
+BAOSTOCK_TIMEOUT = _int("BAOSTOCK_TIMEOUT", 60)
+# 连接级失败的重试次数与间隔（秒）
+BAOSTOCK_RETRIES = _int("BAOSTOCK_RETRIES", 1)
+BAOSTOCK_RETRY_DELAY = _int("BAOSTOCK_RETRY_DELAY", 2)
+
+
+def baostock_enabled() -> bool:
+    """BaoStock 是否作为 daily/calendar 主源（env BAOSTOCK_ENABLED 控制）"""
+    return BAOSTOCK_ENABLED
+
 # 热点采集（早盘简报数据源，Issue #4）：每日早晨采集一次
 HOTSPOT_TOP_N = _int("COLLECTOR_HOTSPOT_TOP_N", 10)          # 板块/人气榜取 TOP N
 HOTSPOT_INDICES = _str("COLLECTOR_HOTSPOT_INDICES", ".DJI,.IXIC,.INX")  # 隔夜外盘代码

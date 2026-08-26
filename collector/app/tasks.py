@@ -61,14 +61,34 @@ def _daily_sync_codes(db) -> list[str]:
 
 
 def job_sync_daily_price():
-    """16:30 同步当日行情：Tushare 主源按日全市场快照（2 次调用/天）；
-    失败/未配置降级 AkShare 逐只增量"""
+    """16:30 同步当日行情：BaoStock 主源逐只（阶段 1 开关，无全市场快照接口）；
+    否则 Tushare 主源按日全市场快照（2 次调用/天）；失败/未配置降级 AkShare 逐只"""
     from app.collectors.daily import DailyCollector, upsert_daily_rows
-    from app.sources import tushare
+    from app.config import baostock_enabled
+    from app.sources import baostock, tushare
 
     db = get_session()
     codes = _daily_sync_codes(db)
     end = date.today()
+    if baostock_enabled() and baostock.get_session() is not None:
+        # BaoStock 无按日全市场快照接口：逐只增量（DailyCollector 内
+        # BaoStock→Tushare→AkShare 兜底链），阶段 1 用于对账验证。
+        logger.info("每日行情同步（BaoStock 主源）：%s 只股票", len(codes))
+        ok = fail = 0
+        for code in codes:
+            max_d = db.execute(
+                select(func.max(DailyPrice.trade_date)).where(DailyPrice.code == code)
+            ).scalar()
+            start = max_d + timedelta(days=1) if max_d else end - timedelta(days=DAILY_FALLBACK_DAYS)
+            if start > end:
+                continue
+            if DailyCollector(db).run(code, start, end):
+                ok += 1
+            else:
+                fail += 1
+            time.sleep(DAILY_SYNC_INTERVAL)
+        logger.info("每日行情同步完成：成功 %s，失败 %s", ok, fail)
+        return
     pro = tushare.make_pro(db)
     if pro is not None:
         try:

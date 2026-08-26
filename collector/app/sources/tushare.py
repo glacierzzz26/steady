@@ -151,6 +151,20 @@ def daily_pairs(pro, code: str, start_date, end_date):
     return raw[["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"]], hfq
 
 
+def factor_map(pro, code: str, start_date, end_date) -> dict:
+    """复权因子序列 → {YYYY-MM-DD: float}
+
+    供 daily 采集器混合模式（§2.2 复核结论）：OHLCV 走 BaoStock（逐位一致），
+    adj_factor 走 Tushare——BaoStock 派生因子全池 51% 有分段阶跃、平安/天齐为
+    已实证缺陷（虚假调整 / 配股滞后），不能作因子唯一来源。
+    """
+    tc = ts_code(code)
+    fac = pro.adj_factor(ts_code=tc, start_date=_ymd(start_date), end_date=_ymd(end_date))
+    if fac is None or fac.empty:
+        return {}
+    return {_iso(r["trade_date"]): float(r["adj_factor"]) for _, r in fac.iterrows()}
+
+
 # ---------- 按日期：全市场行情快照（每日增量主路径） ----------
 
 def daily_snapshot(pro, trade_date, codes=None):

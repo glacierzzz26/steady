@@ -1,6 +1,9 @@
 """日行情采集器：不复权 + 后复权两次拉取，计算复权因子，质量校验后入库
 
-数据源：优先东财（stock_zh_a_hist），连接失败自动降级新浪（stock_zh_a_daily）。
+数据源（BAOSTOCK_ENABLED=1 时）：**混合模式**——OHLCV 走 BaoStock（全池逐位一致），
+adj_factor 仍走 Tushare（BaoStock 派生因子 51% 有分段阶跃、平安/天齐为已实证缺陷，
+见 docs/phase2/design/数据源评估-BaoStock.md §2.2，不能作因子唯一来源）；
+失败降级 Tushare → 东财（stock_zh_a_hist）→ 新浪（stock_zh_a_daily）。
 新浪成交量单位为股，统一转手（/100）。
 """
 import logging
@@ -13,10 +16,10 @@ import requests
 
 from app.collectors.base import BaseCollector, to_ak_date
 from app.cleaners import clean_daily_rows
-from app.config import REQUEST_TIMEOUT
+from app.config import REQUEST_TIMEOUT, baostock_enabled
 from app.db import upsert
 from app.models.tables import DailyPrice
-from app.sources import tushare
+from app.sources import baostock, tushare
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +140,31 @@ class DailyCollector(BaseCollector):
     """按股票代码拉取日K行情，经质量校验后入库"""
 
     def fetch(self, code: str, start_date, end_date, *args, **kwargs) -> list[dict]:
+        # BaoStock 混合主源（阶段 1 开关）：OHLCV 走 BaoStock，adj_factor 走 Tushare。
+        # BaoStock 派生因子全池 51% 有分段阶跃（平安虚假调整/天齐配股滞后为实证缺陷），
+        # 不能作因子唯一来源（§2.2 复核结论）；因子缺失时整段降级 Tushare 保住连续性。
+        if baostock_enabled():
+            sess = baostock.get_session()
+            if sess is not None:
+                try:
+                    raw, hfq = baostock.daily_pairs(sess, code, start_date, end_date)
+                    if raw.empty:
+                        raise RuntimeError(f"{code} BaoStock 未返回数据")
+                    pro = tushare.make_pro(self.db)
+                    if pro is None:
+                        raise RuntimeError(f"{code} 混合模式缺 Tushare 因子源")
+                    fmap = tushare.factor_map(pro, code, start_date, end_date)
+                    if not fmap:
+                        raise RuntimeError(f"{code} Tushare 复权因子为空")
+                    rows = build_rows(code, raw, hfq)
+                    for r in rows:
+                        f = fmap.get(str(r["trade_date"]))
+                        if f is not None:
+                            r["adj_factor"] = round(f, 4)
+                    logger.info("%s BaoStock OHLCV + Tushare 因子 %s 条", code, len(rows))
+                    return rows
+                except Exception as e:
+                    logger.warning("%s BaoStock 混合拉取失败(%s)，降级 Tushare", code, e)
         # Tushare 主源：daily + adj_factor 一次拉取，失败/空数据降级 AkShare
         pro = tushare.make_pro(self.db)
         if pro is not None:
