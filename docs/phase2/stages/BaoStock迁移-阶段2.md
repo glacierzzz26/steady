@@ -62,6 +62,7 @@
 2. **stock_basic 保留 Tushare**：BaoStock 无北交所（338 vs 0），切了丢新股/状态刷新。若后续要全切，需为 bj 码保留 Tushare 或另寻源。
 3. **BaoStock 指数历史深度**：`index_rows` 默认 365 天窗口（16:15 任务增量维护），sz399106 已一次性显式回填全史；新指数接入需同样显式回填一次。
 4. **阶段 3 开放项**：adj_factor 去 Tushare 依赖路径未决；`liabilityToAsset` 单位校准已按 ×100 实证落地（计划 ×10000 假设作废）；`pe_static` 停采评估；16:30 时序（用户决定不处理）；东财封锁持续监控。
+5. **🚧 08-28 晚验证（待办）**：`BAOSTOCK_SOURCES=daily,calendar,index,valuation,finance` 翻转后首个完整交易日链路核对——16:45 估值走 Tushare（同日回退）、18:00 财务走 AkShare（code-gated）、18:05 回填走 BaoStock、data_quality 全绿、两市成交 2.13 万亿前端可见、00:35 adj_factor cron 不干扰、factor_value 6×800 齐全。清单已存记忆 `baostock-phase2-verify-pending`（见进度总表待办）。
 
 ## 补充（2026-08-27：对账与生产实操修正）
 
