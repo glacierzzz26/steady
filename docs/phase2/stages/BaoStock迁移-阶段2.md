@@ -47,8 +47,8 @@
 
 - ✅ **dev 对账**（`scripts/reconcile_phase2.py --sample 120`，dev 库，hs300+zz500 股票池）：
   - **index：✅ 通过**——close/amount 1012 行对比 0 差（逐位一致，amount 相对差 0）。
-  - **valuation：⚠️ 通过 hard 门 / pb 软门失败**——close 31527 行逐位 0 差；pe_ttm ≤2% 31298/31527（99.3%）；**pb ≤2% 24488/31527（77.7%）**，诊断：偏差集中在财报披露边界（04-29 年报/Q1 季：Tushare 尚未采用新财报、BaoStock 更及时）+ 个别持续口径差（000408 自 07-01 恒 ~2.6%）→ **按「未通过则不硬切」保留 Tushare**。
-  - **finance：❌ 未通过**——debt_ratio 49/49 ✅、announce_date 49/49 ✅、revenue_growth 9/9 ✅；**roe 46/49 ≤0.5pp，3 行超**（000001 0.55pp / 000027 1.12pp / 000408 0.57pp，边界噪声非系统性 >1pp）→ **保留 AkShare**（finance 日频本就走 AkShare，不依赖 Tushare，无实质损失）。
+  - **valuation：⚠️ 通过 hard 门 / pb 软门失败**——close 31527 行逐位 0 差；pe_ttm ≤2% 31298/31527（99.3%）；**pb ≤2% 24488/31527（77.7%）**，诊断：偏差集中在财报披露边界（04-29 年报/Q1 季：Tushare 尚未采用新财报、BaoStock 更及时）+ 个别持续口径差（000408 自 07-01 恒 ~2.6%）。初判「未通过则不硬切」保留 Tushare；**后经用户拍板接受口径差翻转**（prod 对账 close 32007 行逐位 0 差，见遗留 1）。
+  - **finance：❌ 脚本门未过**——debt_ratio 49/49 ✅、announce_date 49/49 ✅、revenue_growth 9/9 ✅；**roe 46/49 ≤0.5pp，3 行超**（000001 0.55pp / 000027 1.12pp / 000408 0.57pp，边界噪声非系统性 >1pp）。初判保留 AkShare（finance 日频本就走 AkShare，不依赖 Tushare）；**后经用户拍板翻转**（per-code 缺口/回填走 BaoStock，18:00 全市场仍 AkShare，见遗留 1）。
   - **stock_basic：❌ 未通过**——北交所覆盖 库 338 vs BaoStock 0；name 匹配率 99.21%（差项全为 XD 前缀/全角Ａ）、list_date 99.98%、market 100% → **保留 Tushare**。
 - ✅ **生产 Wave 1 翻转（`steady-20260827-e154728`）**：`.env` 追加 `BAOSTOCK_SOURCES=daily,calendar,index` 并重启 collector（容器 env 实测确认）；`sync_index` 手动触发 True（BaoStock 主源 4 指数全同步）；**sz399106 全历史回填 8640 行（1991-04-04→2026-08-27）**，与 sh000001 对齐。
 - ✅ **G6 两市成交数据落库**：`market_hotspot[08-27].sections.turnover = {sh: 1010226573954.6, sz: 1115700225234.22, total: 2125926799188.8, trade_date: 08-27}`（2.13 万亿）；`assemble_brief` 第 170 行 `"market": hotspot or {}` 原样透传 → 明早 09:10 组装 08-27 简报即点亮前端「两市成交(昨日)」。
@@ -58,7 +58,7 @@
 
 ## 遗留
 
-1. **Wave 2（valuation + finance）未翻转，待用户定夺**：valuation pb 22% 行差 >2%（财报边界 + 个别持续口径差）、finance roe 3/49 超 0.5pp——按「未通过则不硬切」保留 Tushare/AkShare。若接受口径差（BaoStock 财报采用更及时，历史回填会归一化到 BaoStock 值），在 .env 追加 `,valuation,finance` 即可翻转；否则维持现状（Tushare/AkShare 兜底链不变）。
+1. ~~Wave 2 待定~~ **已翻转（用户拍板 2026-08-27）**：`.env` `BAOSTOCK_SOURCES=daily,calendar,index,valuation,finance`，collector 重启。生产验证：600519 估值今日行 + total_mv/float_mv/pe_static 保留；财务 roe/debt 与 dev 逐位一致。**prod 对账门**：valuation close 32007 行逐位 0 差 ✅；finance 脚本门 ❌（roe 57/61 ≤0.5pp、4 行边界噪声 0.55-1.12pp，与 dev 同构——debt_ratio/announce_date/revenue_growth 全对）→ **用户知情后仍拍板翻转**（接受口径差：BaoStock 财报采用更及时，历史回填归一化到 BaoStock 值）。16:45 当日估值恒走 Tushare（同日回退）、18:00 财务全市场恒走 AkShare（code-gated）不变。
 2. **stock_basic 保留 Tushare**：BaoStock 无北交所（338 vs 0），切了丢新股/状态刷新。若后续要全切，需为 bj 码保留 Tushare 或另寻源。
 3. **BaoStock 指数历史深度**：`index_rows` 默认 365 天窗口（16:15 任务增量维护），sz399106 已一次性显式回填全史；新指数接入需同样显式回填一次。
 4. **阶段 3 开放项**：adj_factor 去 Tushare 依赖路径未决；`liabilityToAsset` 单位校准已按 ×100 实证落地（计划 ×10000 假设作废）；`pe_static` 停采评估；16:30 时序（用户决定不处理）；东财封锁持续监控。
