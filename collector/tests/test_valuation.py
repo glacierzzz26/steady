@@ -66,3 +66,66 @@ def test_run_upserts_valuation_rows(monkeypatch):
     assert values[0]["code"] == "600519"
     assert values[0]["trade_date"] == date(2026, 8, 19)
     assert len(values) == 3
+
+
+# ---------- 阶段 2：BaoStock 主源 + 同日回退 + 保留既有列 ----------
+
+def _bs_valuation_rows(max_date):
+    return [{"code": "600519", "trade_date": max_date,
+             "close": 1302.8, "pe_ttm": 25.3, "pb": 8.1}]
+
+
+def test_fetch_baostock_branch(monkeypatch):
+    """BAOSTOCK_SOURCES 含 valuation 且当日已出 → 直接返回 BaoStock 行（无 mv 列）"""
+    today = date.today()
+    rows = _bs_valuation_rows(today)
+    monkeypatch.setattr(val_mod, "baostock_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(val_mod.baostock, "get_session", lambda: object())
+    monkeypatch.setattr(val_mod.baostock, "valuation_rows",
+                        lambda sess, code, s, e: rows)
+    got = ValuationCollector(None).fetch("600519")
+    assert got == rows
+    assert "total_mv" not in got[0]
+
+
+def test_fetch_baostock_same_day_fallback(monkeypatch):
+    """同日回退：BaoStock 当日数据未出（max < today）→ 降级 Tushare → AkShare"""
+    from datetime import timedelta
+
+    today = date.today()
+    monkeypatch.setattr(val_mod, "baostock_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(val_mod.baostock, "get_session", lambda: object())
+    monkeypatch.setattr(val_mod.baostock, "valuation_rows",
+                        lambda sess, code, s, e: _bs_valuation_rows(today - timedelta(days=1)))
+    monkeypatch.setattr(val_mod.tushare, "make_pro", lambda db: None)
+    monkeypatch.setattr(val_mod.ak, "stock_value_em", lambda symbol: make_valuation_df())
+    rows = ValuationCollector(None).fetch("600519")
+    assert rows[0]["total_mv"] == 1.63e12  # 落到 AkShare 兜底（带 mv 列）
+
+
+def test_save_baostock_rows_only_three_cols():
+    """BaoStock 行无 total_mv → update_cols 只含 close/pe_ttm/pb（不覆盖既有市值）"""
+    from sqlalchemy.dialects.postgresql import dialect as pg_dialect
+
+    db = FakeSession()
+    data = [{"code": "600519", "trade_date": date(2026, 8, 19),
+             "close": 1302.8, "pe_ttm": 25.3, "pb": 8.1}]
+    ValuationCollector(db).save(data)
+    sql = str(db.executed[-1].compile(dialect=pg_dialect()))
+    assert "ON CONFLICT (code, trade_date) DO UPDATE" in sql
+    assert "total_mv" not in sql
+    assert "pe_static" not in sql
+    assert "pe_ttm" in sql and "pb" in sql and "close" in sql
+
+
+def test_save_full_cols_when_mv_present():
+    """Tushare/AkShare 行含 total_mv → 沿用原 6 列更新"""
+    from sqlalchemy.dialects.postgresql import dialect as pg_dialect
+
+    db = FakeSession()
+    data = [{"code": "600519", "trade_date": date(2026, 8, 19), "close": 1302.8,
+             "total_mv": 1.63e12, "float_mv": 1.63e12, "pe_ttm": 25.3,
+             "pe_static": 24.0, "pb": 8.1}]
+    ValuationCollector(db).save(data)
+    sql = str(db.executed[-1].compile(dialect=pg_dialect()))
+    assert "total_mv" in sql and "float_mv" in sql and "pe_static" in sql

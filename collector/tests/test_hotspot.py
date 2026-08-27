@@ -1,4 +1,6 @@
 """热点采集解析单测（Issue #4）：列名防御 _pick / 安全浮点 _f / 单位换算 / 板块映射"""
+from datetime import date
+
 import pandas as pd
 import pytest
 
@@ -57,3 +59,46 @@ def test_sectors_from_ths_mapping():
     assert flows[0]["name"] == "生物制品"      # 净流入最高
     assert len(flows) == 2                    # 净流入为 None 的养殖业被过滤
     assert flows[0]["net_inflow"] == "7.82亿"
+
+
+# ---------- G6：两市成交 ----------
+
+class _FakeRows:
+    """sqlalchemy select 结果桩：.all() 返回给定行"""
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class _FakeDB:
+    """热点用 FakeSession：execute 返回可 .all() 的结果"""
+    def __init__(self, rows):
+        self.rows = rows
+
+    def execute(self, stmt):
+        return _FakeRows(self.rows)
+
+
+def test_fetch_turnover_uses_latest_complete_date():
+    """两市成交：取 sh/sz 两指数行齐全的最近交易日求和；过渡期缺尾降级"""
+    from app.collectors.hotspot import _fetch_turnover
+
+    rows = [
+        ("2026-08-25", "sh000001", 5.0e11),
+        ("2026-08-25", "sz399106", 6.0e11),
+        ("2026-08-24", "sh000001", 4.8e11),   # 缺 sz → 该日不算
+    ]
+    out = _fetch_turnover(_FakeDB([(date.fromisoformat(d), c, a) for d, c, a in rows]))
+    assert out["total"] == 1.1e12
+    assert out["sh"] == 5.0e11 and out["sz"] == 6.0e11
+    assert out["trade_date"] == "2026-08-25"
+
+
+def test_fetch_turnover_missing_returns_none():
+    """任一行缺失/全缺 → None（增强数据可降级省略）"""
+    from app.collectors.hotspot import _fetch_turnover
+
+    assert _fetch_turnover(_FakeDB([])) is None
+    assert _fetch_turnover(_FakeDB([(date(2026, 8, 25), "sh000001", 5.0e11)])) is None

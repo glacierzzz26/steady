@@ -70,7 +70,7 @@ def job_sync_daily_price():
     db = get_session()
     codes = _daily_sync_codes(db)
     end = date.today()
-    if baostock_enabled() and baostock.get_session() is not None:
+    if baostock_enabled("daily") and baostock.get_session() is not None:
         # BaoStock 无按日全市场快照接口：逐只增量（DailyCollector 内
         # BaoStock→Tushare→AkShare 兜底链），阶段 1 用于对账验证。
         logger.info("每日行情同步（BaoStock 主源）：%s 只股票", len(codes))

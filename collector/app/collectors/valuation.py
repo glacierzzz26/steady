@@ -11,9 +11,10 @@ import akshare as ak
 import pandas as pd
 
 from app.collectors.base import BaseCollector
+from app.config import baostock_enabled
 from app.db import upsert
 from app.models.tables import DailyValuation
-from app.sources import tushare
+from app.sources import baostock, tushare
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +51,31 @@ class ValuationCollector(BaseCollector):
     """日度估值采集（东财，按股票全量拉取）"""
 
     def fetch(self, code: str, *args, **kwargs) -> list[dict]:
+        today = date.today()
+        # BaoStock 主源（阶段 2 开关）：回填/多日缺口主源（近 10 年，覆盖全历史）。
+        # 同日回退规则：BaoStock 当日数据约 18:00 后才出，max(trade_date) < today
+        # 即当日未出 → 抛异常降级 Tushare（16:45 当日快照继续走 Tushare 无滞后，
+        # 18:05 夜间回填走 BaoStock）。
+        if baostock_enabled("valuation"):
+            sess = baostock.get_session()
+            if sess is not None:
+                try:
+                    rows = baostock.valuation_rows(
+                        sess, code, today - timedelta(days=3650), today)
+                    if not rows:
+                        raise RuntimeError(f"{code} BaoStock 估值未返回数据")
+                    max_d = max(r["trade_date"] for r in rows)
+                    if max_d < today:
+                        raise RuntimeError(
+                            f"{code} BaoStock 当日估值未出(max={max_d})，降级 Tushare")
+                    logger.info("%s BaoStock 拉取 %s 条估值", code, len(rows))
+                    return rows
+                except Exception as e:
+                    logger.warning("%s BaoStock 估值失败(%s)，降级 Tushare", code, e)
         # Tushare 主源：daily_basic 按股票近一年（主增量走 tasks 的按日全市场快照）
         pro = tushare.make_pro(self.db)
         if pro is not None:
             try:
-                today = date.today()
                 rows = tushare.daily_basic_rows(
                     pro, code, today - timedelta(days=365), today)
                 if not rows:
@@ -68,13 +89,19 @@ class ValuationCollector(BaseCollector):
         return to_rows(code, df)
 
     def save(self, data):
+        # BaoStock 分支不产出 total_mv/float_mv/pe_static（保留既有值：无消费者，
+        # 不覆盖 Tushare/AkShare 的市值与静态 PE）；含这三列的行沿用原 6 列更新。
+        if data and "total_mv" in data[0]:
+            update_cols = ["close", "total_mv", "float_mv",
+                           "pe_ttm", "pe_static", "pb"]
+        else:
+            update_cols = ["close", "pe_ttm", "pb"]
         upsert(
             self.db,
             DailyValuation,
             data,
             conflict_cols=["code", "trade_date"],
-            update_cols=["close", "total_mv", "float_mv",
-                         "pe_ttm", "pe_static", "pb"],
+            update_cols=update_cols,
         )
         return True
 

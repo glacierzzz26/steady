@@ -18,7 +18,7 @@ class CalendarCollector(BaseCollector):
 
     def fetch(self, *args, **kwargs) -> list[dict]:
         # BaoStock 主源（阶段 1 开关）：query_trade_dates（近 2 年 + 未来 1 年，1 次调用）
-        if baostock_enabled():
+        if baostock_enabled("calendar"):
             sess = baostock.get_session()
             if sess is not None:
                 try:

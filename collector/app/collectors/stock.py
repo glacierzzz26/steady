@@ -5,9 +5,10 @@ import akshare as ak
 import pandas as pd
 
 from app.collectors.base import BaseCollector
+from app.config import baostock_enabled
 from app.db import upsert
 from app.models.tables import StockBasic
-from app.sources import tushare
+from app.sources import baostock, tushare
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,19 @@ class StockCollector(BaseCollector):
     """从 AkShare 拉取全市场股票列表并入库（含 universe 标记）"""
 
     def fetch(self, *args, **kwargs) -> list[dict]:
+        # BaoStock 主源（阶段 2 开关）：query_stock_basic 全量列表。
+        # 自带 code_name/ipoDate/status，无 industry（留 AkShare 补全，save 不变）。
+        if baostock_enabled("stock_basic"):
+            sess = baostock.get_session()
+            if sess is not None:
+                try:
+                    rows = baostock.stock_basic_rows(sess)
+                    if not rows:
+                        raise RuntimeError("BaoStock 股票列表未返回数据")
+                    logger.info("BaoStock 返回股票 %s 只", len(rows))
+                    return rows
+                except Exception as e:
+                    logger.warning("BaoStock 股票列表失败(%s)，降级 Tushare", e)
         # Tushare 主源：stock_basic（自带 list_date，省 3 个交易所请求；无则回退）
         pro = tushare.make_pro(self.db)
         if pro is not None:

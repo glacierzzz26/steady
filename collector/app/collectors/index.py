@@ -10,14 +10,16 @@ import akshare as ak
 import pandas as pd
 
 from app.collectors.base import BaseCollector
+from app.config import baostock_enabled
 from app.db import upsert
 from app.models.tables import DailyPrice, StockBasic
-from app.sources import tushare
+from app.sources import baostock, tushare
 
 logger = logging.getLogger(__name__)
 
-# 指数代码（新浪格式）→ 名称
-INDEX_NAMES = {"sh000001": "上证指数", "sh000300": "沪深300", "sh000905": "中证500"}
+# 指数代码（新浪格式）→ 名称；sz399106 深证综指 = 深市全市场，供 G6 两市成交
+INDEX_NAMES = {"sh000001": "上证指数", "sh000300": "沪深300", "sh000905": "中证500",
+               "sz399106": "深证综指"}
 
 
 def build_rows(symbol: str, df: pd.DataFrame,
@@ -49,6 +51,26 @@ class IndexCollector(BaseCollector):
 
     def fetch(self, symbol: str = "sh000300", start_date=None, end_date=None,
               *args, **kwargs) -> list[dict]:
+        # BaoStock 主源（阶段 2 开关）：指数历史/多日缺口主源。
+        # 同日回退规则：BaoStock 当日数据约 18:00 后才出，max(trade_date) < end_date
+        # 即当日未出 → 抛异常降级 Tushare（16:15 当日快照继续走 Tushare，
+        # 历史/缺口/回填走 BaoStock）。
+        if baostock_enabled("index"):
+            sess = baostock.get_session()
+            if sess is not None:
+                try:
+                    rows = baostock.index_rows(sess, symbol, start_date, end_date)
+                    if not rows:
+                        raise RuntimeError(f"{symbol} BaoStock 指数未返回数据")
+                    end = end_date if end_date else date.today()
+                    max_d = max(r["trade_date"] for r in rows)
+                    if max_d < end:
+                        raise RuntimeError(
+                            f"{symbol} BaoStock 当日指数未出(max={max_d})，降级 Tushare")
+                    logger.info("%s BaoStock 拉取指数行情 %s 条", symbol, len(rows))
+                    return rows
+                except Exception as e:
+                    logger.warning("%s BaoStock 指数失败(%s)，降级 Tushare", symbol, e)
         # Tushare 主源：index_daily（指数无缺口，1 次拉全量区间）
         pro = tushare.make_pro(self.db)
         if pro is not None:

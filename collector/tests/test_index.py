@@ -56,3 +56,39 @@ def test_save_inserts_index_stock_and_prices():
     assert stock_row["name"] == "沪深300"
     sql = str(db.executed[1].compile(dialect=pg_dialect()))
     assert "ON CONFLICT (code, trade_date) DO UPDATE" in sql
+
+
+# ---------- 阶段 2：BaoStock 主源 + 同日回退 ----------
+
+def _bs_index_rows(max_date):
+    return [{"code": "sh000300", "trade_date": max_date, "open": 4600.0,
+             "high": 4650.0, "low": 4590.0, "close": 4640.0,
+             "volume": 100, "amount": 1e9, "adj_factor": None}]
+
+
+def test_fetch_baostock_branch(monkeypatch):
+    """BAOSTOCK_SOURCES 含 index 且当日已出 → 直接返回 BaoStock 指数行"""
+    today = date.today()
+    rows = _bs_index_rows(today)
+    monkeypatch.setattr(idx_mod, "baostock_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(idx_mod.baostock, "get_session", lambda: object())
+    monkeypatch.setattr(idx_mod.baostock, "index_rows",
+                        lambda sess, symbol, s, e: rows)
+    got = IndexCollector(None).fetch("sh000300")
+    assert got == rows
+
+
+def test_fetch_baostock_same_day_fallback(monkeypatch):
+    """同日回退：BaoStock 当日未出（max < end）→ 降级 Tushare → AkShare"""
+    from datetime import timedelta
+
+    today = date.today()
+    monkeypatch.setattr(idx_mod, "baostock_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(idx_mod.baostock, "get_session", lambda: object())
+    monkeypatch.setattr(idx_mod.baostock, "index_rows",
+                        lambda sess, symbol, s, e: _bs_index_rows(today - timedelta(days=1)))
+    monkeypatch.setattr(idx_mod.tushare, "make_pro", lambda db: None)
+    monkeypatch.setattr(idx_mod.ak, "stock_zh_index_daily", lambda symbol: make_index_df())
+    rows = IndexCollector(None).fetch("sh000300")
+    assert rows[0]["code"] == "sh000300"
+    assert rows[0]["trade_date"] == date(2026, 8, 18)  # 落到 AkShare

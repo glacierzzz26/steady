@@ -111,6 +111,19 @@ def test_fetch_list_empty(monkeypatch):
     assert StockCollector(None).fetch() == []
 
 
+def test_fetch_baostock_branch(monkeypatch):
+    """BAOSTOCK_SOURCES 含 stock_basic → BaoStock 主源返回全量列表（无 industry）"""
+    from datetime import date
+
+    rows_in = [{"code": "600519", "name": "贵州茅台", "market": "SH",
+                "status": "L", "list_date": date(2001, 8, 27)}]
+    monkeypatch.setattr(stock_mod, "baostock_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(stock_mod.baostock, "get_session", lambda: object())
+    monkeypatch.setattr(stock_mod.baostock, "stock_basic_rows", lambda sess: rows_in)
+    rows = StockCollector(None).fetch()
+    assert rows == rows_in
+
+
 def test_pool_without_cons_api_failure(monkeypatch):
     """成分股接口失败时 run 应返回 False（基类重试后）"""
     monkeypatch.setattr(

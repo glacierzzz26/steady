@@ -89,7 +89,7 @@ def test_baostock_hybrid_factor_from_tushare(monkeypatch):
     BaoStock 派生因子全池 51% 有分段阶跃（平安/天齐缺陷），不能作因子唯一来源。
     因子按交易日批量（factor_map_by_date 1 次调用全市场），不逐股拉取。"""
     _clear_factor_cache()
-    monkeypatch.setattr(daily_mod, "baostock_enabled", lambda: True)
+    monkeypatch.setattr(daily_mod, "baostock_enabled", lambda *a, **k: True)
     monkeypatch.setattr(daily_mod.baostock, "get_session", lambda: object())
     # BaoStock 原始行情 + 其派生的 hfq（hfq/raw = 6.26，应被 Tushare 覆盖）
     raw = make_hist(closes=(10.0, 10.5, 11.0))
@@ -121,7 +121,7 @@ def test_baostock_hybrid_factor_cache_reuse(monkeypatch):
     """因子缓存跨股票复用：同一交易日的第二次 fetch 不重复调 Tushare
     （每日同步 5000 只股票同窗口 → 全市场仅 1 次 adj_factor 调用）"""
     _clear_factor_cache()
-    monkeypatch.setattr(daily_mod, "baostock_enabled", lambda: True)
+    monkeypatch.setattr(daily_mod, "baostock_enabled", lambda *a, **k: True)
     monkeypatch.setattr(daily_mod.baostock, "get_session", lambda: object())
     monkeypatch.setattr(daily_mod.baostock, "daily_pairs",
                         lambda sess, code, s, e: (make_hist(closes=(10.0, 10.5, 11.0)),
@@ -145,7 +145,7 @@ def test_baostock_hybrid_no_tushare_falls_through(monkeypatch):
     """混合模式缺 Tushare 因子源 → 降级 Tushare 全路径（保因子连续性，不落
     BaoStock 派生因子）"""
     _clear_factor_cache()
-    monkeypatch.setattr(daily_mod, "baostock_enabled", lambda: True)
+    monkeypatch.setattr(daily_mod, "baostock_enabled", lambda *a, **k: True)
     monkeypatch.setattr(daily_mod.baostock, "get_session", lambda: object())
     monkeypatch.setattr(daily_mod.baostock, "daily_pairs",
                         lambda sess, code, s, e: (make_hist(), make_hist()))

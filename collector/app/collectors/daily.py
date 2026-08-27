@@ -182,7 +182,7 @@ class DailyCollector(BaseCollector):
         # BaoStock 派生因子全池 51% 有分段阶跃（平安虚假调整/天齐配股滞后为实证缺陷），
         # 不能作因子唯一来源（§2.2 复核结论）；因子缺失时整段降级 Tushare 保住连续性。
         # 因子按交易日批量拉取（_fill_factor_cache）：限频 5次/天 → 1 天 1 次全市场。
-        if baostock_enabled():
+        if baostock_enabled("daily"):
             sess = baostock.get_session()
             if sess is not None:
                 try:

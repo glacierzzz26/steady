@@ -3,7 +3,7 @@ import Notice from '../../components/Notice'
 import Tag from '../../components/Tag'
 import { briefApi, type MorningBriefData } from '../../api'
 import { useApi } from '../../hooks/useApi'
-import { fmtMoney, fmtRatioPct } from '../../lib/format'
+import { fmtMoney, fmtRatioPct, fmtWanYi } from '../../lib/format'
 
 const G6_HINT = '该能力未产出（G6，采集走免费 AkShare）'
 
@@ -14,8 +14,13 @@ function fmtPctNum(v?: number | null): string {
 }
 const cls = (v?: number | null) => (v !== undefined && v !== null && v < 0 ? 'down' : 'up')
 
-function NoticeKpi({ lb }: { lb: string }) {
-  return <Kpi lb={lb} v="—" vClass="muted" d={G6_HINT} />
+/** 占位 KPI：未产出显示「—」，已产出显示值（两市成交等 G6 项点亮用） */
+function NoticeKpi({ lb, v, d }: { lb: string; v?: string; d?: string }) {
+  return v !== undefined && v !== '' ? (
+    <Kpi lb={lb} v={v} d={d} />
+  ) : (
+    <Kpi lb={lb} v="—" vClass="muted" d={G6_HINT} />
+  )
 }
 
 function G6Cell({ v }: { v?: number | null }) {
@@ -43,6 +48,7 @@ export default function Brief() {
   const usIndices = indices.filter(i => i.code.startsWith('.')) // 美股前夜（code 以 . 开头）
   const sectors = market?.sectors_gain ?? []
   const hotStocks = market?.hot_stocks ?? []
+  const turnover = market?.turnover
   const y = s?.yesterday
   const today = s?.today
   const sigCounts = y?.signal.counts ?? {}
@@ -95,7 +101,11 @@ export default function Brief() {
         />
         <NoticeKpi lb="A50 期指" />
         <NoticeKpi lb="北向资金(昨日)" />
-        <NoticeKpi lb="两市成交(昨日)" />
+        <NoticeKpi
+          lb="两市成交(昨日)"
+          v={turnover ? fmtWanYi(turnover.total) : undefined}
+          d={turnover ? `沪 ${fmtWanYi(turnover.sh)} / 深 ${fmtWanYi(turnover.sz)}` : undefined}
+        />
       </div>
 
       <div className="grid" style={{ gridTemplateColumns: '1fr 1.1fr 1fr', marginBottom: 14 }}>

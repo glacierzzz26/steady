@@ -273,3 +273,186 @@ def trade_cal_rows(sess: BaoStockSession, start_date=None, end_date=None) -> lis
             "exchange": "SSE",
         })
     return rows
+
+
+# ---------- 阶段 2：股票列表 / 估值 / 指数 / 财务（同形状输出） ----------
+
+def _num(v) -> float | None:
+    """BaoStock 字符串值 → float；空串/NaN/异常 → None"""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    try:
+        f = float(v)
+        return f if not pd.isna(f) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _market(code: str) -> str:
+    """股票代码 → 交易所（SH/SZ/BJ），与 collectors/stock.infer_market 一致"""
+    if code.startswith("6"):
+        return "SH"
+    if code.startswith(("8", "4", "9")):
+        return "BJ"
+    return "SZ"
+
+
+def _plain_code(raw) -> str:
+    """BaoStock 带前缀代码 → 6 位纯数字（sh.600519 → 600519）"""
+    return str(raw).split(".")[-1].zfill(6)
+
+
+def stock_basic_rows(sess: BaoStockSession) -> list[dict]:
+    """全市场股票列表（type=1 股票）→ 入库行（无 industry，留 AkShare）
+
+    与 tushare.stock_basic_rows / stock.normalize_stock_rows 同形状：
+    {code, name, market, status, list_date?}。query_stock_basic 的 code 带交易所
+    前缀（sh.600519），入库须剥离成 6 位纯数字。
+    """
+    rs = sess.query(bs.query_stock_basic)
+    df = _rs_to_df(rs)
+    if df.empty:
+        return []
+    rows = []
+    for _, r in df.iterrows():
+        if str(r.get("type", "1")) != "1":  # 只收股票，过滤指数/ETF/转债
+            continue
+        code = _plain_code(r["code"])
+        name = str(r["code_name"]).replace(" ", "").replace("　", "")
+        st = str(r.get("status", "1"))
+        row = {
+            "code": code,
+            "name": name,
+            "market": _market(code),
+            "status": "D" if st == "0" else "L",
+        }
+        ipo = r.get("ipoDate")
+        if ipo is not None and str(ipo).strip():
+            row["list_date"] = date.fromisoformat(str(ipo).strip()[:10])
+        rows.append(row)
+    return rows
+
+
+def valuation_rows(sess: BaoStockSession, code: str, start_date, end_date) -> list[dict]:
+    """日度估值（peTTM/pbMRQ 随日线一查给）→ DailyValuation 形状
+
+    不含 total_mv/float_mv/pe_static（保留既有值：BaoStock 无直接源且无消费者；
+    由采集器 save 分支跳过这三列，不覆盖既有 Tushare/AkShare 值）。
+    close 用不复权（adjustflag=3）。
+    """
+    b = bs_code(code)
+    s, e = _ymd(start_date), _ymd(end_date)
+    rs = sess.query(bs.query_history_k_data_plus, b, "date,close,peTTM,pbMRQ",
+                    start_date=s, end_date=e, frequency="d", adjustflag="3")
+    df = _rs_to_df(rs)
+    rows = []
+    for _, r in df.iterrows():
+        rows.append({
+            "code": code,
+            "trade_date": date.fromisoformat(str(r["date"])),
+            "close": _num(r.get("close")),
+            "pe_ttm": _num(r.get("peTTM")),
+            "pb": _num(r.get("pbMRQ")),
+        })
+    return rows
+
+
+def index_bs_code(symbol: str) -> str:
+    """新浪指数码 → BaoStock 指数码（sh000001→sh.000001 / sz399106→sz.399106）
+
+    不能复用 bs_code()：它把 000001 当股票映射成 sz.000001（上证综指是 sh.000001）。
+    """
+    symbol = str(symbol)
+    if symbol.startswith("sh"):
+        return "sh." + symbol[2:]
+    if symbol.startswith("sz"):
+        return "sz." + symbol[2:]
+    return symbol
+
+
+def index_rows(sess: BaoStockSession, symbol: str, start_date, end_date) -> list[dict]:
+    """指数日行情 → 与 index.build_rows 同形状入库行（code 用原新浪码）"""
+    if start_date is None:
+        start_date = date.today() - timedelta(days=365)
+    if end_date is None:
+        end_date = date.today()
+    b = index_bs_code(symbol)
+    rs = sess.query(bs.query_history_k_data_plus, b,
+                    "date,open,high,low,close,volume,amount",
+                    start_date=_ymd(start_date), end_date=_ymd(end_date),
+                    frequency="d", adjustflag="3")
+    df = _rs_to_df(rs)
+    rows = []
+    for _, r in df.iterrows():
+        vol = _num(r.get("volume"))
+        rows.append({
+            "code": symbol,
+            "trade_date": date.fromisoformat(str(r["date"])),
+            "open": _num(r.get("open")),
+            "high": _num(r.get("high")),
+            "low": _num(r.get("low")),
+            "close": _num(r.get("close")),
+            "volume": int(vol / 100) if vol is not None else None,  # 股 → 手，同 daily_pairs
+            "amount": _num(r.get("amount")),                        # 元 原样
+            "adj_factor": None,
+        })
+    return rows
+
+
+# 报告期季度末（BaoStock 按 year+quarter 索引）
+_QUARTER_END = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
+
+
+def financial_rows(sess: BaoStockSession, code: str, year: int, quarter: int) -> dict | None:
+    """单报告期财务指标 → FinancialIndicator 形状（无 industry，留 AkShare）
+
+    - profit_data: roeAvg→roe、gpMargin→gross_margin、MBRevenue→营收增速、pubDate→announce_date
+    - growth_data: YOYNI→profit_growth
+    - balance_data: liabilityToAsset→debt_ratio
+    - revenue_growth: 两期 MBRevenue 同比（同季度上年）推导
+
+    单位校准（2026-08-27 真实 API 实证，勿再用 ×10000）：BaoStock 四比例字段全是
+    小数比例，库存为百分数 → 统一 ×100。实证：浦发 600000 liabilityToAsset=0.918356
+    ×100=91.8356 = 库内 debt_ratio；茅台 gpMargin=0.895552×100=89.5552 = 库内。
+    """
+    b = bs_code(code)
+    pr = _rs_to_df(sess.query(bs.query_profit_data, b, year, quarter))
+    if pr.empty:
+        return None
+    p0 = pr.iloc[0]
+    m, d = _QUARTER_END[quarter]
+    row: dict = {
+        "code": code,
+        "report_date": date(year, m, d),
+        "roe": _num(p0.get("roeAvg")),
+        "profit_growth": None,
+        "revenue_growth": None,
+        "gross_margin": _num(p0.get("gpMargin")),
+        "debt_ratio": None,
+        "announce_date": None,
+    }
+    pub = p0.get("pubDate")
+    if pub is not None and str(pub).strip():
+        row["announce_date"] = date.fromisoformat(str(pub)[:10])
+    gr = _rs_to_df(sess.query(bs.query_growth_data, b, year, quarter))
+    if not gr.empty:
+        row["profit_growth"] = _num(gr.iloc[0].get("YOYNI"))
+    ba = _rs_to_df(sess.query(bs.query_balance_data, b, year, quarter))
+    if not ba.empty:
+        lta = _num(ba.iloc[0].get("liabilityToAsset"))
+        if lta is not None:
+            row["debt_ratio"] = round(lta * 100, 4)  # 小数比例 → 百分数
+    mb = _num(p0.get("MBRevenue"))
+    if mb is not None:
+        prev = _rs_to_df(sess.query(bs.query_profit_data, b, year - 1, quarter))
+        if not prev.empty:
+            mb_prev = _num(prev.iloc[0].get("MBRevenue"))
+            if mb_prev not in (None, 0):
+                row["revenue_growth"] = round((mb / mb_prev - 1) * 100, 4)
+    if row["roe"] is not None:
+        row["roe"] = round(row["roe"] * 100, 4)
+    if row["profit_growth"] is not None:
+        row["profit_growth"] = round(row["profit_growth"] * 100, 4)
+    if row["gross_margin"] is not None:
+        row["gross_margin"] = round(row["gross_margin"] * 100, 4)
+    return row

@@ -26,8 +26,9 @@ BACKFILL_FINANCE_QUARTERS = _int("COLLECTOR_FINANCE_QUARTERS", 20)
 # 每日增量财务同步的报告期数（默认最近 4 个季度，覆盖财报季尾部披露）
 FINANCE_SYNC_QUARTERS = _int("COLLECTOR_FINANCE_QUARTERS_SYNC", 4)
 
-# 每日增量同步的指数（上证指数 / 沪深300 / 中证500，作行情概览与收益基准）
-INDEX_CODES = _str("COLLECTOR_INDEX_CODES", "sh000001,sh000300,sh000905")
+# 每日增量同步的指数（上证指数 / 沪深300 / 中证500，作行情概览与收益基准；
+# sz399106 深证综指 = 深市全市场成交额，G6 两市成交 = sh000001 + sz399106）
+INDEX_CODES = _str("COLLECTOR_INDEX_CODES", "sh000001,sh000300,sh000905,sz399106")
 
 # 每日增量同步：数据库无历史记录时的回退窗口（天）
 DAILY_FALLBACK_DAYS = _int("COLLECTOR_DAILY_FALLBACK_DAYS", 30)
@@ -41,6 +42,13 @@ REQUEST_TIMEOUT = _int("COLLECTOR_REQUEST_TIMEOUT", 15)
 
 # BaoStock 主源开关（阶段 1：dev 开启验证，prod 保持 Tushare 直到对账通过后放行）
 BAOSTOCK_ENABLED = os.getenv("BAOSTOCK_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+# BaoStock 生效的数据源 scope（阶段 2 源级门控，逗号列表）。默认 daily,calendar
+# 保阶段 1 生产行为；生产两波灰度 = 在 env 里逐源追加（第一波 stock_basic,index →
+# 第二波 valuation,finance），代码上线本身不改变生产数据路径。
+BAOSTOCK_SOURCES = [
+    s.strip() for s in os.getenv("BAOSTOCK_SOURCES", "daily,calendar").split(",")
+    if s.strip()
+]
 # BaoStock 单次 socket 超时（秒）：登录/查询共用，防库内阻塞 connect/recv 挂死
 BAOSTOCK_TIMEOUT = _int("BAOSTOCK_TIMEOUT", 60)
 # 连接级失败的重试次数与间隔（秒）
@@ -48,9 +56,17 @@ BAOSTOCK_RETRIES = _int("BAOSTOCK_RETRIES", 1)
 BAOSTOCK_RETRY_DELAY = _int("BAOSTOCK_RETRY_DELAY", 2)
 
 
-def baostock_enabled() -> bool:
-    """BaoStock 是否作为 daily/calendar 主源（env BAOSTOCK_ENABLED 控制）"""
-    return BAOSTOCK_ENABLED
+def baostock_enabled(scope: str | None = None) -> bool:
+    """BaoStock 是否作为指定 scope 的主源（env BAOSTOCK_ENABLED × BAOSTOCK_SOURCES 控制）
+
+    scope 取值 daily/calendar/valuation/finance/index/stock_basic；无参保留
+    阶段 1 全局语义（任一 scope 生效即 True）。
+    """
+    if not BAOSTOCK_ENABLED:
+        return False
+    if scope is None:
+        return bool(BAOSTOCK_SOURCES)
+    return scope in BAOSTOCK_SOURCES
 
 # 热点采集（早盘简报数据源，Issue #4）：每日早晨采集一次
 HOTSPOT_TOP_N = _int("COLLECTOR_HOTSPOT_TOP_N", 10)          # 板块/人气榜取 TOP N

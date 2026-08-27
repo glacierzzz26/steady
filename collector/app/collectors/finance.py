@@ -14,9 +14,10 @@ import pandas as pd
 from sqlalchemy import and_
 
 from app.collectors.base import BaseCollector
+from app.config import baostock_enabled
 from app.db import upsert
 from app.models.tables import FinancialIndicator, StockBasic
-from app.sources import tushare
+from app.sources import baostock, tushare
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,21 @@ class FinanceCollector(BaseCollector):
     def fetch(self, report_periods: list[str] | None = None,
               code: str | None = None, *args, **kwargs) -> list[dict]:
         periods = report_periods or []
+        # BaoStock 主源（阶段 2 开关）：BaoStock 财务按股票×报告期逐查，无全市场快照
+        # 接口 → 仅逐股（code 提供）的缺口回填/手动同步走 BaoStock；每日 18:00 全市场
+        # 快照仍是 AkShare（8 次调用/天），避免 800-5000 只×4 期逐股慢查。
+        # 首个请求失败抛异常 → 触发降级 Tushare → AkShare。
+        if code and baostock_enabled("finance"):
+            sess = baostock.get_session()
+            if sess is not None:
+                try:
+                    rows = self._fetch_baostock(sess, code, periods)
+                    if not rows:
+                        raise RuntimeError(f"{code} BaoStock 财务未返回数据")
+                    logger.info("%s BaoStock 财务拉取 %s 条", code, len(rows))
+                    return rows
+                except Exception as e:
+                    logger.warning("%s BaoStock 财务失败(%s)，降级 Tushare", code, e)
         # Tushare 主源：fina_indicator 按股票逐期（需 2000+ 积分；首请求失败快速降级）
         pro = tushare.make_pro(self.db)
         if pro is not None:
@@ -120,6 +136,18 @@ class FinanceCollector(BaseCollector):
             all_rows.extend(rows)
         if code:
             all_rows = [r for r in all_rows if r["code"] == code]
+        return all_rows
+
+    def _fetch_baostock(self, sess, code: str, periods: list[str]) -> list[dict]:
+        """BaoStock 财务：按股票×报告期逐期查询（首请求失败抛异常 → 触发降级）"""
+        all_rows: list[dict] = []
+        for p in periods:
+            year, month = int(p[:4]), int(p[4:6])
+            quarter = (month - 1) // 3 + 1
+            row = baostock.financial_rows(sess, code, year, quarter)
+            if row is None:  # 该报告期未披露（新股/财报季前）跳过
+                continue
+            all_rows.append(row)
         return all_rows
 
     def _fetch_tushare(self, pro, periods: list[str], code: str | None) -> list[dict]:

@@ -143,3 +143,33 @@ def test_save_skips_unknown_codes():
     # 000001 不在 stock_basic，财务指标也被过滤（外键约束）
     fin_values = multi_values(db.executed[2])
     assert [r["code"] for r in fin_values] == ["600519"]
+
+
+# ---------- 阶段 2：BaoStock 主源（仅逐股 code 门控） ----------
+
+def test_fetch_baostock_branch_code_gated(monkeypatch):
+    """提供 code → 走 BaoStock 财务（逐股缺口/回填），行形状对齐 build_rows"""
+    rows_in = [{"code": "600519", "report_date": date(2026, 6, 30), "roe": 15.79,
+                "profit_growth": 12.3, "revenue_growth": 8.9, "gross_margin": 91.5,
+                "debt_ratio": 20.5, "announce_date": date(2026, 8, 6)}]
+    monkeypatch.setattr(fin_mod, "baostock_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(fin_mod.baostock, "get_session", lambda: object())
+    monkeypatch.setattr(fin_mod.baostock, "financial_rows",
+                        lambda sess, code, year, quarter: rows_in[0])
+    rows = FinanceCollector(None).fetch(report_periods=["20260630"], code="600519")
+    assert rows == rows_in
+
+
+def test_fetch_baostock_skipped_without_code(monkeypatch):
+    """未提供 code → 跳过 BaoStock（无全市场快照接口），走 Tushare → AkShare 全市场"""
+    called = []
+    monkeypatch.setattr(fin_mod, "baostock_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(fin_mod.baostock, "get_session", lambda: object())
+    monkeypatch.setattr(fin_mod.baostock, "financial_rows",
+                        lambda sess, code, year, quarter: called.append(1) or {})
+    monkeypatch.setattr(fin_mod.tushare, "make_pro", lambda db: None)
+    monkeypatch.setattr(fin_mod.ak, "stock_yjbb_em", lambda date: make_yjbb())
+    monkeypatch.setattr(fin_mod.ak, "stock_zcfz_em", lambda date: make_zcfz())
+    rows = FinanceCollector(None).fetch(report_periods=["20260630"])
+    assert called == []        # BaoStock 未被调用
+    assert len(rows) == 2      # AkShare 全市场（2 只）

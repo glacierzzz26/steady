@@ -37,7 +37,7 @@ def _rs(fields, rows, error_code="0", error_msg=""):
 
 
 class FakeBS:
-    """baostock 协议函数桩：登录/登出 + 可编程的日线/交易日历查询"""
+    """baostock 协议函数桩：登录/登出 + 可编程的日线/交易日历/列表/财务查询"""
 
     def __init__(self, login_code="0"):
         self.login_code = login_code
@@ -46,6 +46,10 @@ class FakeBS:
         self.queries = []          # 记录 (qfunc, args, kwargs)
         self.hist_responses = {}   # adjustflag -> list of _rs 或 callable
         self.trade_cal_resp = None
+        self.stock_basic_resp = None
+        self.profit_resp = None    # 或 callable(year, quarter)
+        self.growth_resp = None
+        self.balance_resp = None
         self.last_adjustflag = None
 
     def login(self):
@@ -68,6 +72,24 @@ class FakeBS:
         self.queries.append(("trade_dates", None, kw))
         return self.trade_cal_resp if self.trade_cal_resp is not None else _rs([], [])
 
+    def query_stock_basic(self):
+        self.queries.append(("stock_basic", None, {}))
+        return self.stock_basic_resp if self.stock_basic_resp is not None else _rs([], [])
+
+    def query_profit_data(self, code, year, quarter):
+        self.queries.append(("profit", (code, year, quarter), {}))
+        if callable(self.profit_resp):
+            return self.profit_resp(year, quarter)
+        return self.profit_resp if self.profit_resp is not None else _rs([], [])
+
+    def query_growth_data(self, code, year, quarter):
+        self.queries.append(("growth", (code, year, quarter), {}))
+        return self.growth_resp if self.growth_resp is not None else _rs([], [])
+
+    def query_balance_data(self, code, year, quarter):
+        self.queries.append(("balance", (code, year, quarter), {}))
+        return self.balance_resp if self.balance_resp is not None else _rs([], [])
+
 
 @pytest.fixture(autouse=True)
 def fake_bs(monkeypatch):
@@ -77,6 +99,10 @@ def fake_bs(monkeypatch):
     monkeypatch.setattr(baostock_mod, "logout", fbs.logout)
     monkeypatch.setattr(baostock_mod, "query_history_k_data_plus", fbs.query_history_k_data_plus)
     monkeypatch.setattr(baostock_mod, "query_trade_dates", fbs.query_trade_dates)
+    monkeypatch.setattr(baostock_mod, "query_stock_basic", fbs.query_stock_basic)
+    monkeypatch.setattr(baostock_mod, "query_profit_data", fbs.query_profit_data)
+    monkeypatch.setattr(baostock_mod, "query_growth_data", fbs.query_growth_data)
+    monkeypatch.setattr(baostock_mod, "query_balance_data", fbs.query_balance_data)
     baostock._reset_session()
     yield fbs
     baostock._reset_session()
@@ -163,6 +189,121 @@ def test_trade_cal_rows_filters_trading_days(fake_bs):
     assert all(r["exchange"] == "SSE" for r in rows)
 
 
+# ---------- 阶段 2：股票列表 / 估值 / 指数 / 财务（同形状输出） ----------
+
+def test_stock_basic_rows_shape(fake_bs):
+    """query_stock_basic 带交易所前缀 → 剥离成 6 位纯数字；过滤非股票；北交所 BJ"""
+    fake_bs.stock_basic_resp = _rs(
+        ["code", "code_name", "ipoDate", "outDate", "type", "status"],
+        [
+            ["sh.600519", "贵州茅台", "2001-08-27", "", "1", "1"],
+            ["sz.000001", "平安银行", "1991-04-03", "", "1", "1"],
+            ["bj.830001", "北 交 新 三", "2020-06-01", "", "1", "0"],
+            ["sh.000001", "上证指数", "", "", "2", "1"],   # 非股票 type≠1：过滤
+        ])
+    sess = baostock.get_session()
+    rows = baostock.stock_basic_rows(sess)
+    assert len(rows) == 3
+    assert rows[0] == {"code": "600519", "name": "贵州茅台", "market": "SH",
+                       "status": "L", "list_date": date(2001, 8, 27)}
+    # 带空格名称去除；退市状态 D；北交所 8xx → BJ
+    assert rows[2]["name"] == "北交新三"
+    assert rows[2]["status"] == "D"
+    assert rows[2]["market"] == "BJ"
+    assert rows[1]["market"] == "SZ"
+    # 无 industry（留 AkShare 补全）
+    assert "industry" not in rows[0]
+
+
+def test_stock_basic_rows_empty(fake_bs):
+    sess = baostock.get_session()
+    assert baostock.stock_basic_rows(sess) == []
+
+
+def test_valuation_rows_shape(fake_bs):
+    """估值行：close/pe_ttm/pb，不含 total_mv/float_mv/pe_static（保留既有值）"""
+    fake_bs.hist_responses["3"] = _rs(
+        ["date", "close", "peTTM", "pbMRQ"],
+        [["2026-08-26", "1302.8", "25.3", "8.1"], ["2026-08-25", "1297.99", "25.1", ""]])
+    sess = baostock.get_session()
+    rows = baostock.valuation_rows(sess, "600519", "2026-08-25", "2026-08-26")
+    assert rows[0] == {"code": "600519", "trade_date": date(2026, 8, 26),
+                       "close": 1302.8, "pe_ttm": 25.3, "pb": 8.1}
+    assert "total_mv" not in rows[0] and "pe_static" not in rows[0]
+    # 空串 → None
+    assert rows[1]["pb"] is None
+    # 请求用 bs 格式代码 + 不复权
+    assert fake_bs.queries[0][0] == "sh.600519"
+    assert fake_bs.queries[0][2]["adjustflag"] == "3"
+
+
+def test_index_bs_code():
+    assert baostock.index_bs_code("sh000001") == "sh.000001"
+    assert baostock.index_bs_code("sz399106") == "sz.399106"
+    assert baostock.index_bs_code("sh000300") == "sh.000300"
+
+
+def test_index_rows_shape(fake_bs):
+    """指数行：code 保留新浪码；volume 股→手；adj_factor None"""
+    fake_bs.hist_responses["3"] = _rs(
+        ["date", "open", "high", "low", "close", "volume", "amount"],
+        [["2026-08-26", "3350.1", "3360.5", "3340.0", "3355.2", "400000000", "5e11"],
+         ["2026-08-25", "3340.2", "3355.0", "3330.1", "3348.9", "380000000", "4.8e11"]])
+    sess = baostock.get_session()
+    rows = baostock.index_rows(sess, "sh000001", "2026-08-25", "2026-08-26")
+    assert rows[0]["code"] == "sh000001"
+    assert rows[0]["trade_date"] == date(2026, 8, 26)
+    assert rows[0]["volume"] == 4000000        # 股 → 手（÷100）
+    assert rows[0]["amount"] == 5e11           # 元 原样
+    assert rows[0]["adj_factor"] is None
+    # 指数码直接映射 sh.000001（不是 sz.000001）
+    assert fake_bs.queries[0][0] == "sh.000001"
+
+
+def test_financial_rows_shape_and_debt_unit(fake_bs):
+    """财务行：roe/gross_margin/profit_growth/debt_ratio 统一 ×100 单位校准
+    （BaoStock 小数比例 → 库存百分数，茅台/浦发真实 API 实证）+
+    营收增速两期 MBRevenue 同比 + announce_date"""
+    fake_bs.profit_resp = _rs(
+        ["code", "pubDate", "statDate", "roeAvg", "gpMargin", "MBRevenue"],
+        [["sh.600519", "2026-08-15", "2026-06-30", "0.179543", "0.895552", "9e10"]])
+    fake_bs.growth_resp = _rs(
+        ["code", "YOYNI"], [["sh.600519", "-0.02029"]])
+    fake_bs.balance_resp = _rs(
+        ["code", "liabilityToAsset"], [["sh.600519", "0.151931"]])
+    sess = baostock.get_session()
+    row = baostock.financial_rows(sess, "600519", 2026, 2)
+    assert row is not None
+    assert row["code"] == "600519"
+    assert row["report_date"] == date(2026, 6, 30)
+    assert row["roe"] == 17.9543            # 0.179543 ×100
+    assert row["gross_margin"] == 89.5552   # 0.895552 ×100
+    assert row["profit_growth"] == -2.029   # 来自 growth_data YOYNI ×100
+    assert row["debt_ratio"] == 15.1931     # 0.151931 ×100（不是 ×10000！）
+    assert row["announce_date"] == date(2026, 8, 15)
+    # 请求代码 bs 格式
+    assert fake_bs.queries[0][1] == ("sh.600519", 2026, 2)
+
+
+def test_financial_rows_revenue_growth_two_period(fake_bs):
+    """营收增速 = (本期 MBRevenue − 上年同期 MBRevenue) / 上年同期 ×100"""
+    def profit_resp(year, quarter):
+        if year == 2026:
+            return _rs(["code", "MBRevenue"], [["sz.000001", "6e10"]])
+        return _rs(["code", "MBRevenue"], [["sz.000001", "5e10"]])
+    fake_bs.profit_resp = profit_resp
+    sess = baostock.get_session()
+    row = baostock.financial_rows(sess, "000001", 2026, 1)
+    assert row["revenue_growth"] == 20.0         # (6-5)/5 ×100
+    assert row["report_date"] == date(2026, 3, 31)
+
+
+def test_financial_rows_empty_profit_returns_none(fake_bs):
+    """报告期未披露：profit_data 空 → 返回 None（采集器跳过该期）"""
+    sess = baostock.get_session()
+    assert baostock.financial_rows(sess, "600000", 2026, 1) is None
+
+
 # ---------- 会话：连接级错误重连重试 ----------
 
 def test_query_retries_on_conn_error(monkeypatch, fake_bs):
@@ -217,3 +358,25 @@ def test_get_session_singleton():
     assert s1 is s2
     baostock._reset_session()
     assert baostock.get_session() is not s1
+
+
+# ---------- 阶段 2：源级门控 ----------
+
+def test_baostock_enabled_scope_gating(monkeypatch):
+    """BAOSTOCK_SOURCES 决定哪些 scope 走 BaoStock；无参 = scopes 非空"""
+    from app import config
+    monkeypatch.setattr(config, "BAOSTOCK_ENABLED", True)
+    monkeypatch.setattr(config, "BAOSTOCK_SOURCES", ["daily", "calendar", "stock_basic"])
+    assert config.baostock_enabled("daily") is True
+    assert config.baostock_enabled("stock_basic") is True
+    assert config.baostock_enabled("valuation") is False
+    assert config.baostock_enabled("index") is False
+    assert config.baostock_enabled() is True
+    # 开关关闭：全部 False
+    monkeypatch.setattr(config, "BAOSTOCK_ENABLED", False)
+    assert config.baostock_enabled("daily") is False
+    assert config.baostock_enabled() is False
+    # scopes 空：无参返回 False（不误判主源启用）
+    monkeypatch.setattr(config, "BAOSTOCK_ENABLED", True)
+    monkeypatch.setattr(config, "BAOSTOCK_SOURCES", [])
+    assert config.baostock_enabled() is False

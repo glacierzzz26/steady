@@ -684,6 +684,13 @@ export interface MorningBriefMarket {
   sectors_gain: MorningBriefSectorGainItem[]
   sectors_flow: MorningBriefSectorFlowItem[]
   hot_stocks: MorningBriefHotStockItem[]
+  /** G6 两市成交额（元）；采集器未产出时缺省 */
+  turnover?: {
+    total: number
+    sh: number
+    sz: number
+    trade_date: string
+  }
 }
 
 export interface MorningBriefTradeOrder {

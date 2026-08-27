@@ -256,6 +256,45 @@ def _fetch_hot_stocks(spot_date: date) -> list[dict]:
     return _fetch_zt_pool(spot_date)
 
 
+def _fetch_turnover(db) -> dict | None:
+    """两市成交额（G6）：最近一个两市指数行齐全的交易日，sh000001 上证综指 +
+    sz399106 深证综指 daily_price.amount 之和 → {total, sh, sz, trade_date}（元）。
+
+    指数伪股票行由 16:15 指数同步写入（sz399106 阶段 2 加入）。过渡期两指数历史
+    可能缺尾部，取「两行都有的最近日期」而非各自最新，避免 G6 报半场数值。
+    失败/缺行返回 None（热点是增强数据，可降级省略）。
+    """
+    try:
+        from sqlalchemy import select
+
+        from app.models.tables import DailyPrice
+
+        rows = db.execute(
+            select(DailyPrice.trade_date, DailyPrice.code, DailyPrice.amount)
+            .where(DailyPrice.code.in_(("sh000001", "sz399106")))
+            .order_by(DailyPrice.trade_date.desc())
+        ).all()
+        by_date: dict[date, dict[str, float]] = {}
+        for d, code, amt in rows:
+            if amt is None:
+                continue
+            by_date.setdefault(d, {})[code] = amt
+        for d in sorted(by_date, reverse=True):
+            codes = by_date[d]
+            if "sh000001" in codes and "sz399106" in codes:
+                sh, sz = codes["sh000001"], codes["sz399106"]
+                logger.info("两市成交 @%s：沪 %s 深 %s", d, sh, sz)
+                return {
+                    "total": sh + sz, "sh": sh, "sz": sz,
+                    "trade_date": d.isoformat(),
+                }
+        logger.warning("两市成交缺齐全指数行，跳过")
+        return None
+    except Exception as e:
+        logger.warning("两市成交采集失败: %s", e)
+        return None
+
+
 class HotspotCollector(BaseCollector):
     """拉取市场热点快照并落 market_hotspot（按 spot_date upsert）"""
 
@@ -268,9 +307,13 @@ class HotspotCollector(BaseCollector):
             "sectors_flow": _sectors_flow_from(ths),
             "hot_stocks": _fetch_hot_stocks(spot_date),
         }
-        logger.info("热点采集完成 %s：外盘 %s / 板块涨幅 %s / 资金流 %s / 人气 %s",
+        turnover = _fetch_turnover(self.db)
+        if turnover is not None:
+            sections["turnover"] = turnover
+        logger.info("热点采集完成 %s：外盘 %s / 板块涨幅 %s / 资金流 %s / 人气 %s / 成交 %s",
                     spot_date, len(sections["indices"]), len(sections["sectors_gain"]),
-                    len(sections["sectors_flow"]), len(sections["hot_stocks"]))
+                    len(sections["sectors_flow"]), len(sections["hot_stocks"]),
+                    "有" if turnover else "无")
         return {"spot_date": spot_date, "sections": sections}
 
     def save(self, data):

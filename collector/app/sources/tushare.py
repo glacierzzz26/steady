@@ -43,6 +43,19 @@ _TOKEN_KEY = "tushare.token"
 INDEX_TS_CODE = {"sh000300": "000300.SH", "sh000905": "000905.SH"}
 
 
+def index_ts_code(symbol: str) -> str:
+    """新浪指数码 → Tushare ts_code：sh000001→000001.SH / sz399106→399106.SZ
+
+    深市指数（sz 前缀）不能回退成 .SH（原实现 symbol.replace("sh","")+".SH"
+    会把 sz399106 映射成 399106.SH，G6 两市成交依赖深证综指，必须正确）。
+    """
+    if symbol.startswith("sz"):
+        return symbol[2:] + ".SZ"
+    if symbol.startswith("sh"):
+        return symbol[2:] + ".SH"
+    return symbol
+
+
 def load_token(db) -> str:
     """从 app_config 表读取 Tushare token（空 / 未配置 → ""）
 
@@ -290,7 +303,7 @@ def index_daily_rows(pro, symbol: str, start_date=None, end_date=None) -> list[d
     3 次），重试耗尽才抛错，由上层降级 AkShare（保住兜底）；非限流异常直接抛。
     """
     start_date, end_date = _range(start_date, end_date, back_days=365, forward_days=0)
-    tc = INDEX_TS_CODE.get(symbol, symbol.replace("sh", "") + ".SH")
+    tc = INDEX_TS_CODE.get(symbol) or index_ts_code(symbol)
     last_err = None
     for attempt in range(3):
         try:
