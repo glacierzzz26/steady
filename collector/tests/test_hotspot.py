@@ -102,3 +102,19 @@ def test_fetch_turnover_missing_returns_none():
 
     assert _fetch_turnover(_FakeDB([])) is None
     assert _fetch_turnover(_FakeDB([(date(2026, 8, 25), "sh000001", 5.0e11)])) is None
+
+
+def test_fetch_turnover_decimal_converts_to_float():
+    """DB numeric 返回 Decimal → 转 float（否则 sections JSON 序列化崩）"""
+    from decimal import Decimal
+
+    from app.collectors.hotspot import _fetch_turnover
+
+    rows = [
+        ("2026-08-25", "sh000001", Decimal("500000000000.5")),
+        ("2026-08-25", "sz399106", Decimal("600000000000.5")),
+    ]
+    out = _fetch_turnover(_FakeDB([(date.fromisoformat(d), c, a) for d, c, a in rows]))
+    assert isinstance(out["total"], float)
+    assert isinstance(out["sh"], float) and isinstance(out["sz"], float)
+    assert out["total"] == 1.100000000001e12  # 500000000000.5 + 600000000000.5

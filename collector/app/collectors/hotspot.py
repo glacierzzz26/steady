@@ -282,7 +282,8 @@ def _fetch_turnover(db) -> dict | None:
         for d in sorted(by_date, reverse=True):
             codes = by_date[d]
             if "sh000001" in codes and "sz399106" in codes:
-                sh, sz = codes["sh000001"], codes["sz399106"]
+                # DB 金额为 numeric(Decimal)，需转 float 才可 JSON 序列化进 sections
+                sh, sz = float(codes["sh000001"]), float(codes["sz399106"])
                 logger.info("两市成交 @%s：沪 %s 深 %s", d, sh, sz)
                 return {
                     "total": sh + sz, "sh": sh, "sz": sz,
