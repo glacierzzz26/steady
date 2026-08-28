@@ -107,6 +107,7 @@ docker compose -f deploy/docker-compose.yml up -d postgres   # 只起数据库
 | [docs/项目详解.md](docs/项目详解.md) | 写给项目主人的完整说明：自动买入原理、因子打分、每日数据流 |
 | [docs/进度总表.md](docs/进度总表.md) | 全项目唯一的阶段索引（各阶段归档 + 设计定稿清单） |
 | [docs/优化路线图.md](docs/优化路线图.md) | 迭代路线图与待办 |
+| [docs/排障手册.md](docs/排障手册.md) | **出问题先看这本**：症状→定位→处置决策树 + 手动补跑速查（配合 `scripts/health-report.sh` 一键体检） |
 | [deploy/README.md](deploy/README.md) | 部署运维手册（分支/发布/升级/回滚/备份/安全基线） |
 
 ## 开发路线

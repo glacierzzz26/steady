@@ -1,9 +1,10 @@
 import { useMemo } from 'react'
 import EChart from '../../components/EChart'
+import HealthChecks from '../../components/HealthChecks'
 import Kpi from '../../components/Kpi'
 import Notice from '../../components/Notice'
 import Tag from '../../components/Tag'
-import { mapAction, marketApi, signalsApi, strategyApi, tradeApi, type IndexNavData } from '../../api'
+import { mapAction, marketApi, opsApi, signalsApi, strategyApi, tradeApi, type IndexNavData } from '../../api'
 import { useApi } from '../../hooks/useApi'
 import { lineOpt } from '../../mock/chartOpt'
 import { steps } from '../../mock/data'
@@ -11,7 +12,6 @@ import { fmtMoney, fmtRatioPct } from '../../lib/format'
 import { fmtName } from '../../lib/names'
 
 const G1_HINT = '待 G1 后端补齐因子分项/行情'
-const G5_HINT = '待 G5 后端补齐数据健康检查'
 
 export default function Dash() {
   const account = useApi(() => tradeApi.getAccount(), [])
@@ -21,6 +21,7 @@ export default function Dash() {
   const sellSig = useApi(() => signalsApi.getSignals({ action: 'SELL', page_size: 1 }), [])
   const sigList = useApi(() => signalsApi.getSignals({ page_size: 8 }), [])
   const strategies = useApi(() => strategyApi.getStrategies(), [])
+  const checks = useApi(() => opsApi.getHealthChecks(), [])
   // name → zh_name 映射（信号流头只带英文 strategy，展示补中文）
   const zhBy = new Map((strategies.data?.items ?? []).map(s => [s.name, s.zh_name]))
 
@@ -287,11 +288,19 @@ export default function Dash() {
         <div className="card">
           <h3>
             数据健康检查
-            <span className="hint">{G5_HINT}</span>
+            <span className="hint">
+              {checks.data?.date ? `最近一次 · ${checks.data.date}` : '每日 7 项体检'}
+            </span>
           </h3>
-          <div className="empty" style={{ padding: '52px 0' }}>
-            数据健康检查接口待 G5 后端补齐（每日 7 项检查已产出，见运维页任务记录）
-          </div>
+          {checks.error ? (
+            <Notice text={checks.error} onRetry={checks.reload} retrying={checks.loading} />
+          ) : checks.loading && !checks.data ? (
+            <div className="empty">数据健康加载中…</div>
+          ) : (checks.data?.items ?? []).length === 0 ? (
+            <div className="empty">暂无检查记录</div>
+          ) : (
+            <HealthChecks items={checks.data?.items ?? []} />
+          )}
         </div>
       </div>
     </section>

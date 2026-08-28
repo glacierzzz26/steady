@@ -607,12 +607,16 @@ export interface TaskRunsData {
   items: TaskRunItem[]
 }
 
-// ============ 运维（G7，接口待建，类型先备）============
+// ============ 运维（G7，已接线：/health/services + /health/data-assets）============
 export interface ServiceStatus {
   name: string
   label: string
   status: 'ok' | 'down' | 'unknown'
   detail?: string
+}
+
+export interface HealthServicesData {
+  items: ServiceStatus[]
 }
 
 export interface DataAssetItem {
@@ -624,11 +628,12 @@ export interface DataAssetData {
   items: DataAssetItem[]
 }
 
-// ============ 数据健康（G5，接口待建，类型先备）============
+// ============ 数据健康（G5，已接线：/health/checks）============
 export interface HealthCheckItem {
   name: string
   value: string
-  pct: number
+  /** 小数比例（0-1）；非比例项后端返回 null */
+  pct: number | null
   ok: boolean
 }
 

@@ -42,13 +42,17 @@ export const TASK_ZH: Record<string, string> = {
   nav_snapshot: '净值快照',
 }
 
-/** 任务名中文标签：notify:xxx → 「通知·xxx」；未收录退回原名 */
+/** 任务名中文标签：notify:xxx → 「通知·xxx」；alert:xxx → 「告警·xxx」；未收录退回原名 */
 export function fmtTask(name?: string | null): string {
   const n = name?.trim()
   if (!n) return '—'
   if (n.startsWith('notify:')) {
     const rest = n.slice('notify:'.length)
     return `通知·${TASK_ZH[rest] ?? rest}`
+  }
+  if (n.startsWith('alert:')) {
+    const rest = n.slice('alert:'.length)
+    return `告警·${TASK_ZH[rest] ?? rest}`
   }
   return TASK_ZH[n] ?? n
 }
