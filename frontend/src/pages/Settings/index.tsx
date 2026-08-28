@@ -28,14 +28,11 @@ function InlineMsg({ m }: { m: Msg | null }) {
 }
 
 export default function Settings() {
-  // —— 加载：三卡独立拉取（各自出错各自 Notice+重试）——
-  const tushare = useApi(() => settingsApi.getTushareConfig(), [])
+  // —— 加载：两卡独立拉取（各自出错各自 Notice+重试）——
   const notify = useApi(() => settingsApi.getNotifyConfig(), [])
   const llm = useApi(() => settingsApi.getLLMConfig(), [])
 
   // —— 本地编辑态（数据到达后从 data 拷贝）——
-  const [tk, setTk] = useState('')
-  const [tMsg, setTMsg] = useState<Msg | null>(null)
   const [feishu, setFeishu] = useState<FeishuConfig | null>(null)
   const [events, setEvents] = useState<NotifyEvent[]>([])
   const [nMsg, setNMsg] = useState<Msg | null>(null)
@@ -55,40 +52,10 @@ export default function Settings() {
     if (llm.data) setLlmCfg(llm.data)
   }, [llm.data])
 
-  const [savingTushare, setSavingTushare] = useState(false)
-  const [testingTushare, setTestingTushare] = useState(false)
   const [savingNotify, setSavingNotify] = useState(false)
   const [testingNotify, setTestingNotify] = useState(false)
   const [savingLLM, setSavingLLM] = useState(false)
   const [testingLLM, setTestingLLM] = useState(false)
-
-  // ---- Tushare ----
-  const onSaveTushare = async () => {
-    const token = tk.trim()
-    if (!token) return // 空输入不提交，避免误清空
-    setSavingTushare(true)
-    try {
-      await settingsApi.updateTushareConfig(token)
-      setTk('')
-      setTMsg({ ok: true, text: '已保存（Token 完整值不回显）' })
-    } catch (e) {
-      setTMsg({ ok: false, text: e instanceof Error ? e.message : '保存失败' })
-    } finally {
-      setSavingTushare(false)
-    }
-  }
-
-  const onTestTushare = async () => {
-    setTestingTushare(true)
-    try {
-      await settingsApi.testTushare(tk.trim()) // token 留空 = 测已存 token
-      setTMsg({ ok: true, text: 'Tushare 连接正常' })
-    } catch (e) {
-      setTMsg({ ok: false, text: e instanceof Error ? e.message : '连接失败' })
-    } finally {
-      setTestingTushare(false)
-    }
-  }
 
   // ---- 飞书：事件开关 + 整体配置 ----
   const patchEvent = (eventKey: string, patch: Partial<NotifyEvent>) =>
@@ -169,44 +136,7 @@ export default function Settings() {
 
   return (
     <section className="page">
-      <div className="grid" style={{ gridTemplateColumns: 'repeat(3,1fr)' }}>
-        {/* ---- Tushare ---- */}
-        <div className="card">
-          <h3>数据源 · Tushare</h3>
-          {tushare.error ? (
-            <Notice text={tushare.error} onRetry={tushare.reload} retrying={tushare.loading} />
-          ) : (
-            <>
-              <div style={{ fontSize: 14, color: 'var(--txt2)', marginBottom: 6 }}>Token</div>
-              <input
-                type="text"
-                value={tk}
-                onChange={e => setTk(e.target.value)}
-                placeholder={tushare.data?.configured ? `已配置 ${tushare.data.token_masked}，留空保持` : '粘贴 Tushare Pro token'}
-                style={{ width: '100%' }}
-              />
-              <div style={{ fontSize: 14, color: 'var(--txt2)', margin: '12px 0 6px' }}>当前状态</div>
-              <div style={{ fontSize: 14.5, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {tushare.data?.configured ? (
-                  <Tag type="ok" label={`主源已配置 ${tushare.data.token_masked}`} />
-                ) : (
-                  <Tag type="warn" label="未配置 · 采集走 AkShare" />
-                )}
-                <Tag type="hold" label="AkShare 兜底待命" />
-              </div>
-              <div style={{ marginTop: 14, display: 'flex', gap: 8 }}>
-                <button className="btn" onClick={onTestTushare} disabled={testingTushare}>
-                  {testingTushare ? '测试中…' : '测试连接'}
-                </button>
-                <button className="btn pri" onClick={onSaveTushare} disabled={savingTushare || !tk.trim()}>
-                  {savingTushare ? '保存中…' : '保存'}
-                </button>
-              </div>
-              <InlineMsg m={tMsg} />
-            </>
-          )}
-        </div>
-
+      <div className="grid" style={{ gridTemplateColumns: 'repeat(2,1fr)' }}>
         {/* ---- 飞书 ---- */}
         <div className="card">
           <h3>通知 · 飞书机器人</h3>

@@ -13,7 +13,7 @@ from app.collectors.base import BaseCollector
 from app.config import baostock_enabled
 from app.db import upsert
 from app.models.tables import DailyPrice, StockBasic
-from app.sources import baostock, tushare
+from app.sources import baostock
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +51,9 @@ class IndexCollector(BaseCollector):
 
     def fetch(self, symbol: str = "sh000300", start_date=None, end_date=None,
               *args, **kwargs) -> list[dict]:
-        # BaoStock 主源（阶段 2 开关）：指数历史/多日缺口主源。
+        # BaoStock 主源（阶段 3）：指数历史/多日缺口/当日主源。
         # 同日回退规则：BaoStock 当日数据约 18:00 后才出，max(trade_date) < end_date
-        # 即当日未出 → 抛异常降级 Tushare（16:15 当日快照继续走 Tushare，
-        # 历史/缺口/回填走 BaoStock）。
+        # 即当日未出 → 抛异常降级 AkShare（新浪 stock_zh_index_daily）。
         if baostock_enabled("index"):
             sess = baostock.get_session()
             if sess is not None:
@@ -66,22 +65,11 @@ class IndexCollector(BaseCollector):
                     max_d = max(r["trade_date"] for r in rows)
                     if max_d < end:
                         raise RuntimeError(
-                            f"{symbol} BaoStock 当日指数未出(max={max_d})，降级 Tushare")
+                            f"{symbol} BaoStock 当日指数未出(max={max_d})，降级 AkShare")
                     logger.info("%s BaoStock 拉取指数行情 %s 条", symbol, len(rows))
                     return rows
                 except Exception as e:
-                    logger.warning("%s BaoStock 指数失败(%s)，降级 Tushare", symbol, e)
-        # Tushare 主源：index_daily（指数无缺口，1 次拉全量区间）
-        pro = tushare.make_pro(self.db)
-        if pro is not None:
-            try:
-                rows = tushare.index_daily_rows(pro, symbol, start_date, end_date)
-                if not rows:
-                    raise RuntimeError(f"{symbol} Tushare 指数未返回数据")
-                logger.info("%s Tushare 拉取指数行情 %s 条", symbol, len(rows))
-                return rows
-            except Exception as e:
-                logger.warning("%s Tushare 指数失败(%s)，降级 AkShare", symbol, e)
+                    logger.warning("%s BaoStock 指数失败(%s)，降级 AkShare", symbol, e)
         df = ak.stock_zh_index_daily(symbol=symbol)
         rows = build_rows(symbol, df, start_date, end_date)
         logger.info("%s AkShare 拉取指数行情 %s 条", symbol, len(rows))

@@ -7,6 +7,16 @@ from app.collectors.stock import StockCollector, infer_market, normalize_stock_r
 from tests.helpers import multi_values, write_execs
 
 
+@pytest.fixture(autouse=True)
+def _no_bj_net(monkeypatch):
+    """北交所接口默认不可用（离线测试不触网）→ fetch_bj_rows 走失败分支返回空；
+    测 bj 合并/取数的用例各自覆盖 ak 或 fetch_bj_rows"""
+    monkeypatch.setattr(
+        stock_mod.ak, "stock_info_bj_name_code",
+        lambda: (_ for _ in ()).throw(ConnectionError("offline")),
+    )
+
+
 def test_infer_market():
     assert infer_market("600519") == "SH"
     assert infer_market("688001") == "SH"
@@ -67,7 +77,7 @@ def test_save_marks_universe(monkeypatch):
     ok = StockCollector(db).run()
     assert ok
     # 4 次写入：upsert 列表 + upsert 股票池 + UPDATE 上市日期 + UPDATE 行业
-    # （fetch 里读 tushare.token 的 select 被 write_execs 过滤）
+    # （fetch 里的只读 select 被 write_execs 过滤）
     assert len(write_execs(db)) == 4
     assert called == ["list", "000300", "000905"]
 
@@ -111,6 +121,24 @@ def test_fetch_list_empty(monkeypatch):
     assert StockCollector(None).fetch() == []
 
 
+def test_fetch_baostock_merges_bj(monkeypatch):
+    """阶段 3：BaoStock 主源（SH/SZ）+ AkShare bj 合并（BaoStock 无北交所）"""
+    from datetime import date
+
+    rows_in = [{"code": "600519", "name": "贵州茅台", "market": "SH",
+                "status": "L", "list_date": date(2001, 8, 27)}]
+    monkeypatch.setattr(stock_mod, "baostock_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(stock_mod.baostock, "get_session", lambda: object())
+    monkeypatch.setattr(stock_mod.baostock, "stock_basic_rows",
+                        lambda sess: list(rows_in))  # 副本：fetch 内 rows += bj 会原地变异
+    monkeypatch.setattr(stock_mod, "fetch_bj_rows",
+                        lambda: [{"code": "830001", "name": "某北交所股",
+                                  "market": "BJ", "status": "L"}])
+    rows = StockCollector(None).fetch()
+    assert rows == rows_in + [{"code": "830001", "name": "某北交所股",
+                               "market": "BJ", "status": "L"}]
+
+
 def test_fetch_baostock_branch(monkeypatch):
     """BAOSTOCK_SOURCES 含 stock_basic → BaoStock 主源返回全量列表（无 industry）"""
     from datetime import date
@@ -122,6 +150,27 @@ def test_fetch_baostock_branch(monkeypatch):
     monkeypatch.setattr(stock_mod.baostock, "stock_basic_rows", lambda sess: rows_in)
     rows = StockCollector(None).fetch()
     assert rows == rows_in
+
+
+def test_fetch_bj_rows(monkeypatch):
+    """fetch_bj_rows：北交所列名 → 入库行（market=BJ，退市标记）"""
+    bj_df = pd.DataFrame({
+        "证券代码": ["830001", "920002"],
+        "证券简称": ["某北交所股", "某退市股"],
+    })
+    monkeypatch.setattr(stock_mod.ak, "stock_info_bj_name_code", lambda: bj_df)
+    rows = stock_mod.fetch_bj_rows()
+    assert rows == [
+        {"code": "830001", "name": "某北交所股", "market": "BJ", "status": "L"},
+        {"code": "920002", "name": "某退市股", "market": "BJ", "status": "D"},
+    ]
+
+
+def test_fetch_bj_rows_failure(monkeypatch):
+    """bj 接口失败 → 返回空（SH/SZ 主源不受影响，仅告警）"""
+    monkeypatch.setattr(stock_mod.ak, "stock_info_bj_name_code",
+                        lambda: (_ for _ in ()).throw(ConnectionError("bse down")))
+    assert stock_mod.fetch_bj_rows() == []
 
 
 def test_pool_without_cons_api_failure(monkeypatch):

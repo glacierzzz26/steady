@@ -555,12 +555,6 @@ export interface NotifyConfigData {
   feishu: FeishuConfig
 }
 
-// ============ 数据源配置（Tushare）============
-export interface TushareConfig {
-  configured: boolean
-  token_masked: string
-}
-
 // ============ 大模型（LLM）============
 export type LLMProvider = 'openai' | 'deepseek' | 'qwen' | 'glm'
 

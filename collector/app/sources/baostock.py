@@ -1,23 +1,23 @@
-"""BaoStock 数据源适配层（阶段 1：daily + calendar；设计复刻 sources/tushare.py）
+"""BaoStock 数据源适配层（阶段 3：daily/calendar/index/valuation/finance/stock_basic）
 
 设计原则：
 - 无 token / 无外部依赖，`get_session()` 恒可用（依赖缺失时返回 None，采集器跳过）；
 - baostock 是自定义 TCP 协议，**进程内全局单 socket**（context.default_socket）：
   `login()` 建连一次，后续所有查询复用同一连接；登录 2~40s 不等。因此会话为
   **懒登录单例 + 失效重连**，`get_session()` 返回缓存实例，逐只循环只登录一次；
-- 各查询返回与 Tushare/AkShare **同形状**的数据（上层 build_rows / save / 清洗 /
-  重试逻辑完全不动）；调用失败抛异常 → 采集器降级 Tushare → AkShare；
+- 各查询返回与 AkShare **同形状**的数据（上层 build_rows / save / 清洗 /
+  重试逻辑完全不动）；调用失败抛异常 → 采集器降级 AkShare；
 - socket 全程套超时（`socket.setdefaulttimeout`），防止库内阻塞 connect/recv 挂死
   （曾卡死整批补救的同类问题；baostock 本身不设超时）。
 
 复权语义（8/26 用 600519 茅台 / 689009 九号实测确认，勿再踩）：
 - `adjustflag="1"` = **后复权**：茅台 8/26 close=9991.51（=原始 1302.8 × 累计因子
-  7.67），与 Tushare adj_factor / 东财 hfq 同口径 → 派生 adj_factor 必须用它；
+  7.67），与东财 hfq 同口径 → 派生 adj_factor 必须用它；
 - `adjustflag="2"` = 前复权：最新日 = 原始价，用它派生 adj_factor 会在最新日得 1.0，
   历史全部错（九号实测差 6.4%）；
 - `adjustflag="3"` = 不复权（入库 close 用这个）。
 
-单位：BaoStock 成交量=股（→ ÷100 转手，对齐东财/Tushare），成交额=元（无需换算）。
+单位：BaoStock 成交量=股（→ ÷100 转手，对齐东财），成交额=元（无需换算）。
 """
 import logging
 import socket
@@ -247,7 +247,12 @@ def daily_pairs(sess: BaoStockSession, code: str, start_date, end_date):
         "date": "日期", "open": "开盘", "high": "最高", "low": "最低",
         "close": "收盘", "volume": "成交量", "amount": "成交额",
     })
-    raw["成交量"] = raw["成交量"].astype(float) / 100  # 股 → 手
+    # BaoStock 偶发空串（如 000066 某批成交量）→ to_numeric 转 NaN，避免 astype 崩溃；
+    # 无收盘的坏条直接丢弃（无法派生因子）；空成交量行由 cleaner 按停牌语义丢弃。
+    for col in ("开盘", "最高", "最低", "收盘", "成交量", "成交额"):
+        raw[col] = pd.to_numeric(raw[col], errors="coerce")
+    raw = raw.dropna(subset=["收盘"])
+    raw["成交量"] = raw["成交量"] / 100  # 股 → 手
     hfq = hfq.rename(columns={"date": "日期", "close": "收盘"})
     return raw[["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"]], hfq
 
@@ -305,7 +310,7 @@ def _plain_code(raw) -> str:
 def stock_basic_rows(sess: BaoStockSession) -> list[dict]:
     """全市场股票列表（type=1 股票）→ 入库行（无 industry，留 AkShare）
 
-    与 tushare.stock_basic_rows / stock.normalize_stock_rows 同形状：
+    与 stock.normalize_stock_rows 同形状：
     {code, name, market, status, list_date?}。query_stock_basic 的 code 带交易所
     前缀（sh.600519），入库须剥离成 6 位纯数字。
     """
@@ -337,7 +342,7 @@ def valuation_rows(sess: BaoStockSession, code: str, start_date, end_date) -> li
     """日度估值（peTTM/pbMRQ 随日线一查给）→ DailyValuation 形状
 
     不含 total_mv/float_mv/pe_static（保留既有值：BaoStock 无直接源且无消费者；
-    由采集器 save 分支跳过这三列，不覆盖既有 Tushare/AkShare 值）。
+    由采集器 save 分支跳过这三列，不覆盖既有 AkShare 值）。
     close 用不复权（adjustflag=3）。
     """
     b = bs_code(code)

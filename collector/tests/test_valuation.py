@@ -60,7 +60,7 @@ def test_run_upserts_valuation_rows(monkeypatch):
     db = FakeSession()
     ok = ValuationCollector(db).run("600519")
     assert ok
-    writes = write_execs(db)  # 过滤掉 fetch 里读 tushare.token 的 select
+    writes = write_execs(db)  # 过滤掉 fetch 里的只读 select
     assert len(writes) == 1
     values = multi_values(writes[0])
     assert values[0]["code"] == "600519"
@@ -89,7 +89,7 @@ def test_fetch_baostock_branch(monkeypatch):
 
 
 def test_fetch_baostock_same_day_fallback(monkeypatch):
-    """同日回退：BaoStock 当日数据未出（max < today）→ 降级 Tushare → AkShare"""
+    """同日回退：BaoStock 当日数据未出（max < today）→ 降级 AkShare"""
     from datetime import timedelta
 
     today = date.today()
@@ -97,7 +97,6 @@ def test_fetch_baostock_same_day_fallback(monkeypatch):
     monkeypatch.setattr(val_mod.baostock, "get_session", lambda: object())
     monkeypatch.setattr(val_mod.baostock, "valuation_rows",
                         lambda sess, code, s, e: _bs_valuation_rows(today - timedelta(days=1)))
-    monkeypatch.setattr(val_mod.tushare, "make_pro", lambda db: None)
     monkeypatch.setattr(val_mod.ak, "stock_value_em", lambda symbol: make_valuation_df())
     rows = ValuationCollector(None).fetch("600519")
     assert rows[0]["total_mv"] == 1.63e12  # 落到 AkShare 兜底（带 mv 列）
@@ -119,7 +118,7 @@ def test_save_baostock_rows_only_three_cols():
 
 
 def test_save_full_cols_when_mv_present():
-    """Tushare/AkShare 行含 total_mv → 沿用原 6 列更新"""
+    """AkShare 行含 total_mv → 沿用原 6 列更新"""
     from sqlalchemy.dialects.postgresql import dialect as pg_dialect
 
     db = FakeSession()

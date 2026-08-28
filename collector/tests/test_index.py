@@ -79,7 +79,7 @@ def test_fetch_baostock_branch(monkeypatch):
 
 
 def test_fetch_baostock_same_day_fallback(monkeypatch):
-    """同日回退：BaoStock 当日未出（max < end）→ 降级 Tushare → AkShare"""
+    """同日回退：BaoStock 当日未出（max < end）→ 降级 AkShare"""
     from datetime import timedelta
 
     today = date.today()
@@ -87,7 +87,6 @@ def test_fetch_baostock_same_day_fallback(monkeypatch):
     monkeypatch.setattr(idx_mod.baostock, "get_session", lambda: object())
     monkeypatch.setattr(idx_mod.baostock, "index_rows",
                         lambda sess, symbol, s, e: _bs_index_rows(today - timedelta(days=1)))
-    monkeypatch.setattr(idx_mod.tushare, "make_pro", lambda db: None)
     monkeypatch.setattr(idx_mod.ak, "stock_zh_index_daily", lambda symbol: make_index_df())
     rows = IndexCollector(None).fetch("sh000300")
     assert rows[0]["code"] == "sh000300"

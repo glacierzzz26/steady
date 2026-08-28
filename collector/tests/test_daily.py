@@ -2,7 +2,6 @@
 from datetime import date
 
 import pandas as pd
-import pytest
 
 from app.collectors import daily as daily_mod
 from app.collectors.daily import (DailyCollector, build_rows, fetch_pair,
@@ -10,22 +9,17 @@ from app.collectors.daily import (DailyCollector, build_rows, fetch_pair,
 from tests.helpers import multi_values
 
 
-@pytest.fixture(autouse=True)
-def _no_sleep(monkeypatch):
-    """混合批量因子在多日期窗口间有 61s 限频错峰——测试里换成 no-op"""
-    monkeypatch.setattr(daily_mod.time, "sleep", lambda s: None)
-
-
 def make_hist(closes=(10.0, 10.5, 11.0), start="2026-08-01"):
     dates = pd.date_range(start, periods=len(closes), freq="D")
+    n = len(closes)
     return pd.DataFrame({
         "日期": [d.strftime("%Y-%m-%d") for d in dates],
         "开盘": closes,
         "最高": [c + 0.5 for c in closes],
         "最低": [c - 0.5 for c in closes],
         "收盘": closes,
-        "成交量": [10000, 12000, 13000],
-        "成交额": [1e8, 1.2e8, 1.3e8],
+        "成交量": [10000 + 2000 * i for i in range(n)],
+        "成交额": [1e8 * (1 + 0.1 * i) for i in range(n)],
     })
 
 
@@ -80,87 +74,70 @@ def test_fetch_calls_both_adjusts(monkeypatch):
     assert len(rows) == 3
 
 
-def _clear_factor_cache():
-    daily_mod._FACTOR_CACHE.clear()
-
-
-def test_baostock_hybrid_factor_from_tushare(monkeypatch):
-    """混合模式（§2.2）：OHLCV 走 BaoStock，adj_factor 被 Tushare 覆盖——
-    BaoStock 派生因子全池 51% 有分段阶跃（平安/天齐缺陷），不能作因子唯一来源。
-    因子按交易日批量（factor_map_by_date 1 次调用全市场），不逐股拉取。"""
-    _clear_factor_cache()
+def test_baostock_pure_factor_from_baostock(monkeypatch):
+    """阶段 3 纯 BaoStock：adj_factor 直接来自 BaoStock 派生因子；守卫通过；
+    窗口 start−7 取守卫上下文（此处 08-01 之前无行，恒因子无对）"""
     monkeypatch.setattr(daily_mod, "baostock_enabled", lambda *a, **k: True)
     monkeypatch.setattr(daily_mod.baostock, "get_session", lambda: object())
-    # BaoStock 原始行情 + 其派生的 hfq（hfq/raw = 6.26，应被 Tushare 覆盖）
-    raw = make_hist(closes=(10.0, 10.5, 11.0))
-    hfq = make_hist(closes=(62.6, 65.7, 68.9))
-    monkeypatch.setattr(daily_mod.baostock, "daily_pairs",
-                        lambda sess, code, s, e: (raw, hfq))
-    monkeypatch.setattr(daily_mod.tushare, "make_pro", lambda db: object())
-    by_date_calls = []
+    bs_calls = []
 
-    def fake_by_date(pro, trade_date):
-        by_date_calls.append(trade_date)
-        # 按交易日返回全市场因子（ts_code 键控）
-        return {"600519.SH": 8.8825, "000001.SZ": 150.7263}
+    def fake_pairs(sess, code, s, e):
+        bs_calls.append((s, e))
+        return (make_hist(closes=(10.0, 10.5, 11.0)),
+                make_hist(closes=(62.6, 65.73, 68.86)))  # 恒因子 6.26
 
-    monkeypatch.setattr(daily_mod.tushare, "factor_map_by_date", fake_by_date)
-
+    monkeypatch.setattr(daily_mod.baostock, "daily_pairs", fake_pairs)
     rows = DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
     assert len(rows) == 3
-    # adj_factor 来自 Tushare，而非 BaoStock 派生的 6.26
-    assert [r["adj_factor"] for r in rows] == [8.8825, 8.8825, 8.8825]
-    # OHLCV 仍来自 BaoStock
+    # 因子来自 BaoStock 派生（hfq/raw = 6.26）
+    assert [r["adj_factor"] for r in rows] == [6.26, 6.26, 6.26]
     assert [r["close"] for r in rows] == [10.0, 10.5, 11.0]
-    assert rows[0]["trade_date"] == date(2026, 8, 1)
-    # 按窗口内交易日批量拉取（3 个交易日 = 3 次调用，非逐股）
-    assert by_date_calls == ["2026-08-01", "2026-08-02", "2026-08-03"]
+    # 上下文窗口 = start − 7 天
+    assert bs_calls == [(date(2026, 7, 25), "2026-08-20")]
 
 
-def test_baostock_hybrid_factor_cache_reuse(monkeypatch):
-    """因子缓存跨股票复用：同一交易日的第二次 fetch 不重复调 Tushare
-    （每日同步 5000 只股票同窗口 → 全市场仅 1 次 adj_factor 调用）"""
-    _clear_factor_cache()
+def test_baostock_guard_reject_falls_to_akshare(monkeypatch):
+    """阶段 3 守卫拒收（平安型：因子阶跃 16.7% 但 close 反涨）→ 整段降级 AkShare，
+    不落 BaoStock 派生因子"""
     monkeypatch.setattr(daily_mod, "baostock_enabled", lambda *a, **k: True)
     monkeypatch.setattr(daily_mod.baostock, "get_session", lambda: object())
+    raw = pd.DataFrame({
+        "日期": ["2026-08-01", "2026-08-02"],
+        "开盘": [10.0, 10.5], "最高": [10.5, 11.0],
+        "最低": [9.5, 10.0], "收盘": [10.0, 10.5],
+        "成交量": [10000, 12000], "成交额": [1e8, 1.2e8],
+    })
+    hfq = pd.DataFrame({"日期": ["2026-08-01", "2026-08-02"],
+                        "收盘": [20.0, 24.507]})  # 因子 2.0 → 2.334（+16.7%）
     monkeypatch.setattr(daily_mod.baostock, "daily_pairs",
-                        lambda sess, code, s, e: (make_hist(closes=(10.0, 10.5, 11.0)),
-                                                  make_hist(closes=(62.6, 65.7, 68.9))))
-    monkeypatch.setattr(daily_mod.tushare, "make_pro", lambda db: object())
-    by_date_calls = []
-
-    def fake_by_date(pro, trade_date):
-        by_date_calls.append(trade_date)
-        return {"600519.SH": 8.8825, "000001.SZ": 150.7263}
-
-    monkeypatch.setattr(daily_mod.tushare, "factor_map_by_date", fake_by_date)
-
-    DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
-    DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
-    # 第二次 fetch 全部命中缓存：仍是 3 次批量调用（每个交易日 1 次）
-    assert by_date_calls == ["2026-08-01", "2026-08-02", "2026-08-03"]
-
-
-def test_baostock_hybrid_no_tushare_falls_through(monkeypatch):
-    """混合模式缺 Tushare 因子源 → 降级 Tushare 全路径（保因子连续性，不落
-    BaoStock 派生因子）"""
-    _clear_factor_cache()
-    monkeypatch.setattr(daily_mod, "baostock_enabled", lambda *a, **k: True)
-    monkeypatch.setattr(daily_mod.baostock, "get_session", lambda: object())
-    monkeypatch.setattr(daily_mod.baostock, "daily_pairs",
-                        lambda sess, code, s, e: (make_hist(), make_hist()))
-    # 无 Tushare token：make_pro → None → BaoStock 分支抛错 → 降级路径
-    monkeypatch.setattr(daily_mod.tushare, "make_pro", lambda db: None)
+                        lambda sess, code, s, e: (raw, hfq))
     calls = []
 
     def fake_hist(symbol, period, start_date, end_date, adjust):
         calls.append(adjust)
+        if adjust == "hfq":
+            return make_hist(closes=(62.6, 65.73, 68.86))  # 恒因子 6.26
         return make_hist()
 
     monkeypatch.setattr(daily_mod.ak, "stock_zh_a_hist", fake_hist)
     rows = DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
     assert calls == ["", "hfq"]  # 一路降到 AkShare
     assert len(rows) == 3
+    assert [r["adj_factor"] for r in rows] == [6.26, 6.26, 6.26]
+
+
+def test_baostock_context_rows_dropped(monkeypatch):
+    """守卫上下文行（start−7 内、trade_date < start）不入库"""
+    monkeypatch.setattr(daily_mod, "baostock_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(daily_mod.baostock, "get_session", lambda: object())
+    # 5 行：07-28..08-01（恒因子 6.26，无变化对）
+    raw = make_hist(closes=(10.0, 10.5, 11.0, 11.5, 12.0), start="2026-07-28")
+    hfq = make_hist(closes=(62.6, 65.73, 68.86, 71.99, 75.12), start="2026-07-28")
+    monkeypatch.setattr(daily_mod.baostock, "daily_pairs",
+                        lambda sess, code, s, e: (raw, hfq))
+    rows = DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
+    assert len(rows) == 1
+    assert rows[0]["trade_date"] == date(2026, 8, 1)
 
 
 def test_sina_symbol():

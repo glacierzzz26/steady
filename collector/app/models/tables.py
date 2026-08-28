@@ -101,9 +101,9 @@ class TradeCalendar(Base):
 
 
 class AppConfig(Base):
-    """应用配置键值表（Tushare token 等，页面可改；值以库为准，不读环境变量）
+    """应用配置键值表（token 等，页面可改；值以库为准，不读环境变量）
 
-    与 quant-engine/models/tables.py 同构，仅采集侧读 token 用。
+    与 quant-engine/models/tables.py 同构，仅采集侧读配置用。
     """
 
     __tablename__ = "app_config"

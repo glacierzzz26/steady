@@ -1,64 +1,33 @@
 """日行情采集器：不复权 + 后复权两次拉取，计算复权因子，质量校验后入库
 
-数据源（BAOSTOCK_ENABLED=1 时）：**混合模式**——OHLCV 走 BaoStock（全池逐位一致），
-adj_factor 仍走 Tushare（BaoStock 派生因子 51% 有分段阶跃、平安/天齐为已实证缺陷，
-见 docs/phase2/design/数据源评估-BaoStock.md §2.2，不能作因子唯一来源）；
-失败降级 Tushare → 东财（stock_zh_a_hist）→ 新浪（stock_zh_a_daily）。
-新浪成交量单位为股，统一转手（/100）。
+数据源（BAOSTOCK_ENABLED=1 时）：**BaoStock 主源**——OHLCV 与 adj_factor 均走
+BaoStock（build_rows 由 hfq/raw 派生因子），经除权一致性守卫（factor_guard）
+校验「因子阶跃必须对应价格跳空」后才入库；守卫拒收（平安/天齐型虚假/滞后调整，
+见 docs/phase2/design/数据源评估-BaoStock.md §2.2）→ 整段降级 AkShare
+（东财 stock_zh_a_hist → 新浪 stock_zh_a_daily hfq 派生），保该股单源一致。
 
-因子拉取策略（2026-08-27 修正）：adj_factor 免费档限频苛刻（prod 5次/天、
-dev 1次/小时），**逐股 factor_map() 在全市场同步第一只就打爆配额**，原混合路径
-实际永远降级 AkShare。改为**按交易日批量**：`adj_factor(trade_date=) 一次覆盖
-全市场`，按窗口内缺失日期逐日补模块级缓存（1 天 1 次调用），同一次同步后续股票
-全部命中缓存。
+窗口拉取 start−7 天：多取一前交易日作守卫上下文（判 window 首行的边界因子对），
+产出时丢弃（trade_date < start 的行不入库）。
+
+BaoStock 不可用（未安装/登录失败）→ 降级 AkShare（东财 → 新浪）。
+新浪成交量单位为股，统一转手（/100）。
 """
 import logging
-import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, timedelta
 
 import akshare as ak
 import pandas as pd
-import requests
 
 from app.collectors.base import BaseCollector, to_ak_date
 from app.cleaners import clean_daily_rows
+from app.cleaners.factor_guard import guard_factor
 from app.config import REQUEST_TIMEOUT, baostock_enabled
 from app.db import upsert
 from app.models.tables import DailyPrice
-from app.sources import baostock, tushare
+from app.sources import baostock
 
 logger = logging.getLogger(__name__)
-
-# Tushare 因子按交易日批量缓存（限频 5次/天 → 1 天 1 次调用全市场，绝不逐股）。
-# key = "YYYY-MM-DD" → {ts_code: float}；历史因子不可变，缓存可跨进程长期复用，
-# 仅用大小上限兜底内存。
-_FACTOR_CACHE: dict[str, dict[str, float]] = {}
-_FACTOR_LOCK = threading.Lock()
-_MAX_FACTOR_CACHE_DATES = 30
-
-
-def _fill_factor_cache(pro, dates) -> None:
-    """为窗口内缺失的交易日批量补因子缓存（每日期 1 次 adj_factor 调用）
-
-    一次每日同步的窗口通常只有 1 个新交易日 → 全市场仅 1 次调用，其余股票全命中
-    缓存；限频命中/数据未就绪抛异常时由调用方整段降级 Tushare → AkShare。
-    """
-    with _FACTOR_LOCK:
-        need = [d for d in dates if d not in _FACTOR_CACHE]
-        for i, d in enumerate(need):
-            fac = tushare.factor_map_by_date(pro, d)
-            if fac:  # 空结果（Tushare 未就绪）不缓存，避免被永久记住而不再重试
-                _FACTOR_CACHE[d] = fac
-            if i < len(need) - 1:
-                # prod 实测 adj_factor 限频 1次/分钟：多日期窗口必须错开，
-                # 否则首个多日窗口在 1 分钟内连发 N 次调用直接打爆配额
-                time.sleep(61)
-        if len(_FACTOR_CACHE) > _MAX_FACTOR_CACHE_DATES:
-            # dict 保插入序：淘汰最旧日期，只留最近 _MAX_FACTOR_CACHE_DATES 个
-            for d in list(_FACTOR_CACHE)[:-_MAX_FACTOR_CACHE_DATES]:
-                _FACTOR_CACHE.pop(d, None)
 
 
 # AkShare 列名 → 内部字段
@@ -178,49 +147,29 @@ class DailyCollector(BaseCollector):
     """按股票代码拉取日K行情，经质量校验后入库"""
 
     def fetch(self, code: str, start_date, end_date, *args, **kwargs) -> list[dict]:
-        # BaoStock 混合主源（阶段 1 开关）：OHLCV 走 BaoStock，adj_factor 走 Tushare。
-        # BaoStock 派生因子全池 51% 有分段阶跃（平安虚假调整/天齐配股滞后为实证缺陷），
-        # 不能作因子唯一来源（§2.2 复核结论）；因子缺失时整段降级 Tushare 保住连续性。
-        # 因子按交易日批量拉取（_fill_factor_cache）：限频 5次/天 → 1 天 1 次全市场。
+        # BaoStock 主源（阶段 3）：OHLCV 与 adj_factor 均走 BaoStock 派生因子，
+        # 经除权一致性守卫校验（虚假/滞后调整拒收，如平安/天齐）才入库。
+        # 守卫拒收 → 抛异常 → 降级 AkShare，保该股单源一致。
+        # 窗口 start−7 天多取一前交易日作守卫上下文，产出时丢弃。
         if baostock_enabled("daily"):
             sess = baostock.get_session()
             if sess is not None:
                 try:
-                    raw, hfq = baostock.daily_pairs(sess, code, start_date, end_date)
+                    start = (date.fromisoformat(str(start_date))
+                             if isinstance(start_date, str) else start_date)
+                    raw, hfq = baostock.daily_pairs(sess, code,
+                                                    start - timedelta(days=7), end_date)
                     if raw.empty:
                         raise RuntimeError(f"{code} BaoStock 未返回数据")
-                    pro = tushare.make_pro(self.db)
-                    if pro is None:
-                        raise RuntimeError(f"{code} 混合模式缺 Tushare 因子源")
                     rows = build_rows(code, raw, hfq)
-                    dates = sorted({str(r["trade_date"]) for r in rows})
-                    _fill_factor_cache(pro, dates)
-                    ts_code = tushare.ts_code(code)
-                    for r in rows:
-                        f = _FACTOR_CACHE.get(str(r["trade_date"]), {}).get(ts_code)
-                        if f is not None:
-                            r["adj_factor"] = round(f, 4)
-                        elif r["volume"]:
-                            # 有成交却缺因子：绝不让 BaoStock 派生因子混入（§2.2），
-                            # 整段降级 Tushare 保因子连续性
-                            raise RuntimeError(
-                                f"{code} {r['trade_date']} 缺 Tushare 因子")
-                    logger.info("%s BaoStock OHLCV + Tushare 因子 %s 条", code, len(rows))
+                    _, ok = guard_factor(rows, window_start=start)
+                    if not ok:
+                        raise RuntimeError(f"{code} BaoStock 复权因子拒收")
+                    rows = [r for r in rows if r["trade_date"] >= start]
+                    logger.info("%s BaoStock 拉取 %s 条日行情", code, len(rows))
                     return rows
                 except Exception as e:
-                    logger.warning("%s BaoStock 混合拉取失败(%s)，降级 Tushare", code, e)
-        # Tushare 主源：daily + adj_factor 一次拉取，失败/空数据降级 AkShare
-        pro = tushare.make_pro(self.db)
-        if pro is not None:
-            try:
-                raw, hfq = tushare.daily_pairs(pro, code, start_date, end_date)
-                if raw.empty:
-                    raise RuntimeError(f"{code} Tushare 未返回数据")
-                rows = build_rows(code, raw, hfq)
-                logger.info("%s Tushare 拉取 %s 条日行情", code, len(rows))
-                return rows
-            except Exception as e:
-                logger.warning("%s Tushare 失败(%s)，降级 AkShare", code, e)
+                    logger.warning("%s BaoStock 拉取失败(%s)，降级 AkShare", code, e)
         start = to_ak_date(start_date)
         end = to_ak_date(end_date)
         # 后复权用于计算复权因子（因子计算用前复权价，此处只需因子比例）
@@ -239,7 +188,7 @@ class DailyCollector(BaseCollector):
 def upsert_daily_rows(db, data: list[dict]) -> int:
     """清洗 + upsert 日行情（按 code 分组，兼容单只与全市场快照批量）
 
-    供 DailyCollector.save 与 tasks 的 Tushare 全市场快照共用。
+    供 DailyCollector.save 与 tasks 逐只同步共用。
     """
     from collections import defaultdict
 

@@ -35,7 +35,6 @@ func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
 	factorStatsSvc := service.NewFactorStatsService(factorRepo)
 	factorSvc := service.NewFactorService(factorRepo)
 	factorTrialSvc := service.NewFactorTrialService(factorSvc, factorRepo)
-	tushareSvc := service.NewTushareConfigService(db)
 	marketSvc := service.NewMarketStatusService(db)
 
 	// 基础路径 /api/v1
@@ -104,11 +103,6 @@ func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
 
 		// 早盘简报（Issue #4）
 		v1.GET("/morning-brief", handler.GetMorningBrief(briefSvc))
-
-		// 数据源配置（Tushare token，页面可改）
-		v1.GET("/config/tushare", handler.GetTushareConfig(tushareSvc))
-		v1.PUT("/config/tushare", handler.UpdateTushareConfig(tushareSvc))
-		v1.POST("/config/tushare/test", handler.TestTushare(tushareSvc))
 
 		// 大模型能力（LLM，云端 API，只读白名单数据入口）
 		v1.GET("/config/llm", handler.GetLLMConfig(llmSvc))

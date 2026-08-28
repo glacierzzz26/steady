@@ -176,6 +176,30 @@ def test_daily_pairs_raw_empty_returns_empty(fake_bs):
     assert raw.empty and hfq.empty
 
 
+def test_daily_pairs_empty_strings_coerced(fake_bs):
+    # 回归：BaoStock 偶发返回空串（如 000066 某批成交量）→ 转 NaN 不崩溃；
+    # 无收盘的坏条丢弃；空成交量行保留为 NaN（cleaner 按停牌语义丢弃）
+    fake_bs.hist_responses = {
+        "3": _rs(["date", "open", "high", "low", "close", "volume", "amount"],
+                 [["2026-08-26", "10.0", "10.5", "9.9", "10.2", "", ""],
+                  ["2026-08-25", "9.8", "10.1", "9.7", "", "1000000", ""],
+                  ["2026-08-24", "9.5", "9.9", "9.4", "9.6", "800000", "7680000"]]),
+        "1": _rs(["date", "close"], [["2026-08-26", "68.9"],
+                                     ["2026-08-25", "66.0"],
+                                     ["2026-08-24", "63.5"]]),
+    }
+    sess = baostock.get_session()
+    raw, hfq = baostock.daily_pairs(sess, "600519", "2026-08-24", "2026-08-26")
+    # 08-25 无收盘坏条被丢弃 → 剩 2 行
+    assert list(raw["日期"]) == ["2026-08-26", "2026-08-24"]
+    # 空成交量/成交额 → NaN（不崩溃）
+    r26 = raw.loc[raw["日期"] == "2026-08-26"].iloc[0]
+    assert pd.isna(r26["成交量"]) and pd.isna(r26["成交额"])
+    # 正常行保留，成交量 股 → 手
+    r24 = raw.loc[raw["日期"] == "2026-08-24"].iloc[0]
+    assert r24["成交量"] == 8000.0 and float(r24["成交额"]) == 7680000.0
+
+
 # ---------- 交易日历 ----------
 
 def test_trade_cal_rows_filters_trading_days(fake_bs):

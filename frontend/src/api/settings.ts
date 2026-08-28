@@ -6,15 +6,9 @@ import type {
   LLMConfigUpdate,
   NotifyConfigData,
   NotifyEvent,
-  TushareConfig,
 } from './types'
 
 export const settingsApi = {
-  // Tushare
-  getTushareConfig: () => http.get<TushareConfig>('/config/tushare'),
-  updateTushareConfig: (token: string) => http.put<{ updated: boolean }>('/config/tushare', { token }),
-  /** token 为空 = 用已存 token 测试 */
-  testTushare: (token: string) => http.post<{ ok: boolean }>('/config/tushare/test', { token }),
   // 通知
   getNotifyConfig: () => http.get<NotifyConfigData>('/notify/config'),
   updateNotifyEvent: (eventKey: string, req: Partial<NotifyEvent>) =>

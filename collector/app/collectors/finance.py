@@ -17,7 +17,7 @@ from app.collectors.base import BaseCollector
 from app.config import baostock_enabled
 from app.db import upsert
 from app.models.tables import FinancialIndicator, StockBasic
-from app.sources import baostock, tushare
+from app.sources import baostock
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ class FinanceCollector(BaseCollector):
         # BaoStock 主源（阶段 2 开关）：BaoStock 财务按股票×报告期逐查，无全市场快照
         # 接口 → 仅逐股（code 提供）的缺口回填/手动同步走 BaoStock；每日 18:00 全市场
         # 快照仍是 AkShare（8 次调用/天），避免 800-5000 只×4 期逐股慢查。
-        # 首个请求失败抛异常 → 触发降级 Tushare → AkShare。
+        # 首个请求失败抛异常 → 触发降级 AkShare。
         if code and baostock_enabled("finance"):
             sess = baostock.get_session()
             if sess is not None:
@@ -117,16 +117,7 @@ class FinanceCollector(BaseCollector):
                     logger.info("%s BaoStock 财务拉取 %s 条", code, len(rows))
                     return rows
                 except Exception as e:
-                    logger.warning("%s BaoStock 财务失败(%s)，降级 Tushare", code, e)
-        # Tushare 主源：fina_indicator 按股票逐期（需 2000+ 积分；首请求失败快速降级）
-        pro = tushare.make_pro(self.db)
-        if pro is not None:
-            try:
-                rows = self._fetch_tushare(pro, periods, code)
-                logger.info("Tushare 财务拉取 %s 条", len(rows))
-                return rows
-            except Exception as e:
-                logger.warning("Tushare 财务失败(%s)，降级 AkShare", e)
+                    logger.warning("%s BaoStock 财务失败(%s)，降级 AkShare", code, e)
         all_rows = []
         for p in periods:
             yjbb = ak.stock_yjbb_em(date=p)
@@ -148,31 +139,6 @@ class FinanceCollector(BaseCollector):
             if row is None:  # 该报告期未披露（新股/财报季前）跳过
                 continue
             all_rows.append(row)
-        return all_rows
-
-    def _fetch_tushare(self, pro, periods: list[str], code: str | None) -> list[dict]:
-        """Tushare 财务：按股票 × 报告期逐查；首请求失败抛异常 → 触发降级
-
-        积分不足时 fina_indicator 首个请求即报错，避免对全市场空转。
-        """
-        from sqlalchemy import select
-
-        if code:
-            codes = [code]
-        else:
-            codes = sorted(
-                self.db.execute(select(StockBasic.code)).scalars().all())
-        all_rows: list[dict] = []
-        first = True
-        for c in codes:
-            for p in periods:
-                try:
-                    all_rows.extend(tushare.fina_indicator_rows(pro, c, p))
-                except Exception as e:
-                    if first:
-                        raise  # 首个请求失败：积分/接口不可用，直接降级 AkShare
-                    logger.warning("%s 报告期 %s Tushare 财务失败: %s", c, p, e)
-                first = False
         return all_rows
 
     def save(self, data):

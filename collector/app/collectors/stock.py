@@ -8,7 +8,7 @@ from app.collectors.base import BaseCollector
 from app.config import baostock_enabled
 from app.db import upsert
 from app.models.tables import StockBasic
-from app.sources import baostock, tushare
+from app.sources import baostock
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,27 @@ def normalize_stock_rows(df) -> list[dict]:
             }
         )
     return rows
+
+
+def fetch_bj_rows() -> list[dict]:
+    """AkShare 北交所列表 → 入库行（BaoStock 无北交所，阶段 3 合并 bj 338 只补全覆盖）。
+
+    复用现有 stock_info_bj_name_code 接口（list_date/industry 由 save 的
+    fetch_list_dates/fetch_industries 补全）；失败仅告警返回空（SH/SZ 仍是主源）。
+    """
+    try:
+        df = ak.stock_info_bj_name_code()
+    except Exception as e:
+        logger.warning("北交所列表拉取失败(%s)，跳过 bj 合并", e)
+        return []
+    if df is None or df.empty:
+        return []
+    bj = pd.DataFrame({
+        "code": [str(r["证券代码"]).zfill(6) for _, r in df.iterrows()],
+        "name": [str(r["证券简称"]).replace(" ", "").replace("　", "")
+                 for _, r in df.iterrows()],
+    })
+    return normalize_stock_rows(bj)
 
 
 def fetch_list_dates() -> dict[str, str]:
@@ -102,8 +123,8 @@ class StockCollector(BaseCollector):
     """从 AkShare 拉取全市场股票列表并入库（含 universe 标记）"""
 
     def fetch(self, *args, **kwargs) -> list[dict]:
-        # BaoStock 主源（阶段 2 开关）：query_stock_basic 全量列表。
-        # 自带 code_name/ipoDate/status，无 industry（留 AkShare 补全，save 不变）。
+        # BaoStock 主源（阶段 3）：SH/SZ 官方列表（自带 code_name/ipoDate/status），
+        # + AkShare bj 合并（BaoStock 无北交所；bj 拉取失败仅告警不失败）。
         if baostock_enabled("stock_basic"):
             sess = baostock.get_session()
             if sess is not None:
@@ -111,24 +132,19 @@ class StockCollector(BaseCollector):
                     rows = baostock.stock_basic_rows(sess)
                     if not rows:
                         raise RuntimeError("BaoStock 股票列表未返回数据")
-                    logger.info("BaoStock 返回股票 %s 只", len(rows))
+                    bj = fetch_bj_rows()
+                    rows += bj
+                    logger.info("BaoStock 返回股票 %s 只（含 bj 合并 %s）",
+                                len(rows), len(bj))
                     return rows
                 except Exception as e:
-                    logger.warning("BaoStock 股票列表失败(%s)，降级 Tushare", e)
-        # Tushare 主源：stock_basic（自带 list_date，省 3 个交易所请求；无则回退）
-        pro = tushare.make_pro(self.db)
-        if pro is not None:
-            try:
-                rows = tushare.stock_basic_rows(pro)
-                if not rows:
-                    raise RuntimeError("Tushare 股票列表未返回数据")
-                logger.info("Tushare 返回股票 %s 只", len(rows))
-                return rows
-            except Exception as e:
-                logger.warning("Tushare 股票列表失败(%s)，降级 AkShare", e)
+                    logger.warning("BaoStock 股票列表失败(%s)，降级 AkShare", e)
+        # AkShare 全量兜底：沪深 A 股 + bj 合并
         df = ak.stock_info_a_code_name()
-        logger.info("AkShare 返回股票 %s 只", len(df))
-        return normalize_stock_rows(df)
+        rows = normalize_stock_rows(df)
+        rows += fetch_bj_rows()
+        logger.info("AkShare 返回股票 %s 只", len(rows))
+        return rows
 
     def save(self, data):
         # 1. UPSERT 全市场股票列表
@@ -162,9 +178,9 @@ class StockCollector(BaseCollector):
         #    与 finance.py 行业回填同理）
         from sqlalchemy import text
 
-        # Tushare 列表自带 list_date 时直接回填；否则走交易所接口补全
-        ts_dates = {r["code"]: r["list_date"] for r in data if r.get("list_date")}
-        dates = ts_dates or fetch_list_dates()
+        # 列表自带 list_date（BaoStock ipoDate）时直接回填；否则走交易所接口补全
+        own_dates = {r["code"]: r["list_date"] for r in data if r.get("list_date")}
+        dates = own_dates or fetch_list_dates()
         if dates:
             self.db.execute(
                 text("UPDATE stock_basic SET list_date = :d WHERE code = :code"),

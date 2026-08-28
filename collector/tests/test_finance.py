@@ -161,13 +161,12 @@ def test_fetch_baostock_branch_code_gated(monkeypatch):
 
 
 def test_fetch_baostock_skipped_without_code(monkeypatch):
-    """未提供 code → 跳过 BaoStock（无全市场快照接口），走 Tushare → AkShare 全市场"""
+    """未提供 code → 跳过 BaoStock（无全市场快照接口），走 AkShare 全市场"""
     called = []
     monkeypatch.setattr(fin_mod, "baostock_enabled", lambda *a, **k: True)
     monkeypatch.setattr(fin_mod.baostock, "get_session", lambda: object())
     monkeypatch.setattr(fin_mod.baostock, "financial_rows",
                         lambda sess, code, year, quarter: called.append(1) or {})
-    monkeypatch.setattr(fin_mod.tushare, "make_pro", lambda db: None)
     monkeypatch.setattr(fin_mod.ak, "stock_yjbb_em", lambda date: make_yjbb())
     monkeypatch.setattr(fin_mod.ak, "stock_zcfz_em", lambda date: make_zcfz())
     rows = FinanceCollector(None).fetch(report_periods=["20260630"])

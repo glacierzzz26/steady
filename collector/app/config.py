@@ -40,11 +40,11 @@ DAILY_SYNC_INTERVAL = _int("COLLECTOR_DAILY_INTERVAL", 1)
 # （曾卡死同步），这里统一兜底；超时抛异常走降级/重试，而非无限等待。
 REQUEST_TIMEOUT = _int("COLLECTOR_REQUEST_TIMEOUT", 15)
 
-# BaoStock 主源开关（阶段 1：dev 开启验证，prod 保持 Tushare 直到对账通过后放行）
+# BaoStock 主源开关（阶段 3：prod 已全源翻 BaoStock，Tushare 依赖已移除）
 BAOSTOCK_ENABLED = os.getenv("BAOSTOCK_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
-# BaoStock 生效的数据源 scope（阶段 2 源级门控，逗号列表）。默认 daily,calendar
-# 保阶段 1 生产行为；生产两波灰度 = 在 env 里逐源追加（第一波 stock_basic,index →
-# 第二波 valuation,finance），代码上线本身不改变生产数据路径。
+# BaoStock 生效的数据源 scope（阶段 3 源级门控，逗号列表）。prod 已全源翻转
+# （daily,calendar,index,valuation,finance,stock_basic）；默认 daily,calendar 供
+# 无 env 的本地/测试路径，代码上线本身不改变生产数据路径。
 BAOSTOCK_SOURCES = [
     s.strip() for s in os.getenv("BAOSTOCK_SOURCES", "daily,calendar").split(",")
     if s.strip()
