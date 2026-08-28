@@ -8,8 +8,15 @@
 - 前复权价：close × adj_factor / 区间最新 adj_factor（对 MA/MACD 的
   0/1 因子数学上等价于原始价，仍按文档口径计算）
 
-持仓演化：从回测内信号历史累计（BUY 加入 / SELL 移除），首日为空集，
-与实盘从 strategy_signal 重建的规则一致。
+持仓演化（holdings_mode，振荡修复对照用）：
+- running（默认，本文件历史行为）：信号运行集——generate_signal 内 BUY 加入 / SELL 移除。
+  与实盘 `_reconstruct_holdings` 语义不同：HOLD 不改持仓，故不忠实复现实盘
+  「719 HOLD → 704 SELL」式隔日振荡（见 振荡修复 backtest 对照）。
+- reconstruct：实盘语义——每日持仓 = 上一信号日 action ∈ {BUY, HOLD} 的代码集合
+  （对应 multi_factor._reconstruct_holdings，含把「未持有等回调 HOLD」误计为持仓的缺陷）。
+- portfolio：修复方向——每日持仓由引擎从真实组合（portfolio.positions）同步，
+  与实盘从 position/trade 表重建真实持仓同口径；成交失败（涨停/资金不足/熔断）
+  不产生幽灵持仓，闭环稳定。
 """
 import logging
 from datetime import date, timedelta
@@ -33,6 +40,17 @@ VALUATION_ASOF_DAYS = 30  # 与 factor_service 同口径
 PRICE_WARMUP_DAYS = 120   # 区间起点前的因子 warmup 窗口（MA20/EMA26）
 
 
+def reconstruct_holdings(prev_actions: dict[str, str]) -> set:
+    """实盘 multi_factor._reconstruct_holdings 同口径（纯函数，便于单测）：
+    持仓 = 上一信号日 action ∈ {BUY, HOLD}。
+
+    缺陷：HOLD 同时含「已持仓且在缓冲带内」与「未持仓等回调」，把后者误计为持仓
+    → mass-HOLD 日后次日 holdings 虚高（≈ 全池）→ mass-SELL。backtest 对照
+    （scripts/compare_holdings_modes.py）实证 53959 条幻影 SELL 信号。
+    """
+    return {c for c, a in prev_actions.items() if a in ("BUY", "HOLD")}
+
+
 class ReplayStrategy:
     """回测用策略：一次 preload 全部因子序列，逐日生成信号"""
 
@@ -52,7 +70,9 @@ class ReplayStrategy:
         self.stop_loss_pct = config.get("stop_loss_pct", 0.0)
         self.drawdown_fuse_pct = config.get("drawdown_fuse_pct", 0.0)
         self.industry_limit_pct = config.get("industry_limit_pct", 0.0)
+        self.holdings_mode = config.get("holdings_mode", "running")  # running/reconstruct/portfolio
         self.holdings: set = set()
+        self._prev_signal_actions: dict[str, str] = {}  # reconstruct 模式：上一信号日 {code: action}
         self.pool: list[str] = []
         self.industry: dict[str, str] = {}  # {code: industry}，行业集中度用
         # 预计算数据：{code: {dates: np.ndarray(日期), factors: np.ndarray(n×6),
@@ -226,6 +246,8 @@ class ReplayStrategy:
                 if v == v and not np.isnan(v):  # NaN 不参与横截面
                     self._raw[f][code] = float(v)
         self._date = td
+        if self.holdings_mode == "reconstruct":
+            self.holdings = reconstruct_holdings(self._prev_signal_actions)
 
     def calculate(self) -> pd.DataFrame:
         norm = {
@@ -243,18 +265,24 @@ class ReplayStrategy:
             return []
         n = len(self.data)
         signals: list[Signal] = []
+        actions: dict[str, str] = {}
         for code, row in self.data.iterrows():
             rank = int(row["rank"])
             held = code in self.holdings
             action = rotation_action(rank, held, self.buy_buffer, self.sell_buffer)
-            if action == "BUY":
-                self.holdings.add(code)
-            elif action == "SELL":
-                self.holdings.discard(code)
+            actions[code] = action
+            if self.holdings_mode == "running":
+                # 历史行为：信号生成即更新运行集（当日循环内后续 code 可见）
+                if action == "BUY":
+                    self.holdings.add(code)
+                elif action == "SELL":
+                    self.holdings.discard(code)
             signals.append(Signal(
                 code=code, score=round(float(row["score"]), 2),
                 action=action,
                 reason=f"回测排名 {rank}/{n}，评分 {row['score']:.1f}"))
+        # reconstruct 模式供次日 prepare 重建持仓；portfolio 模式由引擎同步、此处忽略
+        self._prev_signal_actions = actions
         return signals
 
     def run(self, trade_date: str):

@@ -221,6 +221,11 @@ class BacktestEngine:
             if self.fill_mode == "t1_open":
                 # 先执行昨日（T-1 收盘生成的）信号：今日开盘价成交，无未来函数
                 self._execute_pending(date)
+            if getattr(self.strategy, "holdings_mode", None) == "portfolio":
+                # 真实持仓重建（修复方向）：策略持仓 = 引擎实际组合持仓。
+                # 此时已执行昨日 pending（t1_open）/ 前日成交（t_close），且止损/熔断
+                # 已扫过 → 持仓反映真实成交结果，成交失败不产生幽灵持仓。
+                self.strategy.holdings = set(self.portfolio.positions.keys())
             signals = self.strategy.run(date)
             if self.fill_mode == "t1_open":
                 # T 日信号仅暂存，T+1 开盘执行；末日在窗口外，天然不成交
