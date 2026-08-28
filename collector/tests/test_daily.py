@@ -74,6 +74,163 @@ def test_fetch_calls_both_adjusts(monkeypatch):
     assert len(rows) == 3
 
 
+def make_601155_glitch():
+    """东财 601155 假缩股型：adj 1.5807→0.0762（step−95.2%），close 11.83→157.40
+    （gap−92.5%）——step−gap 仅 2.7pp 落在守卫大阶跃容差内，靠交叉验证拦截"""
+    raw = pd.DataFrame({
+        "日期": ["2026-08-01", "2026-08-02"],
+        "开盘": [11.83, 157.40], "最高": [12.0, 161.35],
+        "最低": [11.7, 156.56], "收盘": [11.83, 157.40],
+        "成交量": [229948, 291937], "成交额": [2.7e8, 4.63e9],
+    })
+    hfq = pd.DataFrame({"日期": ["2026-08-01", "2026-08-02"],
+                        "收盘": [18.699, 12.00]})
+    return raw, hfq
+
+
+def test_akshare_fetch_window_includes_context(monkeypatch):
+    """阶段 4 加守：AkShare 拉取窗口扩到 start−7 天（守卫上下文）"""
+    calls = []
+
+    def fake_pair(code, start, end):
+        calls.append((start, end))
+        return (make_hist(start="2026-08-10"),
+                make_hist(closes=(62.6, 65.73, 68.86), start="2026-08-10"))
+
+    monkeypatch.setattr(daily_mod, "fetch_pair", fake_pair)
+    rows = DailyCollector(None).fetch("600519", "2026-08-10", "2026-08-20")
+    assert calls == [("20260803", "20260820")]  # start−7 天
+    assert len(rows) == 3  # 上下文行被过滤，window 内 3 行全保留
+
+
+def test_akshare_guard_reject_falls_to_baostock(monkeypatch):
+    """阶段 4 加守：AkShare 主源因子阶跃不符价格（平安型 step+16.7% 反涨）→
+    守卫拒收 → 降级 BaoStock 兜底"""
+    from datetime import date
+
+    monkeypatch.setattr(daily_mod, "baostock_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(daily_mod.baostock, "get_session", lambda: object())
+
+    def fake_hist(symbol, period, start_date, end_date, adjust):
+        if adjust == "":
+            return pd.DataFrame({
+                "日期": ["2026-08-01", "2026-08-02"],
+                "开盘": [10.0, 10.5], "最高": [10.5, 11.0], "最低": [9.5, 10.0],
+                "收盘": [10.0, 10.5], "成交量": [10000, 12000], "成交额": [1e8, 1.2e8],
+            })
+        return pd.DataFrame({"日期": ["2026-08-01", "2026-08-02"],
+                             "收盘": [20.0, 24.507]})  # adj 2.0 → 2.334
+
+    monkeypatch.setattr(daily_mod.ak, "stock_zh_a_hist", fake_hist)
+    monkeypatch.setattr(daily_mod.baostock, "daily_pairs",
+                        lambda sess, code, s, e: (make_hist(), make_hist(closes=(62.6, 65.73, 68.86))))
+    rows = DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
+    # AkShare 守卫拒收 → 落到 BaoStock（恒因子 6.26）
+    assert len(rows) == 3
+    assert all(r["adj_factor"] == 6.26 for r in rows)
+
+
+def test_akshare_split_glitch_cross_check_falls_to_baostock(monkeypatch):
+    """阶段 4 加守：东财假缩股（601155 型，守卫放行但 AkShare/BaoStock 因子比值断裂）
+    → 交叉验证拒收 → 降级 BaoStock 兜底"""
+    from datetime import date
+
+    monkeypatch.setattr(daily_mod, "baostock_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(daily_mod.baostock, "get_session", lambda: object())
+    monkeypatch.setattr(daily_mod.ak, "stock_zh_a_hist",
+                        lambda symbol, period, start_date, end_date, adjust: make_601155_glitch()[0 if adjust == "" else 1])
+
+    def fake_bs_pairs(sess, code, s, e):
+        s = s if isinstance(s, date) else date.fromisoformat(str(s))
+        if s >= date(2026, 8, 1):
+            # 交叉验证段：BaoStock 无该缩股事件（因子恒 ~1.5797）
+            raw = pd.DataFrame({
+                "日期": ["2026-08-01", "2026-08-02"],
+                "开盘": [11.83, 11.99], "最高": [12.0, 12.1], "最低": [11.7, 11.85],
+                "收盘": [11.83, 11.99], "成交量": [10000, 12000], "成交额": [1.18e8, 1.44e8],
+            })
+            hfq = pd.DataFrame({"日期": ["2026-08-01", "2026-08-02"],
+                                "收盘": [18.699, 18.94]})
+            return raw, hfq
+        # _fetch_baostock 兜底段：整窗恒因子 6.26
+        return make_hist(), make_hist(closes=(62.6, 65.73, 68.86))
+
+    monkeypatch.setattr(daily_mod.baostock, "daily_pairs", fake_bs_pairs)
+    rows = DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
+    # 交叉验证拒收 → 落到 BaoStock（恒因子 6.26），不落东财假缩股
+    assert len(rows) == 3
+    assert all(r["adj_factor"] == 6.26 for r in rows)
+
+
+def test_akshare_legit_split_passes_no_fallback(monkeypatch):
+    """合法除权（2:1 送转）：AkShare 因子与价格同步变动 → 守卫放行 + 交叉验证比值
+    恒常 → 不兜底，返回 AkShare 数据"""
+    from datetime import date
+
+    monkeypatch.setattr(daily_mod, "baostock_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(daily_mod.baostock, "get_session", lambda: object())
+
+    def fake_hist(symbol, period, start_date, end_date, adjust):
+        if adjust == "":
+            return pd.DataFrame({
+                "日期": ["2026-08-01", "2026-08-02"],
+                "开盘": [10.0, 20.0], "最高": [10.5, 21.0], "最低": [9.5, 19.0],
+                "收盘": [10.0, 20.0], "成交量": [10000, 5000], "成交额": [1e8, 1e9],
+            })
+        return pd.DataFrame({"日期": ["2026-08-01", "2026-08-02"],
+                             "收盘": [20.0, 20.0]})  # adj 2.0 → 1.0（2:1 送转）
+
+    monkeypatch.setattr(daily_mod.ak, "stock_zh_a_hist", fake_hist)
+
+    def fake_bs_pairs(sess, code, s, e):
+        s = s if isinstance(s, date) else date.fromisoformat(str(s))
+        if s >= date(2026, 8, 1):
+            # BaoStock 确认同一送转（比值恒常）
+            raw = pd.DataFrame({
+                "日期": ["2026-08-01", "2026-08-02"],
+                "开盘": [10.0, 20.0], "最高": [10.5, 21.0], "最低": [9.5, 19.0],
+                "收盘": [10.0, 20.0], "成交量": [10000, 5000], "成交额": [1e8, 1e9],
+            })
+            hfq = pd.DataFrame({"日期": ["2026-08-01", "2026-08-02"], "收盘": [20.0, 20.0]})
+            return raw, hfq
+        return make_hist(), make_hist(closes=(62.6, 65.73, 68.86))  # 若兜底会变成 6.26
+
+    monkeypatch.setattr(daily_mod.baostock, "daily_pairs", fake_bs_pairs)
+    rows = DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
+    # AkShare 合法除权数据直接返回（因子 2.0 → 1.0，未兜底）
+    assert [r["adj_factor"] for r in rows] == [2.0, 1.0]
+
+
+def test_akshare_no_split_no_cross_check(monkeypatch):
+    """无因子阶跃（>7%）→ 不触发交叉验证，BaoStock 完全不触碰"""
+    monkeypatch.setattr(daily_mod, "baostock_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(daily_mod.ak, "stock_zh_a_hist",
+                        lambda symbol, period, start_date, end_date, adjust:
+                        make_hist() if adjust == "" else make_hist(closes=(62.6, 65.73, 68.86)))
+
+    def boom(*a, **k):
+        raise AssertionError("不应触碰 BaoStock（无除权日）")
+
+    monkeypatch.setattr(daily_mod.baostock, "get_session", boom)
+    rows = DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
+    assert len(rows) == 3
+    assert all(r["adj_factor"] == 6.26 for r in rows)
+
+
+def test_akshare_cross_check_skips_when_baostock_down(monkeypatch):
+    """潜在除权日但 BaoStock 不可用（封禁/未装）→ 交叉验证跳过，不误伤，接受 AkShare"""
+    monkeypatch.setattr(daily_mod, "baostock_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(daily_mod.ak, "stock_zh_a_hist",
+                        lambda symbol, period, start_date, end_date, adjust:
+                        make_601155_glitch()[0 if adjust == "" else 1])
+    monkeypatch.setattr(daily_mod.baostock, "get_session",
+                        lambda: (_ for _ in ()).throw(RuntimeError("BaoStock 封禁冷却中")))
+    rows = DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
+    # BaoStock 不可用 → 交叉验证跳过，AkShare 数据（守卫放行）照常返回
+    assert len(rows) == 2
+    assert rows[1]["adj_factor"] == 0.0762
+
+
 def test_akshare_primary_skips_baostock(monkeypatch):
     """阶段 4 主源锁定：AkShare 成功 → BaoStock daily_pairs 不被调用"""
     monkeypatch.setattr(daily_mod, "baostock_enabled", lambda *a, **k: True)

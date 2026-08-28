@@ -7,6 +7,13 @@
 （平安/天齐型虚假/滞后调整，见 docs/phase2/design/数据源评估-BaoStock.md §2.2）→ 抛异常
 触发 base.run 重试（重跑 AkShare 主源），BaoStock 坏因子不进库。
 
+阶段 4 加守（08-28 601155 东财假缩股教训）：**AkShare 主源同样过守卫**（window 内
+判定），并在**潜在除权日**（因子单日阶跃 > 7%，即送转/拆合股日）用 BaoStock 交叉
+验证因子比值恒常——东财"假缩股"（601155：step−gap 2.7pp 落在守卫 47.6% 容差内
+通过守卫，但 AkShare/BaoStock 因子比值 1.0006→0.0482 断裂）当场拒收，降级 BaoStock。
+合法除权日两源因子同变，比值恒常放行；BaoStock 不可用（未装/封禁冷却）时跳过交叉
+验证（守卫已兜小阶跃），不误伤合法除权日。
+
 窗口拉取 start−7 天：多取一前交易日作守卫上下文（判 window 首行的边界因子对），
 产出时丢弃（trade_date < start 的行不入库）。
 
@@ -20,7 +27,7 @@ import pandas as pd
 
 from app.collectors.base import BaseCollector, to_ak_date, with_timeout
 from app.cleaners import clean_daily_rows
-from app.cleaners.factor_guard import guard_factor
+from app.cleaners.factor_guard import factor_change_pairs, guard_factor
 from app.config import baostock_enabled
 from app.db import upsert
 from app.models.tables import DailyPrice
@@ -126,13 +133,68 @@ def build_rows(code: str, raw: pd.DataFrame, hfq: pd.DataFrame) -> list[dict]:
     return rows
 
 
+# 潜在除权日触发交叉验证的因子阶跃下限：>7% 视为送转/拆合股日（年度分红 0.5-2% 不触发）
+_SPLIT_STEP_MIN = 0.07
+# 交叉验证比值漂移上限（ak_factor/bs_factor 应跨日恒常，锚点抵消）
+_CROSS_RATIO_TOL = 0.005
+
+
+def cross_check_splits(code: str, rows: list[dict], window_start) -> None:
+    """潜在除权日（因子阶跃>7%）BaoStock 交叉验证 → 比值断裂即抛异常。
+
+    AkShare 主源数据过了 guard_factor 也可能混入"假缩股"（东财 601155 型：因子
+    阶跃 20× 但价格只动 13×，step−gap 2.7pp 落在守卫大阶跃容差 47.6% 内放行）。
+    此处对 window 内首个因子阶跃 > 7% 的日期对，取 BaoStock 同段因子，验证
+    ak_factor/bs_factor 比值跨日恒常；断裂 → 抛异常 → fetch() 落 BaoStock 兜底。
+    合法除权日两源因子同变、比值恒常放行；BaoStock 不可用（未装/封禁冷却/拉取失败）
+    → 跳过，不误伤合法除权日（守卫已兜小阶跃异常）。
+    """
+    if not baostock_enabled("daily"):
+        return
+    pair = None
+    for d1, f1, c1, d2, f2, c2 in factor_change_pairs(rows):
+        if window_start is not None and d2 < window_start:
+            continue
+        if f1 > 0 and f2 > 0 and abs(f2 / f1 - 1) > _SPLIT_STEP_MIN:
+            pair = (d1, d2)
+            break
+    if pair is None:
+        return
+    d1, d2 = pair
+    try:
+        sess = baostock.get_session()
+        if sess is None:
+            return
+        bs_raw, bs_hfq = baostock.daily_pairs(sess, code, d1, d2)
+    except Exception as e:
+        logger.warning("%s 除权交叉验证跳过（BaoStock 不可用：%s）", code, e)
+        return
+    if bs_raw.empty:
+        return
+    bs_rows = build_rows(code, bs_raw, bs_hfq)
+    bs_f = {r["trade_date"]: r["adj_factor"] for r in bs_rows if r.get("adj_factor")}
+    ak_f = {r["trade_date"]: r["adj_factor"] for r in rows if r.get("adj_factor")}
+    common = [d for d in (d1, d2) if d in bs_f and d in ak_f]
+    if len(common) < 2:
+        return  # 无法比对（某日因子缺失）
+    base = ak_f[common[0]] / bs_f[common[0]]
+    for d in common[1:]:
+        ratio = ak_f[d] / bs_f[d]
+        if abs(ratio / base - 1) > _CROSS_RATIO_TOL:
+            logger.warning(
+                "复权因子交叉验证拒收 %s %s→%s：AkShare 因子与 BaoStock 分歧"
+                "（比值 %.4f→%.4f），疑似东财假除权", code, d1, d2, base, ratio)
+            raise RuntimeError(f"{code} AkShare 复权因子与 BaoStock 分歧")
+
+
 class DailyCollector(BaseCollector):
     """按股票代码拉取日K行情，经质量校验后入库"""
 
     def fetch(self, code: str, start_date, end_date, *args, **kwargs) -> list[dict]:
-        # 阶段 4：AkShare 主源（fetch_pair 内部链：东财 → 新浪）；失败且源链含
-        # BaoStock → BaoStock 兜底（守卫只对 BaoStock 数据跑）。链内无 BaoStock
-        # 则 raise，触发 base.run 重试，不静默成功。
+        # 阶段 4：AkShare 主源（fetch_pair 内部链：东财 → 新浪）；AkShare 数据过
+        # guard_factor + 除权交叉验证，失败/拒收且源链含 BaoStock → BaoStock 兜底
+        # （兜底数据同样过守卫）。链内无 BaoStock 则 raise，触发 base.run 重试，
+        # 不静默成功。
         try:
             return self._fetch_akshare(code, start_date, end_date)
         except Exception as e:
@@ -142,11 +204,21 @@ class DailyCollector(BaseCollector):
         return self._fetch_baostock(code, start_date, end_date)
 
     def _fetch_akshare(self, code: str, start_date, end_date) -> list[dict]:
-        start = to_ak_date(start_date)
+        start_d = (date.fromisoformat(str(start_date))
+                   if isinstance(start_date, str) else start_date)
+        # 守卫上下文：多取 start−7 天（判 window 首行边界因子对），产出时丢弃
+        start = to_ak_date(start_d - timedelta(days=7))
         end = to_ak_date(end_date)
         # 后复权用于计算复权因子（因子计算用前复权价，此处只需因子比例）
         raw, hfq = fetch_pair(code, start, end)
         rows = build_rows(code, raw, hfq)
+        # 阶段 4 加守：AkShare 主源同样过守卫；潜在除权日再做 BaoStock 交叉验证
+        if rows:
+            _, ok = guard_factor(rows, window_start=start_d)
+            if not ok:
+                raise RuntimeError(f"{code} AkShare 复权因子守卫拒收")
+            cross_check_splits(code, rows, start_d)
+        rows = [r for r in rows if r["trade_date"] >= start_d]
         logger.info("%s AkShare 拉取 %s 条日行情", code, len(rows))
         return rows
 

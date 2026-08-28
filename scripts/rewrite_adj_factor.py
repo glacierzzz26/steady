@@ -1,4 +1,5 @@
-"""阶段 3：adj_factor 全史重写为 BaoStock 派生因子（真异常股保留 DB 既有 Tushare 值）
+"""阶段 3/4：adj_factor 全史重写为 AkShare 派生因子（东财→新浪主源，BaoStock 兜底；
+真异常股保留 DB 既有值）
 
 用法（仓库根目录，依赖 collector 的 Python 环境 + DB 凭据）：
     DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=quant DB_PASSWORD=... \
@@ -10,17 +11,20 @@
 因子时显式传 --start 1990-01-01。
 
 对股票池（universe in hs300/zz500，默认全池）逐股：
-  1. BaoStock daily_pairs（start→end）→ build_rows → guard_factor（区间内判定）；
-  2. 比值对账（DB 既有因子 / BaoStock 派生因子，应恒为常数，锚点抵消）+ DB 因子自洽校验：
+  1. AkShare fetch_pair（东财→新浪主源，失败 BaoStock 兜底）（start→end）
+     → build_rows → guard_factor（区间内判定）；
+  2. 比值对账（DB 既有因子 / 源派生因子，应恒为常数，锚点抵消）+ DB 因子自洽校验：
      - guard 通过 + 比值 ≤0.5% 或 无 DB 因子可比对 → 接受 → upsert 覆盖（只动因子列）；
      - guard 通过 + 比值漂移 >0.5% + DB 因子自洽（阶跃对应价格跳空）→ 跨源口径分歧
        （如 000002 万科 1.96%）→ 保留 DB 既有值；
      - guard 通过 + 比值漂移 >0.5% + DB 因子不自洽 → **DB 侧虚假调整**
-       （如 601699 2026-08-26 单日因子骤降 17% 价格反涨，Tushare glitch）→ 判定改写 BaoStock；
+       （如 601699 2026-08-26 单日因子骤降 17% 价格反涨，Tushare glitch）→ 判定改写源值；
      - guard 拒收 + 比值一致 → 守卫误伤（纯大跌日无除权，step≈gap 被 7% 下限误伤，
-       如 000009 2021-08-26）→ 判定可重写（两源一致，写 BaoStock 等价安全）；
+       如 000009 2021-08-26）→ 判定可重写（两源一致，写源值等价安全）；
      - guard 拒收 + 比值漂移 → 真异常（平安 2020-12-31 / 天齐 2020-01-02 虚假/滞后
-       调整）→ 保留 DB 既有 Tushare 正确值。
+       调整）→ 保留 DB 既有正确值。
+  601155 型（东财假缩股，guard 大阶跃容差放行但 DB↔源比值断裂）→ 比值漂移 + DB 自洽
+  → 保留 DB（08-28 手工校准值），不落东财假因子。
 
 原则：接受集 per-stock 单源一致（比值口径锚点抵消，历史跨切换日无假跳变）；
 真异常/漂移股保留既有值——两集各自内部一致，无跨源混用（设计文档 §2.2 连续性要求）。
@@ -43,10 +47,10 @@ def _parse_date(s: str) -> date:
 def classify(ok: bool, db_ok: bool, drift: bool, ratios: bool) -> str:
     """对账分类（纯函数，便于测试；test_rewrite_adj_factor.py 单测）。
 
-    ok:    BaoStock 派生因子 guard 是否通过（guard 判据 = 因子阶跃须对应价格跳空）；
+    ok:    源派生因子（AkShare/BaoStock）guard 是否通过（判据 = 因子阶跃须对应价格跳空）；
     db_ok: DB 既有因子对 DB 既有价格的自洽校验结果（同 guard，独立跑在 DB 行上）；
-    drift: DB↔BaoStock 比值漂移 >0.5%（drift=True 隐含 ratios 非空）；
-    ratios: 是否有可比对的 DB/BaoStock 重叠因子行。
+    drift: DB↔源比值漂移 >0.5%（drift=True 隐含 ratios 非空）；
+    ratios: 是否有可比对的 DB/源重叠因子行。
 
     返回分类键：
       accepted    → 可重写（guard 通过 + 比值一致，或填补 NULL）；
@@ -75,21 +79,40 @@ def main():
                     help="对账：比值偏差 ≤0.5%% 分类输出（隐含不写库）")
     ap.add_argument("--limit", type=int, default=None, help="只处理前 N 只（试跑）")
     ap.add_argument("--sleep", type=float, default=0.0,
-                    help="每只间 sleep 秒数（限频；BaoStock 免费源并发/突发过载会触发"
+                    help="每只间 sleep 秒数（限频；免费源并发/突发过载会触发"
                          "黑名单 10001011，全量重跑建议 0.2-0.5，配合低并发分片）")
     args = ap.parse_args()
 
     from app.db import get_session, upsert
     from app.models.tables import DailyPrice
     from app.sources import baostock
-    from app.collectors.daily import build_rows
+    from app.collectors.base import to_ak_date
+    from app.collectors.daily import build_rows, fetch_pair
     from app.cleaners.factor_guard import guard_factor
     from sqlalchemy import text
 
     db = get_session()
-    sess = baostock.get_session()
-    if sess is None:
-        raise SystemExit("BaoStock 不可用（baostock 未安装或登录失败）")
+
+    def fetch_source_rows(code):
+        """AkShare 主源（东财→新浪）→ BaoStock 兜底 → build_rows 行列表。
+        双源均失败返回 None；源返回空返回 []。"""
+        try:
+            raw, hfq = fetch_pair(code, to_ak_date(args.start), to_ak_date(args.end))
+            if not raw.empty:
+                return build_rows(code, raw, hfq)
+        except Exception as e:
+            print(f"  {code} AkShare 拉取异常({e})，尝试 BaoStock 兜底")
+        try:
+            sess = baostock.get_session()
+            if sess is None:
+                return None
+            raw, hfq = baostock.daily_pairs(sess, code, args.start, args.end)
+        except Exception as e:
+            print(f"  {code} BaoStock 兜底也失败({e})")
+            return None
+        if raw.empty:
+            return []
+        return build_rows(code, raw, hfq)
 
     if args.codes:
         codes = [c.strip() for c in args.codes.split(",") if c.strip()]
@@ -106,31 +129,29 @@ def main():
     consec_fail = 0
     for i, code in enumerate(codes, 1):
         if args.sleep and i > 1:
-            time.sleep(args.sleep)  # 逐股限频：免费 BaoStock 源并发/突发过载会封禁
-        # 单股拉取容错：BaoStock 偶发网络抖动/连接级失败 → 跳过该股不整片崩溃；
-        # 连续 3 只失败判定连接故障，中止本片（避免逐股各耗 60s 超时×重试空转）
-        try:
-            raw, hfq = baostock.daily_pairs(sess, code, args.start, args.end)
-            consec_fail = 0
-        except Exception as e:
+            time.sleep(args.sleep)  # 逐股限频：免费源并发/突发过载会封禁
+        # 单股拉取容错：双源（AkShare/BaoStock）偶发网络抖动/连接级失败 → 跳过该股
+        # 不整片崩溃；连续 3 只失败判定连接故障，中止本片（避免逐股空转）
+        rows = fetch_source_rows(code)
+        if rows is None:
             consec_fail += 1
             failed.append(code)
-            print(f"[{i}/{len(codes)}] {code} ⚠️ BaoStock 拉取异常({e})，跳过待重试")
+            print(f"[{i}/{len(codes)}] {code} ⚠️ 双源拉取异常，跳过待重试")
             if consec_fail >= 3:
-                print(f"连续 {consec_fail} 只 BaoStock 异常，判定连接故障，中止本片（余下待重跑）")
+                print(f"连续 {consec_fail} 只拉取异常，判定连接故障，中止本片（余下待重跑）")
                 break
             continue
-        if raw.empty:
+        consec_fail = 0
+        if not rows:
             skipped += 1
             print(f"[{i}/{len(codes)}] {code} 无数据，跳过")
             continue
-        rows = build_rows(code, raw, hfq)
         _, ok = guard_factor(rows)
-        # 比值对账（对账/重写共用）：DB 既有因子 / BaoStock 派生因子应全史恒定
+        # 比值对账（对账/重写共用）：DB 既有因子 / 源派生因子应全史恒定
         # （锚点抵消；两源因子相对各自基期，同一除权事件下比值恒为一常数）。
         # 另取 DB close 跑 DB 侧自洽校验：DB 因子阶跃须对应 DB 价格跳空——比值漂移时
         # 据此区分「跨源口径分歧」（DB 自洽 → 保留，如 000002）vs「DB 侧虚假调整」
-        # （DB 不自洽，如 601699 2026-08-26 Tushare 单日 glitch → 改写 BaoStock）。
+        # （DB 不自洽，如 601699 2026-08-26 Tushare 单日 glitch → 改写源值）。
         db_rows_raw = db.execute(text(
             "SELECT trade_date, adj_factor, close FROM daily_price "
             "WHERE code = :c AND adj_factor IS NOT NULL").bindparams(c=code)).all()
@@ -165,7 +186,7 @@ def main():
             elif bucket == "db_anomaly":
                 db_anomaly.append(code)
                 print(f"[{i}/{len(codes)}] {code} ⚠️ 比值漂移 {max_dev:.3%} 且 DB 因子自洽校验失败"
-                      f"（{len(ratios)} 行可比，DB 侧虚假调整）→ 判定改写 BaoStock")
+                      f"（{len(ratios)} 行可比，DB 侧虚假调整）→ 判定改写源值")
             elif bucket == "drifted":
                 drifted.append(code)
                 print(f"[{i}/{len(codes)}] {code} ⚠️ 比值漂移 {max_dev:.3%}"
@@ -179,7 +200,7 @@ def main():
                       f"（{len(ratios)} 行因子，比值偏差 ≤{max_dev:.3%}）")
             continue
         # 重写模式：真异常（guard 拒收）/ 跨源口径分歧（drift + DB 自洽）→ 跳过保留 DB；
-        # 其余（接受 / 守卫误伤 / DB 侧异常）→ 写 BaoStock 派生因子
+        # 其余（接受 / 守卫误伤 / DB 侧异常）→ 写源派生因子
         if bucket in ("rejected", "drifted"):
             bucket_list = rejected if bucket == "rejected" else drifted
             bucket_list.append(code)
@@ -222,7 +243,7 @@ def main():
         print("\n========== 重写结果 ==========")
         print(f"改写 {len(accepted) + len(false_pos) + len(db_anomaly)} 只"
               f"（接受 {len(accepted)} + 误伤 {len(false_pos)} + DB 异常 {len(db_anomaly)}）"
-              f"→ adj_factor 切换为 BaoStock 派生")
+              f"→ adj_factor 切换为 AkShare 派生")
         print(f"拒收 {len(rejected)} 只 → 保留 DB 既有 Tushare 值：{rejected}")
         print(f"比值漂移 {len(drifted)} 只 → 保留 DB 既有值：{drifted}")
         print(f"跳过 {skipped} 只（无数据）")
