@@ -16,7 +16,7 @@
 五个服务，单机 docker-compose 部署（不上 k8s）。服务之间不互相调 HTTP，**PostgreSQL 是唯一通信中枢**；只有 nginx 暴露 `:80`，其余容器全绑定 `127.0.0.1`（API 无鉴权，靠"内网 + 单入口"兜底）。
 
 ```
-  A股数据源 (Tushare 主源 + AkShare 兜底)
+  A股数据源 (BaoStock 主源 + AkShare 兜底)
         │
         ▼
 ┌──────────────┐   写     ┌─────────────────────────┐
@@ -42,7 +42,7 @@
 
 | 服务 | 语言 | 职责 |
 |---|---|---|
-| `collector` | Python | 采集行情/财务/估值/日历（Tushare 主源 + AkShare 兜底） |
+| `collector` | Python | 采集行情/财务/估值/日历（BaoStock 主源 + AkShare 兜底） |
 | `quant-engine` | Python | 因子 → 信号 → 回测 → 早报 → 飞书通知 |
 | `backend` | Go | REST API + 模拟交易（下单/持仓/净值/对账）+ LLM + 每日调度 |
 | `frontend` | React 18 + TS + Vite + ECharts | 深色终端风 Dashboard（已接入真实 API） |
@@ -54,7 +54,7 @@
 
 ```
 ├── backend/          # Go 后端（API + 模拟交易 + 每日调度，单进程）
-├── collector/        # Python 数据采集（Tushare 主源 + AkShare 兜底）
+├── collector/        # Python 数据采集（BaoStock 主源 + AkShare 兜底）
 ├── quant-engine/     # Python 量化引擎（因子/信号/回测/通知）
 ├── frontend/         # 前端 v2（React + TS + Vite + ECharts）
 ├── deploy/           # Docker Compose、DDL、Nginx 配置、发布产物（release/）
@@ -103,6 +103,7 @@ docker compose -f deploy/docker-compose.yml up -d postgres   # 只起数据库
 
 | 文档 | 内容 |
 |---|---|
+| [docs/系统手册.md](docs/系统手册.md) | **详细说明书**：14 页前端逐个怎么用 + 四层代码架构 + 数据流/定时任务/部署/配置 |
 | [docs/项目详解.md](docs/项目详解.md) | 写给项目主人的完整说明：自动买入原理、因子打分、每日数据流 |
 | [docs/进度总表.md](docs/进度总表.md) | 全项目唯一的阶段索引（各阶段归档 + 设计定稿清单） |
 | [docs/优化路线图.md](docs/优化路线图.md) | 迭代路线图与待办 |
@@ -110,4 +111,4 @@ docker compose -f deploy/docker-compose.yml up -d postgres   # 只起数据库
 
 ## 开发路线
 
-当前进度详见 [docs/进度总表.md](docs/进度总表.md)。已完成并归档：搭框架、部署上线、数据源稳定化（Tushare 主源）、飞书通知、可靠性与对账、LLM 集成、回测可信度校准、策略与风控。当前处于**第二阶段**：frontend-v2 已接入真实 API（9 页），G1~G8 后端补齐与参数寻优等按路线图推进中。
+当前进度详见 [docs/进度总表.md](docs/进度总表.md)。已完成并归档：搭框架、部署上线、数据源稳定化（BaoStock 主源迁移，阶段 1~3 去 Tushare）、飞书通知、可靠性与对账、LLM 集成、回测可信度校准、策略与风控、因子研究闭环。当前处于**第二阶段收尾**：frontend-v2 已接入真实 API（14 页），G1~G8 缺口已补齐，G6 外盘层与策略振荡修复等按路线图推进中。

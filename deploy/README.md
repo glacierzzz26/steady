@@ -105,4 +105,4 @@ gunzip -c backup/quant_system_YYYYMMDD_HHMMSS.sql.gz | \
 - **仅内网**：路由器不要给 22/80 做端口转发；SSH 密钥登录、禁密码/root。
 - Docker 发布的端口不走 ufw（走 FORWARD 链），nginx:80 的边界靠 compose 绑定：默认 `80:80`（NAT 内网下即仅内网可达）；要更严格可在 `.env` 设 `HOST_LAN_IP=<内网IP>` 绑定单 IP，或保持 `127.0.0.1` + SSH 隧道。
 - backend / postgres / frontend 全部绑定 `127.0.0.1`（API 无鉴权，绝不直接暴露）。
-- `.env` 只存数据库凭据，chmod 600；业务配置（飞书/Tushare 等）全走设置页 → `app_config` 表。
+- `.env` 只存数据库凭据 + 数据源开关，chmod 600；业务配置（飞书/LLM 等）全走设置页 → `app_config` 表（Tushare token 配置面已随阶段 3 移除）。
