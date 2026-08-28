@@ -1,7 +1,9 @@
 """日度估值采集器：东财 stock_value_em（PE(TTM)/PE(静)/PB/市值）
 
-接口单次返回全历史（约 2018 年至今，逐日一行），无日期参数，
-故全量拉取 + upsert 幂等；PE/PB 缺失（停牌/亏损无值）原样存 NULL，
+数据源（阶段 4 起）：**AkShare 主源**——东财 stock_value_em 单次返回全历史
+（约 2018 年至今，逐日一行），无日期参数，故全量拉取 + upsert 幂等；失败且
+`baostock_enabled("valuation")` → **BaoStock 兜底**（保留"当日未出 → raise"回退，
+BaoStock 当日约 18:00 后才出）。PE/PB 缺失（停牌/亏损无值）原样存 NULL，
 正负值判断留给因子计算侧（pe<=0 不参与价值横截面）。
 """
 import logging
@@ -10,7 +12,7 @@ from datetime import date, timedelta
 import akshare as ak
 import pandas as pd
 
-from app.collectors.base import BaseCollector
+from app.collectors.base import BaseCollector, with_timeout
 from app.config import baostock_enabled
 from app.db import upsert
 from app.models.tables import DailyValuation
@@ -52,28 +54,36 @@ class ValuationCollector(BaseCollector):
 
     def fetch(self, code: str, *args, **kwargs) -> list[dict]:
         today = date.today()
-        # BaoStock 主源（阶段 3）：当日/回填/多日缺口主源（近 10 年，覆盖全历史）。
-        # 同日回退规则：BaoStock 当日数据约 18:00 后才出，max(trade_date) < today
-        # 即当日未出 → 抛异常降级 AkShare（东财 stock_value_em）。
-        if baostock_enabled("valuation"):
-            sess = baostock.get_session()
-            if sess is not None:
-                try:
-                    rows = baostock.valuation_rows(
-                        sess, code, today - timedelta(days=3650), today)
-                    if not rows:
-                        raise RuntimeError(f"{code} BaoStock 估值未返回数据")
-                    max_d = max(r["trade_date"] for r in rows)
-                    if max_d < today:
-                        raise RuntimeError(
-                            f"{code} BaoStock 当日估值未出(max={max_d})，降级 AkShare")
-                    logger.info("%s BaoStock 拉取 %s 条估值", code, len(rows))
-                    return rows
-                except Exception as e:
-                    logger.warning("%s BaoStock 估值失败(%s)，降级 AkShare", code, e)
-        df = ak.stock_value_em(symbol=code)
-        logger.info("AkShare 返回 %s 估值 %s 条", code, len(df))
-        return to_rows(code, df)
+        # 阶段 4：AkShare 主源（东财 stock_value_em，单次返回全历史）。
+        # 失败且源链含 BaoStock → BaoStock 兜底（保留"当日未出 → raise"回退判断）；
+        # 链内无 BaoStock 则 raise，触发 base.run 重试。
+        try:
+            df = with_timeout(ak.stock_value_em, symbol=code)
+            rows = to_rows(code, df)
+            if not rows:
+                raise RuntimeError(f"{code} AkShare 估值未返回数据")
+            logger.info("AkShare 返回 %s 估值 %s 条", code, len(rows))
+            return rows
+        except Exception as e:
+            logger.warning("%s AkShare 估值失败(%s)，尝试 BaoStock 兜底", code, e)
+            if not baostock_enabled("valuation"):
+                raise
+        return self._fetch_baostock(code, today)
+
+    def _fetch_baostock(self, code: str, today) -> list[dict]:
+        """BaoStock 兜底：当日数据约 18:00 后才出，max(trade_date)<today 视为未出 → raise"""
+        sess = baostock.get_session()
+        if sess is None:
+            raise RuntimeError(f"{code} BaoStock 不可用且 AkShare 估值失败")
+        rows = baostock.valuation_rows(
+            sess, code, today - timedelta(days=3650), today)
+        if not rows:
+            raise RuntimeError(f"{code} BaoStock 估值未返回数据")
+        max_d = max(r["trade_date"] for r in rows)
+        if max_d < today:
+            raise RuntimeError(f"{code} BaoStock 当日估值未出(max={max_d})")
+        logger.info("%s BaoStock 兜底拉取 %s 条估值", code, len(rows))
+        return rows
 
     def save(self, data):
         # BaoStock 分支不产出 total_mv/float_mv/pe_static（保留既有值：无消费者，

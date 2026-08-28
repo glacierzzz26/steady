@@ -1,28 +1,27 @@
 """日行情采集器：不复权 + 后复权两次拉取，计算复权因子，质量校验后入库
 
-数据源（BAOSTOCK_ENABLED=1 时）：**BaoStock 主源**——OHLCV 与 adj_factor 均走
-BaoStock（build_rows 由 hfq/raw 派生因子），经除权一致性守卫（factor_guard）
-校验「因子阶跃必须对应价格跳空」后才入库；守卫拒收（平安/天齐型虚假/滞后调整，
-见 docs/phase2/design/数据源评估-BaoStock.md §2.2）→ 整段降级 AkShare
-（东财 stock_zh_a_hist → 新浪 stock_zh_a_daily hfq 派生），保该股单源一致。
+数据源（阶段 4 起）：**AkShare 主源**——`fetch_pair` 内部链 东财 stock_zh_a_hist →
+新浪 stock_zh_a_daily（hfq 派生 adj_factor）；两者均失败且 `baostock_enabled("daily")`
+→ **BaoStock 兜底**：OHLCV 与 adj_factor 走 BaoStock（build_rows 由 hfq/raw 派生因子），
+经除权一致性守卫（factor_guard）校验「因子阶跃必须对应价格跳空」后才入库；守卫拒收
+（平安/天齐型虚假/滞后调整，见 docs/phase2/design/数据源评估-BaoStock.md §2.2）→ 抛异常
+触发 base.run 重试（重跑 AkShare 主源），BaoStock 坏因子不进库。
 
 窗口拉取 start−7 天：多取一前交易日作守卫上下文（判 window 首行的边界因子对），
 产出时丢弃（trade_date < start 的行不入库）。
 
-BaoStock 不可用（未安装/登录失败）→ 降级 AkShare（东财 → 新浪）。
 新浪成交量单位为股，统一转手（/100）。
 """
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
 import akshare as ak
 import pandas as pd
 
-from app.collectors.base import BaseCollector, to_ak_date
+from app.collectors.base import BaseCollector, to_ak_date, with_timeout
 from app.cleaners import clean_daily_rows
 from app.cleaners.factor_guard import guard_factor
-from app.config import REQUEST_TIMEOUT, baostock_enabled
+from app.config import baostock_enabled
 from app.db import upsert
 from app.models.tables import DailyPrice
 from app.sources import baostock
@@ -59,22 +58,6 @@ def normalize_sina(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _with_timeout(fn, *args, timeout=None, **kwargs):
-    """在线程内执行 AkShare 请求并施加超时。
-
-    AkShare 底层 requests 未设置 timeout，对端半开连接时会永久挂起
-    （曾因此卡死整个同步）。此包装器兜底：超时抛 TimeoutError，
-    由调用方按"降级/重试"处理，而不是无限等待。
-    """
-    if timeout is None:
-        timeout = REQUEST_TIMEOUT
-    with ThreadPoolExecutor(max_workers=1) as ex:
-        try:
-            return ex.submit(fn, *args, **kwargs).result(timeout=timeout)
-        except TimeoutError:
-            raise TimeoutError(f"请求超时（>{timeout}s）")
-
-
 def fetch_pair(code: str, start: str, end: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """拉取不复权 + 后复权两套行情，返回 (raw, hfq)，列为东财格式
 
@@ -82,11 +65,11 @@ def fetch_pair(code: str, start: str, end: str) -> tuple[pd.DataFrame, pd.DataFr
     避免"返回空"被静默记为成功造成行情缺口无人知晓。
     """
     try:
-        raw = _with_timeout(
+        raw = with_timeout(
             ak.stock_zh_a_hist, symbol=code, period="daily",
             start_date=start, end_date=end, adjust="",
         )
-        hfq = _with_timeout(
+        hfq = with_timeout(
             ak.stock_zh_a_hist, symbol=code, period="daily",
             start_date=start, end_date=end, adjust="hfq",
         )
@@ -94,11 +77,11 @@ def fetch_pair(code: str, start: str, end: str) -> tuple[pd.DataFrame, pd.DataFr
     except Exception as e:
         reason = "超时" if isinstance(e, TimeoutError) else str(e)
         logger.warning("%s 东财接口失败(%s)，降级新浪源", code, reason)
-        raw = _with_timeout(
+        raw = with_timeout(
             ak.stock_zh_a_daily, symbol=sina_symbol(code),
             start_date=start, end_date=end, adjust="",
         )
-        hfq = _with_timeout(
+        hfq = with_timeout(
             ak.stock_zh_a_daily, symbol=sina_symbol(code),
             start_date=start, end_date=end, adjust="hfq",
         )
@@ -147,35 +130,43 @@ class DailyCollector(BaseCollector):
     """按股票代码拉取日K行情，经质量校验后入库"""
 
     def fetch(self, code: str, start_date, end_date, *args, **kwargs) -> list[dict]:
-        # BaoStock 主源（阶段 3）：OHLCV 与 adj_factor 均走 BaoStock 派生因子，
-        # 经除权一致性守卫校验（虚假/滞后调整拒收，如平安/天齐）才入库。
-        # 守卫拒收 → 抛异常 → 降级 AkShare，保该股单源一致。
-        # 窗口 start−7 天多取一前交易日作守卫上下文，产出时丢弃。
-        if baostock_enabled("daily"):
-            sess = baostock.get_session()
-            if sess is not None:
-                try:
-                    start = (date.fromisoformat(str(start_date))
-                             if isinstance(start_date, str) else start_date)
-                    raw, hfq = baostock.daily_pairs(sess, code,
-                                                    start - timedelta(days=7), end_date)
-                    if raw.empty:
-                        raise RuntimeError(f"{code} BaoStock 未返回数据")
-                    rows = build_rows(code, raw, hfq)
-                    _, ok = guard_factor(rows, window_start=start)
-                    if not ok:
-                        raise RuntimeError(f"{code} BaoStock 复权因子拒收")
-                    rows = [r for r in rows if r["trade_date"] >= start]
-                    logger.info("%s BaoStock 拉取 %s 条日行情", code, len(rows))
-                    return rows
-                except Exception as e:
-                    logger.warning("%s BaoStock 拉取失败(%s)，降级 AkShare", code, e)
+        # 阶段 4：AkShare 主源（fetch_pair 内部链：东财 → 新浪）；失败且源链含
+        # BaoStock → BaoStock 兜底（守卫只对 BaoStock 数据跑）。链内无 BaoStock
+        # 则 raise，触发 base.run 重试，不静默成功。
+        try:
+            return self._fetch_akshare(code, start_date, end_date)
+        except Exception as e:
+            logger.warning("%s AkShare 拉取失败(%s)，尝试 BaoStock 兜底", code, e)
+            if not baostock_enabled("daily"):
+                raise
+        return self._fetch_baostock(code, start_date, end_date)
+
+    def _fetch_akshare(self, code: str, start_date, end_date) -> list[dict]:
         start = to_ak_date(start_date)
         end = to_ak_date(end_date)
         # 后复权用于计算复权因子（因子计算用前复权价，此处只需因子比例）
         raw, hfq = fetch_pair(code, start, end)
         rows = build_rows(code, raw, hfq)
         logger.info("%s AkShare 拉取 %s 条日行情", code, len(rows))
+        return rows
+
+    def _fetch_baostock(self, code: str, start_date, end_date) -> list[dict]:
+        """BaoStock 兜底：守卫只对 BaoStock 数据跑；守卫拒收 → raise（不再二次降级）"""
+        sess = baostock.get_session()
+        if sess is None:
+            raise RuntimeError(f"{code} BaoStock 不可用（未安装）且 AkShare 失败")
+        start = (date.fromisoformat(str(start_date))
+                 if isinstance(start_date, str) else start_date)
+        raw, hfq = baostock.daily_pairs(sess, code,
+                                        start - timedelta(days=7), end_date)
+        if raw.empty:
+            raise RuntimeError(f"{code} BaoStock 未返回数据")
+        rows = build_rows(code, raw, hfq)
+        _, ok = guard_factor(rows, window_start=start)
+        if not ok:
+            raise RuntimeError(f"{code} BaoStock 复权因子拒收")
+        rows = [r for r in rows if r["trade_date"] >= start]
+        logger.info("%s BaoStock 兜底拉取 %s 条日行情", code, len(rows))
         return rows
 
     def save(self, data):

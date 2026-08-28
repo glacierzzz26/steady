@@ -66,20 +66,42 @@ def _bs_index_rows(max_date):
              "volume": 100, "amount": 1e9, "adj_factor": None}]
 
 
+def test_akshare_primary_skips_baostock(monkeypatch):
+    """阶段 4 主源锁定：AkShare 成功 → BaoStock index_rows 不被调用"""
+    monkeypatch.setattr(idx_mod, "baostock_enabled", lambda *a, **k: True)
+    bs_calls = []
+
+    def fake_rows(*a, **k):
+        bs_calls.append(a)
+        raise AssertionError("不应走到 BaoStock")
+
+    monkeypatch.setattr(idx_mod.baostock, "index_rows", fake_rows)
+    monkeypatch.setattr(idx_mod.ak, "stock_zh_index_daily", lambda symbol: make_index_df())
+    rows = IndexCollector(None).fetch("sh000300")
+    assert len(rows) == 2
+    assert bs_calls == []  # BaoStock 未被触碰
+
+
 def test_fetch_baostock_branch(monkeypatch):
-    """BAOSTOCK_SOURCES 含 index 且当日已出 → 直接返回 BaoStock 指数行"""
+    """阶段 4 AkShare 主源失败 → BaoStock 兜底：当日已出 → 返回 BaoStock 指数行"""
     today = date.today()
     rows = _bs_index_rows(today)
     monkeypatch.setattr(idx_mod, "baostock_enabled", lambda *a, **k: True)
     monkeypatch.setattr(idx_mod.baostock, "get_session", lambda: object())
+
+    def boom(*a, **k):
+        raise RuntimeError("AkShare 指数接口失败")
+
+    monkeypatch.setattr(idx_mod.ak, "stock_zh_index_daily", boom)
     monkeypatch.setattr(idx_mod.baostock, "index_rows",
                         lambda sess, symbol, s, e: rows)
     got = IndexCollector(None).fetch("sh000300")
     assert got == rows
 
 
-def test_fetch_baostock_same_day_fallback(monkeypatch):
-    """同日回退：BaoStock 当日未出（max < end）→ 降级 AkShare"""
+def test_akshare_fail_baostock_stale_raises(monkeypatch):
+    """阶段 4 BaoStock 兜底当日未出（max < end）→ 抛异常触发重试（不再降级 AkShare）"""
+    import pytest
     from datetime import timedelta
 
     today = date.today()
@@ -87,7 +109,24 @@ def test_fetch_baostock_same_day_fallback(monkeypatch):
     monkeypatch.setattr(idx_mod.baostock, "get_session", lambda: object())
     monkeypatch.setattr(idx_mod.baostock, "index_rows",
                         lambda sess, symbol, s, e: _bs_index_rows(today - timedelta(days=1)))
-    monkeypatch.setattr(idx_mod.ak, "stock_zh_index_daily", lambda symbol: make_index_df())
-    rows = IndexCollector(None).fetch("sh000300")
-    assert rows[0]["code"] == "sh000300"
-    assert rows[0]["trade_date"] == date(2026, 8, 18)  # 落到 AkShare
+
+    def boom(*a, **k):
+        raise RuntimeError("AkShare 指数接口失败")
+
+    monkeypatch.setattr(idx_mod.ak, "stock_zh_index_daily", boom)
+    with pytest.raises(RuntimeError):
+        IndexCollector(None).fetch("sh000300")
+
+
+def test_chain_all_fail_raises(monkeypatch):
+    """链外无 BaoStock（baostock_enabled=False）且 AkShare 失败 → 抛异常触发重试"""
+    import pytest
+
+    monkeypatch.setattr(idx_mod, "baostock_enabled", lambda *a, **k: False)
+
+    def boom(*a, **k):
+        raise RuntimeError("AkShare 指数接口失败")
+
+    monkeypatch.setattr(idx_mod.ak, "stock_zh_index_daily", boom)
+    with pytest.raises(RuntimeError):
+        IndexCollector(None).fetch("sh000300")

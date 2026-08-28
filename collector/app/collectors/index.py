@@ -1,6 +1,8 @@
 """指数行情采集器：沪深300 / 中证500 日行情，作策略收益基准对比
 
-数据源：新浪 stock_zh_index_daily（已验证可用，返回完整历史）。
+数据源（阶段 4 起）：**AkShare 主源**——新浪 stock_zh_index_daily（已验证可用，
+返回完整历史）；失败且 `baostock_enabled("index")` → **BaoStock 兜底**（保留
+"当日未出 → raise"回退，BaoStock 当日约 18:00 后才出）。
 存储：stock_basic 中 market='INDEX' 的伪股票 + daily_price 通用表。
 """
 import logging
@@ -9,7 +11,7 @@ from datetime import date
 import akshare as ak
 import pandas as pd
 
-from app.collectors.base import BaseCollector
+from app.collectors.base import BaseCollector, with_timeout
 from app.config import baostock_enabled
 from app.db import upsert
 from app.models.tables import DailyPrice, StockBasic
@@ -51,28 +53,35 @@ class IndexCollector(BaseCollector):
 
     def fetch(self, symbol: str = "sh000300", start_date=None, end_date=None,
               *args, **kwargs) -> list[dict]:
-        # BaoStock 主源（阶段 3）：指数历史/多日缺口/当日主源。
-        # 同日回退规则：BaoStock 当日数据约 18:00 后才出，max(trade_date) < end_date
-        # 即当日未出 → 抛异常降级 AkShare（新浪 stock_zh_index_daily）。
-        if baostock_enabled("index"):
-            sess = baostock.get_session()
-            if sess is not None:
-                try:
-                    rows = baostock.index_rows(sess, symbol, start_date, end_date)
-                    if not rows:
-                        raise RuntimeError(f"{symbol} BaoStock 指数未返回数据")
-                    end = end_date if end_date else date.today()
-                    max_d = max(r["trade_date"] for r in rows)
-                    if max_d < end:
-                        raise RuntimeError(
-                            f"{symbol} BaoStock 当日指数未出(max={max_d})，降级 AkShare")
-                    logger.info("%s BaoStock 拉取指数行情 %s 条", symbol, len(rows))
-                    return rows
-                except Exception as e:
-                    logger.warning("%s BaoStock 指数失败(%s)，降级 AkShare", symbol, e)
-        df = ak.stock_zh_index_daily(symbol=symbol)
-        rows = build_rows(symbol, df, start_date, end_date)
-        logger.info("%s AkShare 拉取指数行情 %s 条", symbol, len(rows))
+        end = end_date if end_date else date.today()
+        # 阶段 4：AkShare 主源（新浪 stock_zh_index_daily，全历史）。
+        # 失败且源链含 BaoStock → BaoStock 兜底（保留"当日未出 → raise"回退判断）；
+        # 链内无 BaoStock 则 raise，触发 base.run 重试。
+        try:
+            df = with_timeout(ak.stock_zh_index_daily, symbol=symbol)
+            rows = build_rows(symbol, df, start_date, end_date)
+            if not rows:
+                raise RuntimeError(f"{symbol} AkShare 指数未返回数据")
+            logger.info("%s AkShare 拉取指数行情 %s 条", symbol, len(rows))
+            return rows
+        except Exception as e:
+            logger.warning("%s AkShare 指数失败(%s)，尝试 BaoStock 兜底", symbol, e)
+            if not baostock_enabled("index"):
+                raise
+        return self._fetch_baostock(symbol, start_date, end_date, end)
+
+    def _fetch_baostock(self, symbol: str, start_date, end_date, end) -> list[dict]:
+        """BaoStock 兜底：当日数据约 18:00 后才出，max(trade_date)<end 视为未出 → raise"""
+        sess = baostock.get_session()
+        if sess is None:
+            raise RuntimeError(f"{symbol} BaoStock 不可用且 AkShare 指数失败")
+        rows = baostock.index_rows(sess, symbol, start_date, end_date)
+        if not rows:
+            raise RuntimeError(f"{symbol} BaoStock 指数未返回数据")
+        max_d = max(r["trade_date"] for r in rows)
+        if max_d < end:
+            raise RuntimeError(f"{symbol} BaoStock 当日指数未出(max={max_d})")
+        logger.info("%s BaoStock 兜底拉取指数行情 %s 条", symbol, len(rows))
         return rows
 
     def save(self, data):

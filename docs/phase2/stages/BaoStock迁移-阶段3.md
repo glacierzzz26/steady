@@ -61,3 +61,32 @@
 - **000002 万科比值漂移 1.96%、600346 0.75%、601818 0.61%** → 两源自洽、跨源口径分歧，保留 Tushare，量级小，接受尾部风险。后续可深挖具体分红/送转日差异。
 - **守卫残余误伤面 = 纯大跌日（step≈0、gap>7%）**：不放大容差（放大会漏过真异常），由对账层比值兜底。
 - **BaoStock 黑名单 10001011**：免费源突发/并发脆弱；全量/生产重写需限频（`--sleep` + 低并发），生产日任务顺序逐股不受影响。
+- **08-28 生产封禁事故（dev/prod 双端 10001011，阻塞 Step 8 重写）**：dev 对账并发触发黑名单后，**prod IP 也连带被封**（匿名账号 `bs.login()` 无凭据共用，疑似账号级）。dev 封禁周期实测 ~5h（12:15→17:08 解除，17:10 恢复对账 2 分钟再复发）。**应对**：封禁期不锤；预计 ~22:10 恢复后按 runbook 单分片 `--sleep 1.5` 跑 rewrite（低于触发阈值）。**今晚 18:10 采集**：BaoStock 登录失败 → 逐股降级 AkShare（设计兜底，数据可落；每只多耗 ~4-8s 失败登录重试，800 只拖至 ~19:30-20:00；data_quality 18:30 可能见仍在跑为 warn 级可接受）。
+
+## Step 8 rewrite runbook（封禁恢复后执行）
+
+目标：adj_factor 全史切 BaoStock 派生，拒收/漂移股保留 DB（分类见 §设计3）。
+
+```bash
+# 1. 预检：确认封禁解除（单次 login+查询，不触发）
+ssh quant@192.168.0.201 "docker exec quant-collector sh -c 'cd /app && timeout 60 python -c \"
+from app.sources import baostock
+sess=baostock.get_session()
+raw,hfq=baostock.daily_pairs(sess, \\\"600519\\\", \\\"2026-08-25\\\", \\\"2026-08-27\\\")
+print(len(raw))
+sess.close()\"'"
+
+# 2. 写入 rewrite：单分片、限频 --sleep 1.5（约 800 只 × ~2-4s ≈ 40-60 分钟）
+#    （脚本已 docker cp 进容器；容器重启会丢，重新 cp：docker cp scripts/rewrite_adj_factor.py quant-collector:/app/scripts/）
+ssh quant@192.168.0.201 "docker exec quant-collector sh -c 'cd /app && python scripts/rewrite_adj_factor.py --sleep 1.5'"
+
+# 3. 期望分类（与 dev 对账一致）：
+#    拒收（保留 DB）≈ {000001, 002466}（平安/天齐真异常）；比值漂移（保留 DB）≈ {000002,600346,601818}
+#    DB 侧异常（改写）含 601699/601567/600460；其余接受/误伤改写
+
+# 4. 验证
+#    - 茅台 600519 因子与旧 Tushare 恒比；平安/天齐因子未变（拒收集）
+#    - factor_value 当日 6 因子 × 800 齐全；data_quality 全绿
+```
+
+**限频纪律**：只用单分片；`--sleep ≥1.5`；封禁解除后首窗口若再触发（热封禁），立即停手等下一周期，勿连续锤。

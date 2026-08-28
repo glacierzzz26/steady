@@ -34,11 +34,13 @@ except ImportError:  # baostock 未安装：本层退化，采集器跳过 BaoSt
     bs = None
 
 try:
-    from app.config import BAOSTOCK_RETRIES, BAOSTOCK_RETRY_DELAY, BAOSTOCK_TIMEOUT
+    from app.config import (BAOSTOCK_BAN_COOLDOWN, BAOSTOCK_RETRIES,
+                            BAOSTOCK_RETRY_DELAY, BAOSTOCK_TIMEOUT)
 except ImportError:  # 旧部署无这些配置项：用内置默认值（本层保持独立可跑）
     BAOSTOCK_TIMEOUT = 60
     BAOSTOCK_RETRIES = 1
     BAOSTOCK_RETRY_DELAY = 2
+    BAOSTOCK_BAN_COOLDOWN = 1800
 
 logger = logging.getLogger(__name__)
 
@@ -97,15 +99,28 @@ class BaoStockSession:
         self.timeout = timeout
         self.retries = retries
         self.retry_delay = retry_delay
+        self._ban_until = 0.0  # 黑名单冷却截止（unix 秒），命中 10001011 后置位
 
     # ---------- 连接管理 ----------
 
     def _login(self):
-        """登录并置为已连接；失败抛异常（采集器降级下游源）"""
+        """登录并置为已连接；失败抛异常（采集器降级下游源）。
+
+        命中黑名单（10001011）→ 进程内冷却 BAOSTOCK_BAN_COOLDOWN，期间不再
+        反复登录锤（08-28 事故：封禁期逐股登录把整链拖成数小时超时）。
+        """
+        now = time.time()
+        if now < self._ban_until:
+            raise RuntimeError(
+                f"BaoStock 封禁冷却中（{int(self._ban_until - now)}s 后重试）")
         with _SocketTimeout(self.timeout):
             lg = bs.login()
         code = str(getattr(lg, "error_code", "?"))
         if code != _BSERR_SUCCESS:
+            if code == "10001011":
+                self._ban_until = now + BAOSTOCK_BAN_COOLDOWN
+                logger.error("BaoStock 封禁(%s:%s)，%ss 内跳过该源",
+                             code, getattr(lg, "error_msg", ""), BAOSTOCK_BAN_COOLDOWN)
             raise RuntimeError(f"BaoStock 登录失败({code}:{getattr(lg, 'error_msg', '')})")
         self._connected = True
         logger.info("BaoStock 登录成功")

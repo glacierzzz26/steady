@@ -404,3 +404,26 @@ def test_baostock_enabled_scope_gating(monkeypatch):
     monkeypatch.setattr(config, "BAOSTOCK_ENABLED", True)
     monkeypatch.setattr(config, "BAOSTOCK_SOURCES", [])
     assert config.baostock_enabled() is False
+
+
+# ---------- 阶段 4：黑名单冷却（08-28 事故：封禁期逐股登录锤） ----------
+
+def test_login_blacklist_sets_cooldown(monkeypatch, fake_bs):
+    """命中 10001011 黑名单 → 进程内冷却；冷却期内不再触发登录"""
+    fake_bs.login_code = "10001011"
+    sess = baostock.BaoStockSession(retries=0, retry_delay=0.01)
+    with pytest.raises(RuntimeError, match="BaoStock 登录失败"):
+        sess.query(fake_bs.query_history_k_data_plus, "sh.600519", "date,close",
+                   start_date="2026-08-26", end_date="2026-08-26",
+                   frequency="d", adjustflag="3")
+    assert fake_bs.login_calls == 1     # 首查登录一次并置位冷却
+    assert sess._ban_until > 0
+
+    # 冷却期内：即使服务端已恢复（login_code="0"），也不再实际登录
+    fake_bs.login_code = "0"
+    before = fake_bs.login_calls
+    with pytest.raises(RuntimeError, match="封禁冷却中"):
+        sess.query(fake_bs.query_history_k_data_plus, "sh.600519", "date,close",
+                   start_date="2026-08-26", end_date="2026-08-26",
+                   frequency="d", adjustflag="3")
+    assert fake_bs.login_calls == before  # 未再调用登录

@@ -40,11 +40,14 @@ DAILY_SYNC_INTERVAL = _int("COLLECTOR_DAILY_INTERVAL", 1)
 # （曾卡死同步），这里统一兜底；超时抛异常走降级/重试，而非无限等待。
 REQUEST_TIMEOUT = _int("COLLECTOR_REQUEST_TIMEOUT", 15)
 
-# BaoStock 主源开关（阶段 3：prod 已全源翻 BaoStock，Tushare 依赖已移除）
+# BaoStock 开关（阶段 3：prod 已全源翻 BaoStock，Tushare 依赖已移除）
 BAOSTOCK_ENABLED = os.getenv("BAOSTOCK_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
-# BaoStock 生效的数据源 scope（阶段 3 源级门控，逗号列表）。prod 已全源翻转
-# （daily,calendar,index,valuation,finance,stock_basic）；默认 daily,calendar 供
-# 无 env 的本地/测试路径，代码上线本身不改变生产数据路径。
+# BaoStock 参与的源链 scope（阶段 4 起语义从"主源"改为"源链中包含 BaoStock"，逗号列表）。
+# - daily/valuation/index：链序 = AkShare 主源 → BaoStock 兜底（阶段 4 主源切换）
+# - calendar/finance/stock_basic：链序 = BaoStock 主源 → AkShare 降级（阶段 3 维持）
+# prod 现值 daily,calendar,index,valuation,finance,stock_basic 无需改动——daily/valuation/index
+# 命中列表即自动走"先 AkShare、BaoStock 兜底"。应急去某 scope → 该 scope 变纯 AkShare。
+# 默认 daily,calendar 供无 env 的本地/测试路径，代码上线本身不改变生产数据路径。
 BAOSTOCK_SOURCES = [
     s.strip() for s in os.getenv("BAOSTOCK_SOURCES", "daily,calendar").split(",")
     if s.strip()
@@ -54,13 +57,19 @@ BAOSTOCK_TIMEOUT = _int("BAOSTOCK_TIMEOUT", 60)
 # 连接级失败的重试次数与间隔（秒）
 BAOSTOCK_RETRIES = _int("BAOSTOCK_RETRIES", 1)
 BAOSTOCK_RETRY_DELAY = _int("BAOSTOCK_RETRY_DELAY", 2)
+# 黑名单冷却（秒）：登录命中 10001011 后进程内跳过 BaoStock 该时长，防逐股反复登录
+# 把单源故障拖成整链超时（08-28 事故教训）。默认 30 分钟，超时自愈再试一次。
+BAOSTOCK_BAN_COOLDOWN = _int("BAOSTOCK_BAN_COOLDOWN", 1800)
 
 
 def baostock_enabled(scope: str | None = None) -> bool:
-    """BaoStock 是否作为指定 scope 的主源（env BAOSTOCK_ENABLED × BAOSTOCK_SOURCES 控制）
+    """scope 的源链中是否包含 BaoStock（env BAOSTOCK_ENABLED × BAOSTOCK_SOURCES 控制）
 
-    scope 取值 daily/calendar/valuation/finance/index/stock_basic；无参保留
-    阶段 1 全局语义（任一 scope 生效即 True）。
+    主源顺序由各采集器代码决定：daily/valuation/index 主源 AkShare、BaoStock 兜底；
+    calendar/stock_basic/finance 主源 BaoStock、AkShare 降级（阶段 4 维持阶段 3）。
+    未启用 BAOSTOCK_ENABLED 或 scope 不在 BAOSTOCK_SOURCES → False（链内无 BaoStock）。
+    scope 取值 daily/calendar/valuation/finance/index/stock_basic；无参保留阶段 1
+    全局语义（任一 scope 生效即 True）。
     """
     if not BAOSTOCK_ENABLED:
         return False

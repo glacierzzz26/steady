@@ -75,12 +75,33 @@ def _bs_valuation_rows(max_date):
              "close": 1302.8, "pe_ttm": 25.3, "pb": 8.1}]
 
 
+def test_akshare_primary_skips_baostock(monkeypatch):
+    """阶段 4 主源锁定：AkShare 成功 → BaoStock valuation_rows 不被调用"""
+    monkeypatch.setattr(val_mod, "baostock_enabled", lambda *a, **k: True)
+    bs_calls = []
+
+    def fake_rows(*a, **k):
+        bs_calls.append(a)
+        raise AssertionError("不应走到 BaoStock")
+
+    monkeypatch.setattr(val_mod.baostock, "valuation_rows", fake_rows)
+    monkeypatch.setattr(val_mod.ak, "stock_value_em", lambda symbol: make_valuation_df())
+    rows = ValuationCollector(None).fetch("600519")
+    assert len(rows) == 3
+    assert bs_calls == []  # BaoStock 未被触碰
+
+
 def test_fetch_baostock_branch(monkeypatch):
-    """BAOSTOCK_SOURCES 含 valuation 且当日已出 → 直接返回 BaoStock 行（无 mv 列）"""
+    """阶段 4 AkShare 主源失败 → BaoStock 兜底：当日已出 → 返回 BaoStock 行（无 mv 列）"""
     today = date.today()
     rows = _bs_valuation_rows(today)
     monkeypatch.setattr(val_mod, "baostock_enabled", lambda *a, **k: True)
     monkeypatch.setattr(val_mod.baostock, "get_session", lambda: object())
+
+    def boom(*a, **k):
+        raise RuntimeError("AkShare 估值接口失败")
+
+    monkeypatch.setattr(val_mod.ak, "stock_value_em", boom)
     monkeypatch.setattr(val_mod.baostock, "valuation_rows",
                         lambda sess, code, s, e: rows)
     got = ValuationCollector(None).fetch("600519")
@@ -88,8 +109,9 @@ def test_fetch_baostock_branch(monkeypatch):
     assert "total_mv" not in got[0]
 
 
-def test_fetch_baostock_same_day_fallback(monkeypatch):
-    """同日回退：BaoStock 当日数据未出（max < today）→ 降级 AkShare"""
+def test_akshare_fail_baostock_stale_raises(monkeypatch):
+    """阶段 4 BaoStock 兜底当日未出（max < today）→ 抛异常触发重试（不再降级 AkShare）"""
+    import pytest
     from datetime import timedelta
 
     today = date.today()
@@ -97,9 +119,27 @@ def test_fetch_baostock_same_day_fallback(monkeypatch):
     monkeypatch.setattr(val_mod.baostock, "get_session", lambda: object())
     monkeypatch.setattr(val_mod.baostock, "valuation_rows",
                         lambda sess, code, s, e: _bs_valuation_rows(today - timedelta(days=1)))
-    monkeypatch.setattr(val_mod.ak, "stock_value_em", lambda symbol: make_valuation_df())
-    rows = ValuationCollector(None).fetch("600519")
-    assert rows[0]["total_mv"] == 1.63e12  # 落到 AkShare 兜底（带 mv 列）
+
+    def boom(*a, **k):
+        raise RuntimeError("AkShare 估值接口失败")
+
+    monkeypatch.setattr(val_mod.ak, "stock_value_em", boom)
+    with pytest.raises(RuntimeError):
+        ValuationCollector(None).fetch("600519")
+
+
+def test_chain_all_fail_raises(monkeypatch):
+    """链外无 BaoStock（baostock_enabled=False）且 AkShare 失败 → 抛异常触发重试"""
+    import pytest
+
+    monkeypatch.setattr(val_mod, "baostock_enabled", lambda *a, **k: False)
+
+    def boom(*a, **k):
+        raise RuntimeError("AkShare 估值接口失败")
+
+    monkeypatch.setattr(val_mod.ak, "stock_value_em", boom)
+    with pytest.raises(RuntimeError):
+        ValuationCollector(None).fetch("600519")
 
 
 def test_save_baostock_rows_only_three_cols():
