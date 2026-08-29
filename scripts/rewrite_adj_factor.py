@@ -13,7 +13,9 @@
 对股票池（universe in hs300/zz500，默认全池）逐股：
   1. AkShare fetch_pair（东财→新浪主源，失败 BaoStock 兜底）（start→end）
      → build_rows → guard_factor（区间内判定）；
-  2. 比值对账（DB 既有因子 / 源派生因子，应恒为常数，锚点抵消）+ DB 因子自洽校验：
+  2. 比值对账（DB 既有因子 / 源派生因子，应恒为常数，锚点抵消）+ DB 因子自洽校验。
+     **DB 侧默认取全部既有行；迁移期须传 --db-asof 截止到独立（Tushare）记录末日**
+     （prod=2026-08-27），否则采集器自写的 AkShare 派生尾巴混入对账，虚报漂移：
      - guard 通过 + 比值 ≤0.5% 或 无 DB 因子可比对 → 接受 → upsert 覆盖（只动因子列）；
      - guard 通过 + 比值漂移 >0.5% + DB 因子自洽（阶跃对应价格跳空）→ 跨源口径分歧
        （如 000002 万科 1.96%）→ 保留 DB 既有值；
@@ -58,11 +60,18 @@ def classify(ok: bool, db_ok: bool, drift: bool, ratios: bool) -> str:
       false_pos   → 可重写（guard 拒收但比值一致 = 大跌日误伤，两源等价）；
       drifted     → 保留 DB（两源自洽但跨源口径分歧，如 000002）；
       rejected    → 保留 DB（guard 拒收且比值漂移/不可比 = 真异常，如 000001）。
+
+    判定顺序（2026-08-29 修正）：`db_anomaly` 优先于源守卫误伤短路。2026-08-29 生产
+    dry-run 实证：601699/601567/600460 类 DB 侧 glitch 股，源（新浪）因子在熔断/暴跌日
+    （2016-01-06 等）被守卫误伤 → 原顺序 `not ok` 先返回 rejected，掩蔽了「DB 因子不自洽
+    应改写」的判定，glitch 滞留 DB。重排后：DB 因子不自洽（db_ok=False）+ 比值漂移
+    → 判定改写源值（源在 DB glitch 处与 DB 分歧，源可信）。平安/天齐型真异常不受影响：
+    DB/Tushare 自洽（db_ok=True）→ 不走此分支，仍按 `not ok` → rejected 保留。
     """
-    if not ok:
-        return "rejected" if (drift or not ratios) else "false_pos"
     if drift and not db_ok:
         return "db_anomaly"
+    if not ok:
+        return "rejected" if (drift or not ratios) else "false_pos"
     if drift:
         return "drifted"
     return "accepted"
@@ -73,6 +82,12 @@ def main():
     # DB 复权因子覆盖自 2016-08-01（dev/prod 一致）；默认 2016 起避开远古噪声
     ap.add_argument("--start", type=_parse_date, default=date(2016, 1, 1))
     ap.add_argument("--end", type=_parse_date, default=date.today())
+    ap.add_argument("--db-asof", type=_parse_date, default=None,
+                    help="DB 侧独立记录截止日：仅 trade_date <= db-asof 的 DB 行参与比值对账"
+                         "与自洽校验。迁移期 DB 尾巴（2026-08-28 起 prod 日常采集切 AkShare/"
+                         "新浪派生因子写库）已非 Tushare 独立记录，混入比值会对账虚报漂移"
+                         "（2026-08-29 dry-run 实证 114/125 拒收为 08-28 尾巴伪象）；"
+                         "传最后 Tushare 日（prod=2026-08-27）恢复对账语义。")
     ap.add_argument("--codes", help="逗号分隔股票池子集（默认 universe in hs300/zz500 全池）")
     ap.add_argument("--dry-run", action="store_true", help="只计算不写库")
     ap.add_argument("--reconcile", action="store_true",
@@ -152,9 +167,15 @@ def main():
         # 另取 DB close 跑 DB 侧自洽校验：DB 因子阶跃须对应 DB 价格跳空——比值漂移时
         # 据此区分「跨源口径分歧」（DB 自洽 → 保留，如 000002）vs「DB 侧虚假调整」
         # （DB 不自洽，如 601699 2026-08-26 Tushare 单日 glitch → 改写源值）。
-        db_rows_raw = db.execute(text(
-            "SELECT trade_date, adj_factor, close FROM daily_price "
-            "WHERE code = :c AND adj_factor IS NOT NULL").bindparams(c=code)).all()
+        if args.db_asof:
+            db_rows_raw = db.execute(text(
+                "SELECT trade_date, adj_factor, close FROM daily_price "
+                "WHERE code = :c AND adj_factor IS NOT NULL AND trade_date <= :asof"
+            ).bindparams(c=code, asof=args.db_asof)).all()
+        else:
+            db_rows_raw = db.execute(text(
+                "SELECT trade_date, adj_factor, close FROM daily_price "
+                "WHERE code = :c AND adj_factor IS NOT NULL").bindparams(c=code)).all()
         db_map = {d: float(f) for d, f, _ in db_rows_raw if f is not None}
         db_rows = [{"trade_date": d, "adj_factor": float(f), "close": float(c)}
                    for d, f, c in db_rows_raw

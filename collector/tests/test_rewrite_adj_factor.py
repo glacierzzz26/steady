@@ -32,6 +32,18 @@ def test_db_anomaly_rewrite():
     assert _raf.classify(ok=True, db_ok=False, drift=True, ratios=True) == "db_anomaly"
 
 
+def test_db_anomaly_precedes_source_guard_misfire():
+    # 2026-08-29 修复：源守卫在熔断/暴跌日误伤（ok=False）不得短路 db_anomaly。
+    # 601699/601567/600460 型：DB 因子不自洽 + 比值漂移 → 仍判改写源值（glitch 修复），
+    # 而非原顺序的 rejected（glitch 滞留 DB）。
+    assert _raf.classify(ok=False, db_ok=False, drift=True, ratios=True) == "db_anomaly"
+
+
+def test_reject_true_anomaly_unchanged_by_reorder():
+    # 平安/天齐型不受重排影响：DB/Tushare 自洽（db_ok=True）→ 仍 rejected 保留
+    assert _raf.classify(ok=False, db_ok=True, drift=True, ratios=True) == "rejected"
+
+
 def test_drift_keep_db():
     # 000002 型：两源自洽但跨源口径分歧 → 保留 DB
     assert _raf.classify(ok=True, db_ok=True, drift=True, ratios=True) == "drifted"
