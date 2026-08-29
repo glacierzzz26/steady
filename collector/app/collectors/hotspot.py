@@ -2,7 +2,9 @@
 
 数据源（AkShare，均已验证存在）：
 - 隔夜外盘：新浪 美股指数 index_us_stock_sina（.DJI/.IXIC/.INX，取末行）
-- A股指数：东财 沪深京指数 spot stock_zh_index_spot_em（上证/深成/创业板）
+- A股指数：东财 沪深京指数 spot stock_zh_index_spot_em（上证/深成/创业板）主源，
+  失败降级新浪 stock_zh_index_spot_sina（2026-08-29 prod 东财不可达实测，见记忆
+  reconcile-drift-side-location 同源教训）
 - 板块涨幅 + 资金流：同花顺 行业板块概览 stock_board_industry_summary_ths（主源），
   东财 行业板块 stock_board_industry_name_em / 同花顺行业资金流 兜底
 - 活跃个股：东财 人气榜 stock_hot_rank_em（主源），涨停池 stock_zt_pool_em 兜底
@@ -91,21 +93,53 @@ def _fetch_indices() -> list[dict]:
             })
         except Exception as e:
             logger.warning("外盘 %s 采集失败: %s", symbol, e)
-    # A股指数（当日实时行情，早晨基于前收盘）
+    # A股指数（当日实时行情，早晨基于前收盘）：东财主源 → 新浪兜底
+    rows.extend(_cn_indices_from_em() or _cn_indices_from_sina())
+    return rows
+
+
+def _cn_indices_from_em() -> list[dict]:
+    """A股指数主源：东财 沪深京指数 spot。失败/缺列返回 []（由调用方降级新浪）。"""
     try:
         df = ak.stock_zh_index_spot_em(symbol="沪深重要指数")
         name_col, px_col, pct_col = (
             _pick(df, "名称"), _pick(df, "最新价", "最新"), _pick(df, "涨跌幅"))
-        if name_col and px_col and pct_col:
-            for _, r in df.iterrows():
-                if str(r[name_col]) in CN_INDEX_NAMES:
-                    rows.append({
-                        "name": str(r[name_col]), "code": str(r.get("代码", "")),
-                        "close": _f(r[px_col]), "change_pct": _f(r[pct_col]),
-                    })
+        if not (name_col and px_col and pct_col):
+            logger.warning("东财A股指数列缺失，降级新浪")
+            return []
+        out = []
+        for _, r in df.iterrows():
+            if str(r[name_col]) in CN_INDEX_NAMES:
+                out.append({
+                    "name": str(r[name_col]), "code": str(r.get("代码", "")),
+                    "close": _f(r[px_col]), "change_pct": _f(r[pct_col]),
+                })
+        return out
     except Exception as e:
-        logger.warning("A股指数采集失败: %s", e)
-    return rows
+        logger.warning("东财A股指数采集失败(%s)，降级新浪", e)
+        return []
+
+
+def _cn_indices_from_sina() -> list[dict]:
+    """A股指数兜底：新浪 指数快照 spot（prod 东财不可达时生效；列结构同族，_pick 兼容）。"""
+    try:
+        df = ak.stock_zh_index_spot_sina()
+        name_col, px_col, pct_col = (
+            _pick(df, "名称"), _pick(df, "最新价", "最新"), _pick(df, "涨跌幅"))
+        if not (name_col and px_col and pct_col):
+            logger.warning("新浪A股指数列缺失，跳过")
+            return []
+        out = []
+        for _, r in df.iterrows():
+            if str(r[name_col]) in CN_INDEX_NAMES:
+                out.append({
+                    "name": str(r[name_col]), "code": str(r.get("代码", "")),
+                    "close": _f(r[px_col]), "change_pct": _f(r[pct_col]),
+                })
+        return out
+    except Exception as e:
+        logger.warning("新浪A股指数采集失败: %s", e)
+        return []
 
 
 def _fetch_ths_sectors() -> list[dict] | None:

@@ -39,6 +39,65 @@ def test_fmt_units():
     assert _fmt_yi(None) is None
 
 
+# ---------- A股指数：东财主源 → 新浪兜底 ----------
+
+def _cn_index_df(rows, source="em"):
+    """构造东财/新浪同族结构的指数 DataFrame（列：名称/最新价/涨跌幅）"""
+    if source == "em":
+        return pd.DataFrame(rows, columns=["代码", "名称", "最新价", "涨跌幅"])
+    return pd.DataFrame(rows, columns=["代码", "名称", "最新价", "涨跌额", "涨跌幅", "昨收", "今开"])
+
+
+def test_cn_indices_em_main_source(monkeypatch):
+    """东财主源可用：正常解析 CN_INDEX_NAMES 三个指数"""
+    from app.collectors import hotspot as hs
+
+    df = _cn_index_df([
+        ("000001", "上证指数", 3952.17, -0.11),
+        ("399001", "深证成指", 13953.06, -0.68),
+        ("399006", "创业板指", 3424.40, -1.41),
+        ("000300", "沪深300", 4609.17, -0.46),   # 不在 CN_INDEX_NAMES → 忽略
+    ], "em")
+    monkeypatch.setattr(hs.ak, "stock_zh_index_spot_em", lambda **kw: df)
+    sentinel = object()
+    monkeypatch.setattr(hs.ak, "stock_zh_index_spot_sina", lambda: (_ for _ in ()).throw(AssertionError("不应调用新浪")))
+    out = hs._cn_indices_from_em()
+    assert [r["name"] for r in out] == ["上证指数", "深证成指", "创业板指"]
+    assert out[0]["close"] == 3952.17 and out[0]["change_pct"] == -0.11
+
+
+def test_cn_indices_em_fail_falls_back_sina(monkeypatch):
+    """东财异常（prod 实测 Connection aborted）→ 返回 []，调用方降级新浪"""
+    from app.collectors import hotspot as hs
+
+    def _raise(**kw):
+        raise ConnectionError("Remote end closed connection")
+    monkeypatch.setattr(hs.ak, "stock_zh_index_spot_em", _raise)
+    assert hs._cn_indices_from_em() == []
+
+    df = _cn_index_df([
+        ("sh000001", "上证指数", 3952.18, 4.5, -0.11, 3956.7, 3950.0),
+        ("sz399001", "深证成指", 13953.07, -95.8, -0.68, 14048.9, 13940.0),
+        ("sz399006", "创业板指", 3424.40, -48.9, -1.41, 3473.3, 3420.0),
+    ], "sina")
+    monkeypatch.setattr(hs.ak, "stock_zh_index_spot_sina", lambda: df)
+    out = hs._cn_indices_from_sina()
+    assert [r["name"] for r in out] == ["上证指数", "深证成指", "创业板指"]
+    assert out[0]["code"] == "sh000001"
+
+
+def test_cn_indices_missing_columns_returns_empty(monkeypatch):
+    """缺列（源结构漂移）→ []，不抛异常（增强数据可降级）"""
+    from app.collectors import hotspot as hs
+
+    bad = pd.DataFrame(columns=["代码", "名称"])  # 缺最新价/涨跌幅
+    monkeypatch.setattr(hs.ak, "stock_zh_index_spot_em", lambda **kw: bad)
+    assert hs._cn_indices_from_em() == []
+
+    monkeypatch.setattr(hs.ak, "stock_zh_index_spot_sina", lambda: bad)
+    assert hs._cn_indices_from_sina() == []
+
+
 def test_sectors_from_ths_mapping():
     """同花顺板块概览数据 → 涨幅榜/资金流榜映射（不触发网络）"""
     from app.collectors.hotspot import _sectors_gain_from, _sectors_flow_from
