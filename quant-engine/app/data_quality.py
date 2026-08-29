@@ -75,9 +75,12 @@ def _check_coverage(db, td: date) -> dict:
     msg = f"行情覆盖　{len(with_bar)}/{len(pool)} 股票有行情（{ratio * 100:.1f}%）"
     if level != "ok":
         msg += f"，低于 {COVERAGE_MIN * 100:.0f}%"
+    # missing_codes = 池内缺行情的代码清单（自愈 stage1 的 diff-repair 输入，见任务 005）
+    missing_codes = sorted(set(pool) - set(with_bar))
     return {"name": "coverage", "level": level, "message": msg,
             "metrics": {"pool": len(pool), "with_bar": len(with_bar),
-                        "pct": round(ratio * 100, 2)}}
+                        "pct": round(ratio * 100, 2),
+                        "missing_codes": missing_codes}}
 
 
 def _check_missing_days(db, td: date) -> dict:

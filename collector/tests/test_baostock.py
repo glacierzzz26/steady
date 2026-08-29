@@ -119,6 +119,22 @@ def test_bs_code():
     assert baostock.bs_code("920001") == "bj.920001"
 
 
+def test_is_source_blocked():
+    """自愈 stage1 分流：源被限（封禁/黑名单冷却）vs 瞬时错误"""
+    # 源被限：黑名单冷却 / 登录封禁 10001011
+    assert baostock.is_source_blocked(
+        RuntimeError("BaoStock 封禁冷却中（900s 后重试）"))
+    assert baostock.is_source_blocked(
+        RuntimeError("BaoStock 登录失败(10001011:too many request)"))
+    # 瞬时错误：网络超时（10002003/10002006/10002008）不视为源被限
+    assert not baostock.is_source_blocked(
+        RuntimeError("BaoStock query 失败(10002003:网络连接超时)"))
+    assert not baostock.is_source_blocked(
+        RuntimeError("BaoStock 登录失败(10001001:未登录)"))
+    assert not baostock.is_source_blocked(TimeoutError("connect timed out"))
+    assert not baostock.is_source_blocked(RuntimeError("其他错误"))
+
+
 def test_ymd():
     assert baostock._ymd(date(2026, 8, 26)) == "2026-08-26"
     assert baostock._ymd("2026/08/26") == "2026-08-26"

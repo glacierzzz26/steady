@@ -163,6 +163,22 @@ CREATE INDEX IF NOT EXISTS idx_factor_trial_status ON factor_trial (status);
 CREATE INDEX IF NOT EXISTS idx_factor_trial_factor ON factor_trial (factor_name);
 
 -- ------------------------------------------------------------
+-- 5.3 自愈任务（2.5 Issue #4：DB 队列，跨服务交接见迁移 005）
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS remediation_task (
+    id         BIGSERIAL     PRIMARY KEY,
+    trade_date DATE          NOT NULL,                       -- 待修复的交易日
+    check_name VARCHAR(32)   NOT NULL,                       -- 本期仅 'coverage'
+    status     VARCHAR(16)   NOT NULL DEFAULT 'pending',   -- pending/repaired/done/failed/source_blocked
+    attempts   INT           NOT NULL DEFAULT 0,           -- 已重试次数（上限 MAX_ATTEMPTS=3）
+    detail     JSONB,                                        -- {missing_codes:[...], repaired_count, ...}
+    created_at TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_remediation UNIQUE (trade_date, check_name)
+);
+CREATE INDEX IF NOT EXISTS idx_remediation_status ON remediation_task (status);
+
+-- ------------------------------------------------------------
 -- 6. 策略
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS strategy (
@@ -442,6 +458,7 @@ INSERT INTO notify_config (event_key, name, enabled, schedule_type, weekdays, se
     ('data_quality', '数据健康检查', TRUE, 'trading_day', NULL, '18:35', 'blue'),
     ('morning_brief', '早盘简报', TRUE, 'trading_day', NULL, '09:15', 'blue'),
     ('backtest',     '回测完成', TRUE, 'event',       NULL, NULL,    'green'),
+    ('remedi',       '自动修复', TRUE, 'event',       NULL, NULL,    'green'),
     ('task_alert',   '任务告警', TRUE, 'event',       NULL, NULL,    'red')
 ON CONFLICT (event_key) DO NOTHING;
 

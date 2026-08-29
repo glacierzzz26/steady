@@ -12,6 +12,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Time,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import declarative_base
@@ -139,6 +140,32 @@ class FactorTrial(Base):
     error = Column(String)
     created_at = Column(DateTime, server_default=func.now())
     finished_at = Column(DateTime)
+
+
+class RemediationTask(Base):
+    """自愈任务（Issue #4，跨服务 DB 队列，对齐 backtest_job/factor_trial 模式）
+
+    流水线：producer(quant-engine data_quality coverage fail) → pending
+    → stage1(collector remediation.py 补齐) → repaired / source_blocked / failed
+    → stage2(quant-engine remediation.py 复检+重算+绿卡) → done / 仍红回 pending。
+    去重：UNIQUE(trade_date, check_name)；attempts 上限 MAX_ATTEMPTS=3。
+    detail 存 {missing_codes:[...], repaired_count, ...}。
+    """
+
+    __tablename__ = "remediation_task"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "check_name", name="uq_remediation"),
+        {"comment": "自愈任务，UNIQUE(trade_date, check_name) 去重防轰炸"},
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    trade_date = Column(Date, nullable=False)
+    check_name = Column(String(32), nullable=False)  # 本期仅 'coverage'
+    status = Column(String(16), default="pending")  # pending/repaired/done/failed/source_blocked
+    attempts = Column(Integer, default=0)
+    detail = Column(JSON)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class FactorStat(Base):

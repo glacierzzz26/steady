@@ -11,6 +11,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import declarative_base
@@ -112,6 +113,29 @@ class AppConfig(Base):
     value = Column(String)
     value_type = Column(String(16), nullable=False, default="string")  # bool/int/string/secret
     description = Column(String)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class RemediationTask(Base):
+    """自愈任务（Issue #4，跨服务 DB 队列；stage1 采集侧消费 pending→补齐）
+
+    detail 存 {missing_codes:[...]}（producer 写入），stage1 读它定向补 daily_price。
+    与 quant-engine/models/tables.py 同构，DDL 以 init.sql / 迁移 005 为准。
+    """
+
+    __tablename__ = "remediation_task"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "check_name", name="uq_remediation"),
+        {"comment": "自愈任务，UNIQUE(trade_date, check_name) 去重防轰炸"},
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    trade_date = Column(Date, nullable=False)
+    check_name = Column(String(32), nullable=False)  # 本期仅 'coverage'
+    status = Column(String(16), default="pending")  # pending/repaired/done/failed/source_blocked
+    attempts = Column(Integer, default=0)
+    detail = Column(JSON)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

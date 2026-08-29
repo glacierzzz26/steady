@@ -245,7 +245,7 @@ class DailyCollector(BaseCollector):
         code = data[0]["code"] if data else "-"
         n = upsert_daily_rows(self.db, data)
         logger.info("%s 入库 %s 条（丢弃 %s 条）", code, n, len(data) - n)
-        return True
+        return n  # 实际入库条数（清洗丢弃 volume<=0 的停牌行），自愈据此计 repaired_count
 
 
 def upsert_daily_rows(db, data: list[dict]) -> int:

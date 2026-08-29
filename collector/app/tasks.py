@@ -139,6 +139,20 @@ def job_sync_hotspot():
     HotspotCollector(get_session()).run(spot_date=date.today())
 
 
+def job_consume_remediation():
+    """自愈 stage1 消费者：每 5 分钟领取 pending 任务补齐缺失股票（Issue #4）
+
+    producer（quant-engine job_data_quality coverage fail）插 pending；
+    本任务读 detail.missing_codes → DailyCollector 逐只补 → repaired /
+    source_blocked（源被限不重试）/ failed（attempts≥3）。stage2 在 quant-engine。
+    """
+    from app.remediation import consume_pending
+
+    summary = consume_pending()
+    if summary["processed"]:
+        logger.info("自愈 stage1 消费完成：%s", summary)
+
+
 def job_nightly_backfill():
     """18:05 每日缺口回填（仅交易日）：日线补未覆盖到起始日的股票；估值补滞后股票。
 
@@ -177,6 +191,7 @@ if __name__ == "__main__":
     scheduler.add_job(job_sync_valuation, "cron", hour=18, minute=15)
     scheduler.add_job(job_sync_finance, "cron", hour=18, minute=0)
     scheduler.add_job(job_nightly_backfill, "cron", hour=18, minute=5)
+    scheduler.add_job(job_consume_remediation, "interval", minutes=5)
 
     logger.info("collector 调度器启动，等待定时任务...")
     scheduler.start()
