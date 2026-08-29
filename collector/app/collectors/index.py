@@ -101,14 +101,21 @@ class IndexCollector(BaseCollector):
             conflict_cols=["code"],
             update_cols=["name", "market", "status"],
         )
-        # 2. 指数日行情入库（与股票共用 daily_price 表）
+        # 2. 指数日行情入库（与股票共用 daily_price 表）。
+        # 源无 amount（AkShare 新浪 stock_zh_index_daily 无成交额列，build_rows 置 None）
+        # → 不更新 amount，保留既有（BaoStock 兜底/回填的成交额）。曾踩坑：08-28 index 切
+        # AkShare 主源后，16:15 同步全史 upsert 带 amount 列把 BaoStock 回填的成交额全清
+        # NULL，致 G6 两市成交断供（market_hotspot.turnover 消失）。源带 amount（BaoStock）
+        # → 正常更新。
+        cols = ["open", "high", "low", "close", "volume", "adj_factor"]
+        if any(r.get("amount") is not None for r in data):
+            cols.append("amount")
         upsert(
             self.db,
             DailyPrice,
             data,
             conflict_cols=["code", "trade_date"],
-            update_cols=["open", "high", "low", "close", "volume", "amount",
-                         "adj_factor"],
+            update_cols=cols,
         )
         logger.info("%s 指数行情入库 %s 条", symbol, len(data))
         return True

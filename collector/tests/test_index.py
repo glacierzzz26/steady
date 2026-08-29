@@ -130,3 +130,36 @@ def test_chain_all_fail_raises(monkeypatch):
     monkeypatch.setattr(idx_mod.ak, "stock_zh_index_daily", boom)
     with pytest.raises(RuntimeError):
         IndexCollector(None).fetch("sh000300")
+
+
+def _upsert_set_cols(stmt) -> set[str]:
+    """从 upsert 语句提取 ON CONFLICT SET 的列名集合（无 WHERE 时到行尾）"""
+    import re
+    from sqlalchemy.dialects.postgresql import dialect as pg_dialect
+    sql = str(stmt.compile(dialect=pg_dialect()))
+    m = re.search(r"DO UPDATE SET (.*)$", sql, re.S)
+    set_clause = m.group(1) if m else ""
+    return {part.split("=")[0].strip() for part in set_clause.split(",") if "=" in part}
+
+
+def test_save_akshare_path_preserves_amount():
+    """AkShare 路径（build_rows amount=None）：update 不含 amount，保留既有成交额"""
+    from sqlalchemy.dialects.postgresql import dialect as pg_dialect
+
+    db = FakeSession()
+    data = build_rows("sh000300", make_index_df())
+    assert all(r["amount"] is None for r in data)  # 前提：AkShare 无 amount
+    IndexCollector(db).save(data)
+    cols = _upsert_set_cols(db.executed[1])
+    assert "amount" not in cols
+    assert {"open", "high", "low", "close", "volume", "adj_factor"} <= cols
+
+
+def test_save_baostock_path_writes_amount():
+    """BaoStock 路径（行含 amount）：update 含 amount，正常写成交额"""
+    db = FakeSession()
+    data = build_rows("sh000300", make_index_df())
+    for r in data:
+        r["amount"] = 123456789.0
+    IndexCollector(db).save(data)
+    assert "amount" in _upsert_set_cols(db.executed[1])
