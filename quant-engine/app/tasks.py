@@ -304,25 +304,30 @@ def job_morning_brief():
 
 
 def job_precompute_perf():
-    """21:20 策略效果度量预计算（方向① 第一期）：命中率 + 实盘vs回测对照。
+    """21:20 策略效果度量预计算：命中率 + 实盘vs回测对照 + 因子贡献归因。
 
     晚于 backend 21:05 净值快照；幂等 upsert（UNIQUE(strategy_name, period_end,
     metric_type)），每日覆盖重算。逻辑见 app/performance.py。"""
-    from app.performance import compute_hit_rate, compute_nav_overlay
+    from app.performance import compute_attribution, compute_hit_rate, compute_nav_overlay
 
     db = get_session()
     try:
         hr = compute_hit_rate(db)
         ov = compute_nav_overlay(db)
+        at = compute_attribution(db)
         record_task(db, "precompute_perf", date.today(), "success",
                     f"命中率窗口 {sorted((hr.get('windows') or {}).keys())} · "
-                    f"对照 {ov.get('metrics', {}).get('drift')}",
+                    f"对照 {ov.get('metrics', {}).get('drift')} · "
+                    f"归因 {at.get('samples', 0)} 日/{len(at.get('monthly') or [])} 月",
                     detail={"hit_rate_buy_samples": hr.get("buy_samples"),
                             "hit_rate_period_start": hr.get("period_start"),
-                            "overlay_live_points": ov.get("metrics", {}).get("live_points")})
-        logger.info("绩效预计算完成：hit_rate=%s overlay_drift=%s",
+                            "overlay_live_points": ov.get("metrics", {}).get("live_points"),
+                            "attribution_days": at.get("samples"),
+                            "attribution_months": len(at.get("monthly") or []),
+                            "attribution_note": at.get("note")})
+        logger.info("绩效预计算完成：hit_rate=%s overlay_drift=%s attribution_days=%s",
                     sorted((hr.get("windows") or {}).keys()),
-                    ov.get("metrics", {}).get("drift"))
+                    ov.get("metrics", {}).get("drift"), at.get("samples"))
     except Exception:
         logger.exception("绩效预计算失败")
         db.rollback()

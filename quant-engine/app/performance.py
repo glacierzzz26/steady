@@ -17,9 +17,11 @@ import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
+import pandas as pd
 from sqlalchemy import func, select
 
 from app.db import upsert
+from app.factor_service import FACTOR_DIRECTION
 from app.models.tables import (
     Account,
     AccountNav,
@@ -290,6 +292,201 @@ def _latest_backtest_nav(db) -> list[tuple[date, float]]:
     return sorted(out)
 
 
+# ---------- 因子贡献归因（第二期） ----------
+
+# 归因因子序 = 评分池 6 因子规范序（与 FactorLab CORR_FACTORS 一致）
+ATTRIBUTION_FACTORS = list(FACTOR_DIRECTION.keys())
+
+
+def _rebuild_holdings(signals: list[tuple[str, date, str]]) -> dict[date, set[str]]:
+    """全史信号 → 逐日持仓集合（BUY 加入 / SELL 移除 / HOLD 不动作，初始空集）。
+
+    HOLD 仅对已持仓股表示「维持」，绝不新加入（振荡缺陷教训）。返回
+    {trade_date: 当日收盘后持仓 code 集}（只含出现信号的日期）。
+    """
+    by_date: dict[date, list[tuple[str, str]]] = defaultdict(list)
+    for code, td, action in signals:
+        by_date[td].append((code, action))
+    holdings: set[str] = set()
+    out: dict[date, set[str]] = {}
+    for td in sorted(by_date):
+        for code, action in by_date[td]:
+            if action == "BUY":
+                holdings.add(code)
+            elif action == "SELL":
+                holdings.discard(code)
+        out[td] = set(holdings)
+    return out
+
+
+def compute_attribution(db, strategy: str = DEFAULT_STRATEGY,
+                        end_date: date | None = None) -> dict:
+    """因子贡献归因：组合超额收益 = Σ(相对因子暴露 × 因子日收益) + 残差。
+
+    归因对象 = 策略信号组合（BUY/HOLD 等权名义持仓，T+0 同步口径，与第一期
+    hit_rate 一致）：持仓集(t) 由 ≤t 的 BUY/SELL 决定，组合日收益 = 持仓等权
+    后复权日收益均值；暴露 = 持仓平均 normalized − 全市场平均 normalized
+    （normalized 是百分位 0~1，相对偏离才有意义）；因子日收益 = 池内按因子分
+    Q=5 组的 Q1−Q5 组均日收益（复用 factor_research 分组逻辑，H=1 同步口径）。
+    residual = 超额 − Σ 因子贡献（因子外超额：行业/风格/交互/数据缺失）。
+    落 strategy_perf(metric_type='attribution')。
+    """
+    import pandas as pd
+
+    from app.factor_research import _normalized_pivots, adj_close_frame, quantile_returns_by_date
+    from app.factor_service import pool_codes
+
+    if end_date is None:
+        end_date = date.today()
+    factors = ATTRIBUTION_FACTORS
+
+    # 1. 信号 → 逐日持仓集合。含 HOLD：纯延续日（无 BUY/SELL 事件）组合仍在存续，
+    #    当日收益必须采样，否则月度超额低估（全池逐日发信号的实盘口径）。
+    sig_rows = db.execute(
+        select(StrategySignal.code, StrategySignal.trade_date, StrategySignal.action)
+        .where(StrategySignal.strategy_name == strategy,
+               StrategySignal.action.in_(["BUY", "SELL", "HOLD"]),
+               StrategySignal.trade_date <= end_date)
+        .order_by(StrategySignal.trade_date)
+    ).all()
+    holdings_by_date = _rebuild_holdings(sig_rows)
+    if not holdings_by_date:
+        detail = {"factors": factors, "samples": 0, "note": "无信号样本"}
+        _store(db, strategy, date.today(), end_date, "attribution", detail)
+        return detail
+
+    d0 = min(holdings_by_date)
+    d1 = min(max(holdings_by_date), end_date)
+    dates = [d for d in sorted(holdings_by_date) if d0 <= d <= d1]
+
+    # 2. normalized pivots（≤ d1）+ 池内复权行情 → 日收益矩阵。
+    #    行情/基准回看 d0 前 7 天，首个信号日的日收益（相对前一交易日）才可算。
+    pivots = {f: df[df.index <= d1] for f, df in _normalized_pivots(db, factors).items()}
+    pivots = {f: df for f, df in pivots.items() if not df.empty}
+    codes = pool_codes(db)
+    lookback = d0 - timedelta(days=7)
+    price_rows = db.execute(
+        select(DailyPrice.code, DailyPrice.trade_date, DailyPrice.close, DailyPrice.adj_factor)
+        .where(DailyPrice.code.in_(codes),
+               DailyPrice.trade_date >= lookback, DailyPrice.trade_date <= d1)
+    ).all()
+    adj_close = adj_close_frame(price_rows)
+    if adj_close.empty:
+        detail = {"factors": factors, "note": "池内行情缺失",
+                  "period_start": str(d0), "period_end": str(d1)}
+        _store(db, strategy, d0, d1, "attribution", detail)
+        return detail
+    day_ret = adj_close.pct_change()
+
+    # 3. 基准日收益（sh000300，adj NULL 按 1.0；回看以覆盖 d0 日收益）
+    bench_series = _bench_series(db, lookback, d1)
+    bench_map: dict[date, float] = {}
+    prev = None
+    for td, v in bench_series:
+        if prev is not None:
+            bench_map[td] = v / prev - 1.0
+        prev = v
+
+    # 4. 因子日收益分组（Q1−Q5，池内等权；与 FactorLab q1..q5 同分组逻辑）
+    qrets: dict[str, pd.DataFrame] = {}
+    for f, piv in pivots.items():
+        qrets[f] = quantile_returns_by_date(piv, day_ret, q=5)
+
+    # 5. 逐日归因
+    daily: list[dict] = []
+    for td in dates:
+        if td not in day_ret.index:
+            continue
+        hset = holdings_by_date[td]
+        row = day_ret.loc[td]
+        port_codes = [c for c in hset if c in row.index]
+        rets = row[port_codes].dropna()
+        if rets.empty or td not in bench_map:
+            continue                       # 持仓无当日收益 / 基准缺 → 当日无归因
+        r_p = float(rets.mean())
+        bench = bench_map[td]
+        excess = r_p - bench
+        contrib, exposure, fret = {}, {}, {}
+        s = 0.0
+        for f in factors:
+            piv = pivots.get(f)
+            if piv is not None and td in piv.index:
+                pf = piv.loc[td]
+                mkt = pf.mean()
+                comb = pf[port_codes].dropna().mean()
+                if pd.isna(mkt) or pd.isna(comb):
+                    exposure[f] = fret[f] = contrib[f] = None
+                    continue
+                exposure[f] = round(float(comb - mkt), 4)
+                q = qrets.get(f)
+                if q is not None and td in q.index:
+                    q1, q5 = q.loc[td, 1], q.loc[td, 5]
+                    if not pd.isna(q1) and not pd.isna(q5):
+                        fret[f] = round(float(q1 - q5), 6)
+                        contrib[f] = round(exposure[f] * fret[f], 6)
+                        s += contrib[f]
+                    else:
+                        fret[f] = contrib[f] = None
+                else:
+                    fret[f] = contrib[f] = None
+            else:
+                exposure[f] = fret[f] = contrib[f] = None
+        daily.append({
+            "date": td.isoformat(),
+            "portfolio_ret": round(r_p, 6),
+            "bench_ret": round(bench, 6),
+            "excess": round(excess, 6),
+            "exposure": exposure,
+            "factor_ret": fret,
+            "contrib": contrib,
+            "residual": round(excess - s, 6),
+        })
+
+    # 6. 月度聚合（日简单收益求和；contrib None→0，暴露取日均；求和后仍自洽）
+    monthly: dict[str, dict] = {}
+    for row in daily:
+        mkey = row["date"][:7]
+        acc = monthly.setdefault(mkey, {
+            "month": mkey, "portfolio_ret": 0.0, "excess": 0.0,
+            "contrib": {f: 0.0 for f in factors},
+            "exposure": {f: [] for f in factors},
+            "residual": 0.0, "days": 0,
+        })
+        acc["portfolio_ret"] += row["portfolio_ret"]
+        acc["excess"] += row["excess"]
+        for f in factors:
+            if row["contrib"].get(f) is not None:
+                acc["contrib"][f] += row["contrib"][f]
+            if row["exposure"].get(f) is not None:
+                acc["exposure"][f].append(row["exposure"][f])
+        acc["residual"] += row["residual"]
+        acc["days"] += 1
+    monthly_list = []
+    for mkey, acc in sorted(monthly.items()):
+        exp = {f: (round(sum(v) / len(v), 4) if v else None)
+               for f, v in acc["exposure"].items()}
+        monthly_list.append({**acc, "exposure": exp})
+
+    # 7. 实盘对照（主账户 daily_return，仅对照不参与分解）
+    live_rows = db.execute(
+        select(AccountNav.trade_date, AccountNav.daily_return)
+        .where(AccountNav.account_id == _primary_account_id(db),
+               AccountNav.trade_date >= d0, AccountNav.trade_date <= d1)
+        .order_by(AccountNav.trade_date)
+    ).all()
+    live = [{"date": td.isoformat(), "ret": round(float(r), 6)}
+            for td, r in live_rows if r is not None]
+
+    detail = {
+        "factors": factors, "period_start": d0.isoformat(), "period_end": d1.isoformat(),
+        "samples": len(daily), "daily": daily, "monthly": monthly_list, "live": live,
+    }
+    _store(db, strategy, d0, d1, "attribution", detail)
+    logger.info("因子归因完成 %s~%s：%d 个交易日，%d 个月",
+                d0, d1, len(daily), len(monthly_list))
+    return detail
+
+
 # ---------- 月度报告 ----------
 
 def build_monthly_report(db, year: int, month: int) -> tuple[str, dict]:
@@ -339,10 +536,25 @@ def build_monthly_report(db, year: int, month: int) -> tuple[str, dict]:
     bench = _bench_series(db, m_start, m_end)
     bench_ret = (bench[-1][1] / bench[0][1] - 1) if len(bench) >= 2 else None
 
+    # 当月归因（读最新 attribution 预计算 detail.monthly，取匹配月份行）
+    attr = db.execute(
+        select(StrategyPerf.detail)
+        .where(StrategyPerf.metric_type == "attribution",
+               StrategyPerf.period_end <= m_end)
+        .order_by(StrategyPerf.period_end.desc())
+        .limit(1)
+    ).scalar()
+    attribution = None
+    if attr:
+        am = (attr or {}).get("monthly") or []
+        attribution = next((x for x in am if x.get("month") == f"{year}-{month:02d}"),
+                           None)
+
     summary = {
         "month": f"{year}-{month:02d}", "signal": {"BUY": n_buy, "SELL": n_sell, "HOLD": n_hold},
         "nav": {"return": month_ret, "max_drawdown": month_dd},
         "benchmark_return": bench_ret, "hit_rate": perf or {},
+        "attribution": attribution,
     }
     content = _format_monthly_report(summary)
     return content, summary
@@ -372,6 +584,18 @@ def _format_monthly_report(s: dict) -> str:
             lines.append("**BUY 命中率(5日)** 样本不足，待积累")
     else:
         lines.append("**BUY 命中率(5日)** 暂无数据")
+    attr = s.get("attribution")
+    if attr:
+        parts = []
+        for f, v in (attr.get("contrib") or {}).items():
+            if v is not None and abs(v) >= 0.0005:
+                parts.append(f"{f} {v * 100:+.1f}%")
+        if parts:
+            res = attr.get("residual")
+            lines.append("**因子归因** " + " · ".join(parts)
+                         + (f"（残差 {res * 100:+.1f}%）" if res is not None else ""))
+        else:
+            lines.append("**因子归因** 因子贡献未达显示阈值，详见绩效页")
     return "📊 Steady · 月度绩效\n\n" + "\n".join(lines)
 
 

@@ -81,3 +81,33 @@ func GetPerformanceNavOverlay(db *gorm.DB) gin.HandlerFunc {
 		})
 	}
 }
+
+// GetPerformanceAttribution 因子贡献归因（GET /performance/attribution?strategy=）
+//
+// 只读 strategy_perf（metric_type='attribution'），返回组合超额收益的因子分解：
+// detail.daily（逐日 excess/各因子 contrib/residual）+ detail.monthly（月度聚合）
+// + detail.live（主账户 daily_return 对照）。归因对象 = 策略信号组合，口径见
+// quant-engine/app/performance.py::compute_attribution。
+func GetPerformanceAttribution(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		strategy := c.DefaultQuery("strategy", "multi_factor")
+		var row model.StrategyPerf
+		if err := db.Where("strategy_name = ? AND metric_type = ?",
+			strategy, "attribution").
+			Order("period_end DESC, id DESC").First(&row).Error; err != nil {
+			response.Fail(c, http.StatusNotFound, response.CodeResourceMissing, "暂无归因数据（每日 21:20 预计算）")
+			return
+		}
+		var detail map[string]interface{}
+		if err := json.Unmarshal([]byte(row.Detail), &detail); err != nil {
+			response.Fail(c, http.StatusInternalServerError, response.CodeInternalError, "归因数据解析失败")
+			return
+		}
+		response.OK(c, gin.H{
+			"strategy_name": row.StrategyName,
+			"period_start":  formatDate(row.PeriodStart),
+			"period_end":    formatDate(row.PeriodEnd),
+			"detail":        detail,
+		})
+	}
+}

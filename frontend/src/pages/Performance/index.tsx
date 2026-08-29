@@ -6,6 +6,7 @@
  * 样本不足时如实显示「待积累」（hit_rate/samples 为 null/0）。
  */
 import { useMemo } from 'react'
+import type { EChartsOption } from 'echarts'
 import EChart from '../../components/EChart'
 import Kpi from '../../components/Kpi'
 import Notice from '../../components/Notice'
@@ -20,6 +21,16 @@ const WINDOWS = [
   { key: '20', label: '20 日' },
 ]
 
+/** 评分池 6 因子中文名（与 FactorLab 同序） */
+const FACTOR_CN: Record<string, string> = {
+  ma_trend: '均线趋势',
+  macd_signal: 'MACD信号',
+  pe_ratio: '市盈率',
+  pb_ratio: '市净率',
+  roe_quality: '盈利质量',
+  debt_risk: '负债风险',
+}
+
 /** 命中率小数比例 → 带色文字（涨红跌绿，沪深习惯） */
 function rateClass(v: number | null | undefined): string {
   if (v === null || v === undefined || Number.isNaN(v)) return ''
@@ -29,11 +40,14 @@ function rateClass(v: number | null | undefined): string {
 export default function Performance() {
   const hr = useApi(() => performanceApi.getHitRate(), [])
   const ov = useApi(() => performanceApi.getNavOverlay(), [])
+  const att = useApi(() => performanceApi.getAttribution(), [])
 
   const windows = hr.data?.detail?.windows ?? {}
   const hitPoints = hr.data?.detail?.buy_samples ?? 0
   const sellPoints = hr.data?.detail?.sell_samples ?? 0
   const w5 = windows['5']
+  const factors = att.data?.detail?.factors ?? []
+  const monthly = att.data?.detail?.monthly ?? []
 
   /** 对照叠加图：live / bt / benchmark 三线归一净值 */
   const overlayOption = useMemo(() => {
@@ -53,6 +67,78 @@ export default function Performance() {
   }, [ov.data])
 
   const m = ov.data?.metrics
+
+  /** 月度因子暴露热力图：y=月份，x=因子，色阶 蓝(低配)←白→红(超配) */
+  const heatOption = useMemo(() => {
+    const data: [number, number, number][] = []
+    let maxAbs = 0.02
+    monthly.forEach((mo, yi) => {
+      factors.forEach((f, xi) => {
+        const v = mo.exposure?.[f]
+        if (v === null || v === undefined) return
+        maxAbs = Math.max(maxAbs, Math.abs(v))
+        data.push([xi, yi, v])
+      })
+    })
+    return {
+      grid: { left: 64, right: 24, top: 14, bottom: 52 },
+      tooltip: {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        formatter: (p: any) => {
+          const [xi, yi, v] = p.value as [number, number, number]
+          return `${monthly[yi]?.month} · ${FACTOR_CN[factors[xi]] ?? factors[xi]}：暴露 ${(v * 100).toFixed(1)}pct`
+        },
+      },
+      xAxis: {
+        type: 'category', data: factors.map(f => FACTOR_CN[f] ?? f),
+        axisLabel: { color: '#8B93A7' },
+      },
+      yAxis: { type: 'category', data: monthly.map(mo => mo.month), axisLabel: { color: '#8B93A7' } },
+      visualMap: {
+        min: -maxAbs, max: maxAbs,
+        orient: 'horizontal', left: 'center', bottom: 0, calculable: true,
+        inRange: { color: ['#2F6FE4', '#FFFFFF', '#E8484B'] }, // min(低配)=蓝 → 0=白 → max(超配)=红
+        textStyle: { color: '#8B93A7' },
+      },
+      series: [{
+        type: 'heatmap', data,
+        label: {
+          show: true, fontSize: 11, color: '#333',
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          formatter: (p: any) => `${((p.value as [number, number, number])[2] * 100).toFixed(0)}`,
+        },
+      }],
+    } as EChartsOption
+  }, [monthly, factors])
+
+  /** 累计超额归因曲线：累计超额 = 累计因子贡献 + 累计残差（自洽） */
+  const cumOption = useMemo(() => {
+    const daily = att.data?.detail?.daily ?? []
+    if (!daily.length) return null
+    let ce = 0, cf = 0, cr = 0
+    const ex: number[] = [], fct: number[] = [], res: number[] = []
+    for (const d of daily) {
+      ce += d.excess ?? 0
+      const contribs: Record<string, number | null> = d.contrib ?? {}
+      cf += Object.values(contribs).reduce<number>((s, v) => s + (v ?? 0), 0)
+      cr += d.residual ?? 0
+      ex.push(Number(ce.toFixed(6)))
+      fct.push(Number(cf.toFixed(6)))
+      res.push(Number(cr.toFixed(6)))
+    }
+    return lineOpt(
+      {
+        dates: daily.map(d => d.date),
+        series: [
+          { name: '累计超额', data: ex, w: 2 },
+          { name: '累计因子贡献', data: fct },
+          { name: '累计残差', data: res },
+        ],
+      },
+      ['#4C7DFF', '#2FBF71', '#E8A33D'],
+      false,
+    )
+  }, [att.data])
 
   return (
     <div className="page">
@@ -194,6 +280,54 @@ export default function Performance() {
                   <td className="r">{m?.bt_points ?? 0}</td>
                   <td className="r">--</td>
                 </tr>
+              </tbody>
+            </table>
+          </>
+        )}
+      </section>
+
+      {/* ================= 因子贡献归因 ================= */}
+      <section className="card">
+        <div className="hd">
+          <h2>因子贡献归因</h2>
+          <span className="muted">
+            策略信号组合超额 = Σ(相对暴露 × 因子日收益) + 残差 · 每日 21:20 重算
+          </span>
+        </div>
+        {att.error && <Notice text={att.error} onRetry={att.reload} retrying={att.loading} />}
+        {!att.error && !att.data && <div className="empty">暂无归因数据 —— 每日 21:20 预计算后可见</div>}
+        {!att.error && att.data && (
+          <>
+            <div className="muted hint">
+              归因对象为策略信号组合（BUY/HOLD 等权持仓）。暴露 = 持仓平均归一值 − 全市场平均（百分位，正=相对超配）；因子贡献 = 暴露 × 因子 Q1−Q5 多空日收益；残差 = 因子外超额（行业/风格/交互/数据缺失）。
+            </div>
+            {cumOption && <EChart option={cumOption} height={280} />}
+            <h3>月度因子暴露（组合 − 市场）</h3>
+            <EChart option={heatOption} height={monthly.length ? 40 + monthly.length * 44 : 120} />
+            <table>
+              <thead>
+                <tr>
+                  <th>月份</th>
+                  <th className="r">超额</th>
+                  {factors.map(f => (
+                    <th key={f} className="r">{FACTOR_CN[f] ?? f}</th>
+                  ))}
+                  <th className="r">残差</th>
+                </tr>
+              </thead>
+              <tbody>
+                {monthly.map(mo => (
+                  <tr key={mo.month}>
+                    <td>{mo.month}</td>
+                    <td className={`r ${rateClass(mo.excess)}`}>{fmtRatioPct(mo.excess)}</td>
+                    {factors.map(f => (
+                      <td key={f} className={`r ${rateClass(mo.contrib?.[f])}`}>
+                        {fmtRatioPct(mo.contrib?.[f])}
+                      </td>
+                    ))}
+                    <td className={`r ${rateClass(mo.residual)}`}>{fmtRatioPct(mo.residual)}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </>

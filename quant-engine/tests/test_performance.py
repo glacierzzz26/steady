@@ -7,13 +7,15 @@ upsert 为 PG 方言，monkeypatch 成直接 add（capture 也可用于断言落
 from datetime import date, datetime
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.performance import (
     _fwd_ret,
+    _rebuild_holdings,
     build_monthly_report,
+    compute_attribution,
     compute_hit_rate,
     compute_nav_overlay,
 )
@@ -23,6 +25,8 @@ from app.models.tables import (
     BacktestResult,
     Base,
     DailyPrice,
+    FactorValue,
+    StockBasic,
     StrategyPerf,
     StrategySignal,
 )
@@ -252,3 +256,130 @@ def test_build_monthly_report(db):
     assert summary["signal"] == {"BUY": 1, "SELL": 1, "HOLD": 1}
     assert abs(summary["nav"]["return"] - 0.05) < 1e-9
     assert abs(summary["benchmark_return"]) < 1e-9
+
+
+# ---------- 因子贡献归因（第二期） ----------
+
+def _seed_attribution(db):
+    """5 只池股（ma_trend normalized 0.1~0.9）+ 基准平走 + 3 个信号日。
+
+    价格路径：600001 fall（-2%/日，池内最低归一 → Q5 组）、600002~600004 flat、
+    600005 rise（+2%/日，池内最高归一 → Q1 组）。基准 sh000300 平走（adj NULL→1.0）。
+    信号：08-04 BUY 600005 → 08-05 BUY 600004 → 08-06 SELL 600004 → 08-07 SELL 600005。
+    """
+    for i, (code, kind) in enumerate([("600001", "fall"), ("600002", "flat"),
+                                      ("600003", "flat"), ("600004", "flat"),
+                                      ("600005", "rise")]):
+        db.add(StockBasic(code=code, name=f"股{code}", market="SH", universe="hs300"))
+        _seed_price(db, code, kind)
+    _seed_price(db, "sh000300", "flat", adj_override=False)
+    for td in DAYS[:4]:  # 08-03 ~ 08-06，normalized 每日同值横截面 0.1~0.9
+        for i, code in enumerate(["600001", "600002", "600003", "600004", "600005"]):
+            db.add(FactorValue(id=_next_id(), code=code, factor_name="ma_trend",
+                               trade_date=td, value=0.1 + 0.2 * i,
+                               rank=i + 1, normalized=0.1 + 0.2 * i))
+    _seed_signal(db, "600005", DAYS[1], "BUY")   # 08-04 持仓 {600005}
+    _seed_signal(db, "600004", DAYS[2], "BUY")   # 08-05 持仓 {600005, 600004}
+    _seed_signal(db, "600004", DAYS[3], "SELL")  # 08-06 持仓 {600005}
+    _seed_signal(db, "600005", DAYS[4], "SELL")  # 08-07 持仓 {}
+    db.commit()
+
+
+def test_holdings_rebuild():
+    """BUY 加入 / SELL 移除 / HOLD 不动作，初始空集逐日推进"""
+    signals = [
+        ("600001", DAYS[1], "BUY"),
+        ("600002", DAYS[2], "BUY"),
+        ("600001", DAYS[3], "SELL"),
+        ("600003", DAYS[3], "HOLD"),   # HOLD 仅维持，绝不新加入（振荡缺陷教训）
+    ]
+    out = _rebuild_holdings(signals)
+    assert out[DAYS[1]] == {"600001"}
+    assert out[DAYS[2]] == {"600001", "600002"}
+    assert out[DAYS[3]] == {"600002"}
+    assert len(out) == 3
+
+
+def test_compute_attribution(db, captured):
+    """手算：组合日收益 / 暴露 / Q1−Q5 因子日收益 / 贡献 / 残差逐日核对"""
+    _seed_attribution(db)
+    detail = compute_attribution(db)
+
+    assert detail["samples"] == 3                       # 08-07 空仓跳过
+    d = {row["date"]: row for row in detail["daily"]}
+    r4, r5, r6 = d[DAYS[1].isoformat()], d[DAYS[2].isoformat()], d[DAYS[3].isoformat()]
+
+    # 组合日收益（等权持仓，基准平走 → 超额 = 组合收益）
+    assert abs(r4["portfolio_ret"] - 0.02) < 1e-5
+    assert abs(r5["portfolio_ret"] - 0.00980392) < 1e-5
+    assert abs(r6["portfolio_ret"] - 0.01923077) < 1e-5
+    for r in (r4, r5, r6):
+        assert abs(r["bench_ret"]) < 1e-9
+        assert r["excess"] == r["portfolio_ret"]
+
+    # 暴露 = 持仓均值 − 市场均值（市场 0.5）
+    assert abs(r4["exposure"]["ma_trend"] - 0.4) < 1e-4   # 0.9 − 0.5
+    assert abs(r5["exposure"]["ma_trend"] - 0.3) < 1e-4   # (0.9+0.7)/2 − 0.5
+    assert abs(r6["exposure"]["ma_trend"] - 0.4) < 1e-4
+
+    # 因子日收益 = Q1(600005 rise) − Q5(600001 fall)
+    assert abs(r4["factor_ret"]["ma_trend"] - 0.04) < 1e-5
+    assert abs(r5["factor_ret"]["ma_trend"] - 0.040016) < 1e-5
+
+    # 贡献 = 暴露 × 因子日收益；残差 = 超额 − Σ 贡献（自洽）
+    assert abs(r4["contrib"]["ma_trend"] - 0.016) < 1e-5
+    assert abs(r5["contrib"]["ma_trend"] - 0.012005) < 1e-5
+    assert abs(r4["residual"] - 0.004) < 1e-5
+    assert abs(r5["residual"] - (-0.00220108)) < 1e-5
+    for r in (r4, r5, r6):
+        assert abs(r["excess"] - r["contrib"]["ma_trend"] - r["residual"]) < 1e-6
+        assert r["contrib"]["pe_ratio"] is None          # 无因子数据 → None 而非 0
+
+    # 落库 strategy_perf
+    row = db.execute(select(StrategyPerf)).scalars().first()
+    assert row.metric_type == "attribution"
+    assert row.detail["samples"] == 3
+    assert row.detail["factors"][0] == "ma_trend"
+
+
+def test_attribution_monthly(db, captured):
+    """月度聚合 = 各日简单求和，贡献/残差/超额自洽；暴露取日均"""
+    _seed_attribution(db)
+    detail = compute_attribution(db)
+    assert len(detail["monthly"]) == 1
+    m = detail["monthly"][0]
+    assert m["month"] == "2026-08"
+    assert m["days"] == 3
+    assert abs(m["portfolio_ret"] - (0.02 + 0.00980392 + 0.01923077)) < 1e-4
+    assert m["excess"] == m["portfolio_ret"]              # 基准平走
+    expected_c = sum(r["contrib"]["ma_trend"] for r in detail["daily"])
+    assert abs(m["contrib"]["ma_trend"] - expected_c) < 1e-9
+    expected_r = sum(r["residual"] for r in detail["daily"])
+    assert abs(m["residual"] - expected_r) < 1e-9
+    assert abs(m["exposure"]["ma_trend"] - (0.4 + 0.3 + 0.4) / 3) < 1e-4
+    assert m["contrib"]["pe_ratio"] == 0.0                # 无数据因子聚合为 0
+
+
+def test_attribution_empty(db, captured):
+    """无信号 → 空 detail 不报错"""
+    _seed_price(db, "600005", "rise")
+    _seed_price(db, "sh000300", "flat", adj_override=False)
+    db.commit()
+    detail = compute_attribution(db)
+    assert "note" in detail
+    assert detail["samples"] == 0
+
+
+def test_attribution_no_factor_data(db, captured):
+    """有信号但池内无 normalized → 因子贡献全 None，残差 = 超额"""
+    for code in ["600001", "600005"]:
+        db.add(StockBasic(code=code, name=f"股{code}", market="SH", universe="hs300"))
+        _seed_price(db, code, "rise")
+    _seed_price(db, "sh000300", "flat", adj_override=False)
+    _seed_signal(db, "600005", DAYS[1], "BUY")
+    db.commit()
+    detail = compute_attribution(db)
+    assert detail["samples"] == 1
+    r = detail["daily"][0]
+    assert r["contrib"]["ma_trend"] is None
+    assert r["residual"] == r["excess"]

@@ -52,9 +52,46 @@ export interface NavOverlayData {
   metrics: OverlayMetrics
 }
 
+/** 因子贡献归因（metric_type='attribution'） */
+export interface AttrRow {
+  portfolio_ret: number | null
+  bench_ret: number | null
+  excess: number | null
+  /** 各因子：暴露（组合−市场百分位差）/ 因子日收益 / 贡献 */
+  exposure?: Record<string, number | null>
+  factor_ret?: Record<string, number | null>
+  contrib?: Record<string, number | null>
+  residual: number | null
+}
+
+export interface DailyAttr extends AttrRow {
+  date: string
+}
+
+export interface MonthlyAttr extends AttrRow {
+  month: string
+  days: number
+}
+
+export interface AttributionData {
+  strategy_name: string
+  period_start: string
+  period_end: string
+  detail: {
+    factors: string[]
+    samples: number
+    note?: string
+    daily: DailyAttr[]
+    monthly: MonthlyAttr[]
+    live: { date: string; ret: number | null }[]
+  }
+}
+
 export const performanceApi = {
   getHitRate: (strategy = 'multi_factor') =>
     http.get<HitRateData>('/performance/hit-rate', { strategy }),
   getNavOverlay: (strategy = 'multi_factor') =>
     http.get<NavOverlayData>('/performance/nav-overlay', { strategy }),
+  getAttribution: (strategy = 'multi_factor') =>
+    http.get<AttributionData>('/performance/attribution', { strategy }),
 }
