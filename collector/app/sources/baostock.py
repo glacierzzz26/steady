@@ -60,6 +60,20 @@ _CONN_CODES = {
     "10002008",  # 网络接收超时
 }
 
+# 封禁码：命中 → 进程内黑名单冷却（08-28 事故根因，勿再逐股登录轰击）
+_BAN_CODE = "10001011"
+
+
+def is_source_blocked(exc: Exception) -> bool:
+    """判定异常是否为「源被限」而非瞬时错误（自愈 stage1 据此分流，见迁移 005）。
+
+    源被限（封禁/黑名单冷却）→ 任务置 source_blocked 不再重试，绝不反复轰被限源；
+    瞬时错误（网络超时 10002003/10002006/10002008 等）→ 允许 attempts 重试。
+    """
+    msg = str(exc)
+    return (f"BaoStock 封禁冷却中" in msg
+            or f"BaoStock 登录失败({_BAN_CODE}" in msg)
+
 _session: "BaoStockSession | None" = None
 _session_lock = threading.Lock()
 
@@ -117,7 +131,7 @@ class BaoStockSession:
             lg = bs.login()
         code = str(getattr(lg, "error_code", "?"))
         if code != _BSERR_SUCCESS:
-            if code == "10001011":
+            if code == _BAN_CODE:
                 self._ban_until = now + BAOSTOCK_BAN_COOLDOWN
                 logger.error("BaoStock 封禁(%s:%s)，%ss 内跳过该源",
                              code, getattr(lg, "error_msg", ""), BAOSTOCK_BAN_COOLDOWN)

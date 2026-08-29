@@ -92,6 +92,15 @@ def test_coverage_fail(db):
     d = r["check_details"]["coverage"]
     assert d["with_bar"] == 3 and d["pool"] == 4 and d["pct"] == 75.0
     assert r["overall"] == "fail"
+    # missing_codes = 池 − 有 bar（自愈 stage1 的 diff-repair 输入）
+    assert d["missing_codes"] == ["000004"]
+
+
+def test_coverage_missing_codes_all_green(db):
+    """全绿时 missing_codes 为空（不触发自愈入队）"""
+    r = check_data_quality(db, TD)
+    assert r["overall"] == "ok"
+    assert r["check_details"]["coverage"]["missing_codes"] == []
 
 
 def test_missing_trading_day(db):

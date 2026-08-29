@@ -189,9 +189,28 @@ def job_consume_factor_trials():
         db.close()
 
 
+def _enqueue_coverage_repair(db, td: date, missing_codes: list[str]) -> None:
+    """coverage fail → 插 remediation_task pending（Issue #4 自愈队列）
+
+    ON CONFLICT DO NOTHING：同一 (trade_date, check_name) 已存在则不覆盖——
+    多轮 18:30 重跑 / 同日晚间重复体检不重置进行中的修复任务。
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from app.models.tables import RemediationTask
+
+    stmt = pg_insert(RemediationTask).values([{
+        "trade_date": td, "check_name": "coverage", "status": "pending",
+        "attempts": 0, "detail": {"missing_codes": missing_codes},
+    }]).on_conflict_do_nothing(index_elements=["trade_date", "check_name"])
+    db.execute(stmt)
+    db.commit()
+
+
 def job_data_quality():
     """18:30 数据健康检查：7 项体检结果写 task_run 台账（notify_scheduler 18:35 推送）。
-    执行成功即记 success（发现问题是产出而非失败）；job 崩溃才记 failed。"""
+    执行成功即记 success（发现问题是产出而非失败）；job 崩溃才记 failed。
+    coverage fail 时顺带入自愈队列（remediation_task pending），由两端消费补齐。"""
 
     db = get_session()
     td = None
@@ -206,11 +225,43 @@ def job_data_quality():
         detail = check_data_quality(db, td)
         record_task(db, "data_quality", td, "success",
                     detail["message"], detail=detail)
+        # 自愈入队：coverage fail 且有缺失清单 → 插 pending（去重防轰炸）
+        coverage_metrics = detail.get("check_details", {}).get("coverage", {})
+        missing_codes = coverage_metrics.get("missing_codes") or []
+        coverage_level = next(
+            (r.get("level") for r in detail.get("results", [])
+             if r.get("name") == "coverage"), None)
+        if coverage_level == "fail" and missing_codes:
+            _enqueue_coverage_repair(db, td, missing_codes)
+            logger.warning("coverage fail → 自愈队列入队：%s 缺 %d 只",
+                           td, len(missing_codes))
         logger.info("数据健康检查完成 %s：%s", td, detail["message"])
     except Exception:
         logger.exception("数据健康检查任务失败")
         db.rollback()
         record_task(db, "data_quality", td or date.today(), "failed", "数据健康检查异常")
+    finally:
+        db.close()
+
+
+def job_consume_remediation():
+    """自愈 stage2 消费者：每 5 分钟领取 repaired 任务（Issue #4）
+
+    stage1（collector remediation.py）补齐 daily_price 后置 repaired；本任务复检
+    coverage → 全绿重算因子/信号 + 回告飞书绿卡，仍红回 pending 再走 stage1。
+    """
+    from app.remediation import consume_repaired
+
+    db = get_session()
+    try:
+        summary = consume_repaired()
+        if summary["processed"]:
+            logger.info("自愈 stage2 消费完成：%s", summary)
+        record_task(db, "remediation", date.today(), "success", "自愈消费完成")
+    except Exception:
+        logger.exception("自愈消费失败")
+        db.rollback()
+        record_task(db, "remediation", date.today(), "failed", "自愈消费异常")
     finally:
         db.close()
 
@@ -261,6 +312,7 @@ if __name__ == "__main__":
     scheduler.add_job(job_generate_signals, "cron", hour=19, minute=30)
     scheduler.add_job(job_consume_backtests, "interval", minutes=5)
     scheduler.add_job(job_consume_factor_trials, "interval", minutes=5)
+    scheduler.add_job(job_consume_remediation, "interval", minutes=5)
     scheduler.add_job(job_data_quality, "cron", hour=18, minute=30)
     scheduler.add_job(notify_tick, "interval", minutes=1)
 
