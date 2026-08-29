@@ -109,8 +109,11 @@ def quantile_returns_by_date(normalized: pd.DataFrame, fwd_ret: pd.DataFrame,
     """
     cols = normalized.columns.intersection(fwd_ret.columns)
     norm, fwd = normalized[cols], fwd_ret[cols]
+    # 只取两表都有的交易日：norm 可能比 fwd 历史长（全史 pivot vs 局部行情回看），
+    # 缺行情日期逐日归因无从算，跳过而非 KeyError（G9 场景 index 对齐，行为不变）。
+    days = norm.index.intersection(fwd.index)
     out: dict[date, pd.Series] = {}
-    for dt in norm.index:
+    for dt in days:
         df = pd.concat([norm.loc[dt], fwd.loc[dt]], axis=1).dropna()
         if len(df) < q:
             out[dt] = pd.Series(float("nan"), index=range(1, q + 1))

@@ -383,3 +383,18 @@ def test_attribution_no_factor_data(db, captured):
     r = detail["daily"][0]
     assert r["contrib"]["ma_trend"] is None
     assert r["residual"] == r["excess"]
+
+
+def test_attribution_norm_longer_than_quote(db, captured):
+    """回归：因子 pivot 历史长于行情回看窗口（生产全史 pivot vs lookback 起行情）→
+    缺行情日期跳过而非 KeyError（quantile_returns_by_date 走 index 交集）"""
+    _seed_attribution(db)
+    # 在行情窗口（DAYS[0]）之前种一条 factor_value：norm 有、day_ret 无该日 → 修前 KeyError
+    db.add(FactorValue(id=_next_id(), code="600005", factor_name="ma_trend",
+                       trade_date=date(2024, 8, 26), value=0.9,
+                       rank=1, normalized=0.9))
+    db.commit()
+    detail = compute_attribution(db)
+    assert detail["samples"] == 3                      # 2024-08-26 无行情 → 跳过不计数
+    d = {row["date"]: row for row in detail["daily"]}
+    assert abs(d[DAYS[1].isoformat()]["exposure"]["ma_trend"] - 0.4) < 1e-4  # 信号日归因不受影响
