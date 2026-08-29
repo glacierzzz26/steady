@@ -40,6 +40,7 @@ deploy/images/
 deploy/release/
 deploy/RELEASES.md
 deploy/backup/
+deploy/backups/
 
 # ---- IDE / 系统 ----
 .vscode/
@@ -48,3 +49,6 @@ deploy/backup/
 
 # ---- 数据库快照 ----
 *.dump
+
+# ---- 一次性原型 / 参考（不入库）----
+docs/原型-前端v2-全站.html
