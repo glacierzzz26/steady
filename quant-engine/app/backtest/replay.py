@@ -9,14 +9,14 @@
   0/1 因子数学上等价于原始价，仍按文档口径计算）
 
 持仓演化（holdings_mode，振荡修复对照用）：
-- running（默认，本文件历史行为）：信号运行集——generate_signal 内 BUY 加入 / SELL 移除。
+- portfolio（默认，修复方向）：每日持仓由引擎从真实组合（portfolio.positions）同步，
+  与实盘从 position 表重建真实持仓同口径；成交失败（涨停/资金不足/熔断）
+  不产生幽灵持仓，闭环稳定。
+- running（保留供对照）：信号运行集——generate_signal 内 BUY 加入 / SELL 移除。
   与实盘 `_reconstruct_holdings` 语义不同：HOLD 不改持仓，故不忠实复现实盘
   「719 HOLD → 704 SELL」式隔日振荡（见 振荡修复 backtest 对照）。
-- reconstruct：实盘语义——每日持仓 = 上一信号日 action ∈ {BUY, HOLD} 的代码集合
-  （对应 multi_factor._reconstruct_holdings，含把「未持有等回调 HOLD」误计为持仓的缺陷）。
-- portfolio：修复方向——每日持仓由引擎从真实组合（portfolio.positions）同步，
-  与实盘从 position/trade 表重建真实持仓同口径；成交失败（涨停/资金不足/熔断）
-  不产生幽灵持仓，闭环稳定。
+- reconstruct（保留供对照）：实盘修复前语义——每日持仓 = 上一信号日 action ∈ {BUY, HOLD}
+  的代码集合（含把「未持有等回调 HOLD」误计为持仓的缺陷）。
 """
 import logging
 from datetime import date, timedelta
@@ -70,7 +70,7 @@ class ReplayStrategy:
         self.stop_loss_pct = config.get("stop_loss_pct", 0.0)
         self.drawdown_fuse_pct = config.get("drawdown_fuse_pct", 0.0)
         self.industry_limit_pct = config.get("industry_limit_pct", 0.0)
-        self.holdings_mode = config.get("holdings_mode", "running")  # running/reconstruct/portfolio
+        self.holdings_mode = config.get("holdings_mode", "portfolio")  # portfolio/running/reconstruct
         self.holdings: set = set()
         self._prev_signal_actions: dict[str, str] = {}  # reconstruct 模式：上一信号日 {code: action}
         self.pool: list[str] = []

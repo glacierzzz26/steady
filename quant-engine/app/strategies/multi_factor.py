@@ -8,8 +8,9 @@
 - 已持仓且 rank >  sell_buffer   → SELL
 - 其余                          → HOLD（缓冲带防止频繁换手）
 
-持仓来源：Sprint 5 才有 position 表，此处从最近一次历史信号重建
-（昨日 action ∈ {BUY, HOLD} → 持有；SELL → 平仓），首日为空集。
+持仓来源：position 表主账户真实持仓（quantity>0，与 Go ExecuteDay ledger 同口径）；
+首日/无持仓为空集。修复前从最近一次历史信号重建（BUY+HOLD 全视为持仓）曾致隔日
+mass-HOLD/mass-SELL 振荡。
 """
 import logging
 from datetime import date
@@ -19,7 +20,7 @@ import pandas as pd
 from sqlalchemy import select
 
 from app.factor_service import score_cross_section
-from app.models.tables import FactorDefinition, FactorValue, StrategySignal
+from app.models.tables import Account, FactorDefinition, FactorValue, Position
 from app.strategies.base import Signal, Strategy
 
 logger = logging.getLogger(__name__)
@@ -122,23 +123,22 @@ class MultiFactorStrategy(Strategy):
     # ---------- 内部 ----------
 
     def _reconstruct_holdings(self, td: date) -> set:
-        """持仓重建：最近一次历史信号日 action ∈ {BUY, HOLD} 的代码集合"""
-        prev = self.db.execute(
-            select(StrategySignal.trade_date)
-            .where(StrategySignal.strategy_name == self.name,
-                   StrategySignal.trade_date < td)
-            .order_by(StrategySignal.trade_date.desc())
-            .limit(1)
-        ).scalar()
-        if prev is None:
-            logger.info("无历史信号，首次运行持仓为空")
+        """持仓重建：主账户真实持仓（position 表 quantity>0），
+        与 Go ExecuteDay 的 ledger.positions 同口径。
+
+        修复前：把上一信号日 action ∈ {BUY, HOLD} 全视为持仓，HOLD 中「未持仓
+        等回调」被误计 → 隔日 mass-HOLD/mass-SELL 振荡（见 振荡修复 backtest 对照）。
+        """
+        account_id = self.db.execute(
+            select(Account.id).order_by(Account.id).limit(1)).scalar()
+        if account_id is None:
+            logger.info("无账户记录，持仓为空")
             return set()
-        actions = self.db.execute(
-            select(StrategySignal.code, StrategySignal.action)
-            .where(StrategySignal.strategy_name == self.name,
-                   StrategySignal.trade_date == prev)
-        ).all()
-        return {code for code, action in actions if action in ("BUY", "HOLD")}
+        rows = self.db.execute(
+            select(Position.code).where(
+                Position.account_id == account_id,
+                Position.quantity > 0)).all()
+        return {code for (code,) in rows}
 
     def _reason(self, row: pd.Series, rank: int, n: int,
                 action: str) -> str:

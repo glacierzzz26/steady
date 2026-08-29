@@ -49,6 +49,15 @@ def test_nan_col_value_returns_none():
     assert roe_by_announce(df, date(2026, 7, 2)) is None
 
 
+def test_latest_non_null_when_latest_is_null():
+    """最新一期 col 为 null → 回退到最新非空一期（601162 天风证券 null-roe 回退）"""
+    df = _fin_df([
+        ((2026, 3, 31), (2026, 4, 20), {"roe": 10.0}),
+        ((2026, 6, 30), (2026, 8, 18), {"roe": None}),
+    ])
+    assert roe_by_announce(df, date(2026, 8, 20)) == 10.0
+
+
 def test_empty_inputs():
     assert roe_by_announce(None, date(2026, 7, 2)) is None
     assert debt_by_announce(pd.DataFrame(), date(2026, 7, 2)) is None

@@ -333,6 +333,24 @@ class MorningBrief(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class Account(Base):
+    """账户（只读，主账户 = id 最小者，与 Go GetPrimary 同口径；DDL 以 init.sql 为准）"""
+
+    __tablename__ = "account"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    name = Column(String(50))
+    cash = Column(Numeric(15, 2))
+    total_asset = Column(Numeric(15, 2))
+    market_value = Column(Numeric(15, 2))
+    profit = Column(Numeric(15, 2))
+    profit_rate = Column(Numeric(8, 4))
+    max_drawdown = Column(Numeric(8, 4))
+    status = Column(String(10), default="active")
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=datetime.now)
+
+
 class Position(Base):
     """持仓（只读，早报/日报持仓节数据源；DDL 以 init.sql 为准）"""
 

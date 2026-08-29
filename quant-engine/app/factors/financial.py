@@ -10,17 +10,19 @@ import pandas as pd
 
 def latest_by_announce(fin_df: pd.DataFrame | None, trade_date: date,
                        col: str) -> float | None:
-    """最新一期财务值：announce_date <= trade_date 中公告日最晚的一期"""
+    """最新一期财务值：announce_date <= trade_date 中公告日最晚、且 col 非空的一期。
+
+    跳过 col 为 null 的期（如 601162 天风证券最新一期 roe 为 null 时回退到
+    上一期非空值），与回测 replay._asof_grid 的 dropna 语义一致。
+    """
     if fin_df is None or fin_df.empty:
         return None
-    valid = fin_df[fin_df["announce_date"] <= trade_date]
+    valid = fin_df[(fin_df["announce_date"] <= trade_date)
+                   & fin_df[col].notna()]
     if valid.empty:
         return None
     row = valid.sort_values(["announce_date", "report_date"]).iloc[-1]
-    v = row[col]
-    if v is None or pd.isna(v):
-        return None
-    return float(v)
+    return float(row[col])
 
 
 def roe_by_announce(fin_df: pd.DataFrame | None, trade_date: date) -> float | None:
