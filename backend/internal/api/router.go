@@ -76,6 +76,10 @@ func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
 		v1.GET("/signals", handler.GetSignals(signalRepo))
 		v1.GET("/signals/:code", handler.GetSignalsByCode(signalRepo, stockRepo))
 
+		// 策略效果度量（方向① 第一期：quant-engine 21:20 预计算 / 只读消费）
+		v1.GET("/performance/hit-rate", handler.GetPerformanceHitRate(db))
+		v1.GET("/performance/nav-overlay", handler.GetPerformanceNavOverlay(db))
+
 		// 模拟交易（Sprint 5）
 		v1.GET("/account", handler.GetAccount(accountRepo, initialCash))
 		v1.GET("/account/nav", handler.GetAccountNav(navSvc, accountRepo))

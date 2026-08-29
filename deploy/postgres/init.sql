@@ -179,6 +179,21 @@ CREATE TABLE IF NOT EXISTS remediation_task (
 CREATE INDEX IF NOT EXISTS idx_remediation_status ON remediation_task (status);
 
 -- ------------------------------------------------------------
+-- 5.4 策略效果度量（2.6 方向①：quant-engine 预计算 / Go 前端只读，见迁移 006）
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS strategy_perf (
+    id            BIGSERIAL     PRIMARY KEY,
+    strategy_name VARCHAR(50)   NOT NULL,                    -- 策略名（默认 'multi_factor'）
+    period_start  DATE          NOT NULL,                    -- 统计起始日
+    period_end    DATE          NOT NULL,                    -- 统计截止日（hit_rate=end_date；nav_overlay=今天）
+    metric_type   VARCHAR(20)   NOT NULL,                    -- hit_rate / nav_overlay（attribution 第二期）
+    detail        JSONB,                                     -- {windows:{5:{...}}, series:[{date,live,bt,benchmark}], ...}
+    created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_strategy_perf UNIQUE (strategy_name, period_end, metric_type)
+);
+
+-- ------------------------------------------------------------
 -- 6. 策略
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS strategy (
@@ -459,6 +474,7 @@ INSERT INTO notify_config (event_key, name, enabled, schedule_type, weekdays, se
     ('morning_brief', '早盘简报', TRUE, 'trading_day', NULL, '09:15', 'blue'),
     ('backtest',     '回测完成', TRUE, 'event',       NULL, NULL,    'green'),
     ('remedi',       '自动修复', TRUE, 'event',       NULL, NULL,    'green'),
+    ('perf_report',  '月度绩效报告', TRUE, 'event',   NULL, NULL,    'blue'),
     ('task_alert',   '任务告警', TRUE, 'event',       NULL, NULL,    'red')
 ON CONFLICT (event_key) DO NOTHING;
 

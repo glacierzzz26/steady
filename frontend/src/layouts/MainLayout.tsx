@@ -38,6 +38,7 @@ const NAV: Array<{ label: string; items: NavItem[] }> = [
     items: [
       { to: '/trade', icon: '◆', label: '模拟交易' },
       { to: '/backtest', icon: '◱', label: '回测中心' },
+      { to: '/performance', icon: '◮', label: '绩效度量' },
       { to: '/live', icon: '⏻', label: '实盘交易', badge: 'P3', p3: true },
     ],
   },
@@ -89,6 +90,7 @@ function crumbKey(pathname: string): string {
     '/stocks': 'stocks',
     '/trade': 'trade',
     '/backtest': 'backtest',
+    '/performance': 'perf',
     '/live': 'live',
     '/ops': 'ops',
     '/auth': 'auth',

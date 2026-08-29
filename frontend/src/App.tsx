@@ -10,6 +10,7 @@ import Stocks from './pages/Stocks'
 import StockDetail from './pages/StockDetail'
 import Trade from './pages/Trade'
 import Backtest from './pages/Backtest'
+import Performance from './pages/Performance'
 import Live from './pages/Live'
 import Auth from './pages/Auth'
 import Ops from './pages/Ops'
@@ -33,6 +34,7 @@ export default function App() {
         {/* 交易区 */}
         <Route path="/trade" element={<Trade />} />
         <Route path="/backtest" element={<Backtest />} />
+        <Route path="/performance" element={<Performance />} />
         <Route path="/live" element={<Live />} />
         {/* 系统区 */}
         <Route path="/ops" element={<Ops />} />

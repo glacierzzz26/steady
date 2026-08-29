@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from app.db import get_session, upsert
 from app.models.tables import DailyPrice, StockBasic, StrategySignal
 from app.notify_scheduler import tick as notify_tick
-from app.task_run import record_task
+from app.task_run import already_run, record_task
 
 logging.basicConfig(
     level=logging.INFO,
@@ -303,6 +303,81 @@ def job_morning_brief():
     _job()
 
 
+def job_precompute_perf():
+    """21:20 策略效果度量预计算（方向① 第一期）：命中率 + 实盘vs回测对照。
+
+    晚于 backend 21:05 净值快照；幂等 upsert（UNIQUE(strategy_name, period_end,
+    metric_type)），每日覆盖重算。逻辑见 app/performance.py。"""
+    from app.performance import compute_hit_rate, compute_nav_overlay
+
+    db = get_session()
+    try:
+        hr = compute_hit_rate(db)
+        ov = compute_nav_overlay(db)
+        record_task(db, "precompute_perf", date.today(), "success",
+                    f"命中率窗口 {sorted((hr.get('windows') or {}).keys())} · "
+                    f"对照 {ov.get('metrics', {}).get('drift')}",
+                    detail={"hit_rate_buy_samples": hr.get("buy_samples"),
+                            "hit_rate_period_start": hr.get("period_start"),
+                            "overlay_live_points": ov.get("metrics", {}).get("live_points")})
+        logger.info("绩效预计算完成：hit_rate=%s overlay_drift=%s",
+                    sorted((hr.get("windows") or {}).keys()),
+                    ov.get("metrics", {}).get("drift"))
+    except Exception:
+        logger.exception("绩效预计算失败")
+        db.rollback()
+        record_task(db, "precompute_perf", date.today(), "failed", "绩效预计算异常")
+    finally:
+        db.close()
+
+
+def job_perf_monthly_report():
+    """每月 1 日 21:15 发送上月绩效报告卡片（notify_config['perf_report'] 门控）。
+
+    去重键 perf_report:{YYYYMM}（月度，record_task 幂等防重发）；逻辑见
+    app/performance.build_monthly_report。"""
+    from sqlalchemy import select as _select
+
+    from app.models.tables import NotifyConfig
+    from app.performance import build_monthly_report
+
+    db = get_session()
+    try:
+        last_month = date.today().replace(day=1)
+        y, m = (last_month.year - 1, 12) if last_month.month == 1 \
+            else (last_month.year, last_month.month - 1)
+        key = f"perf_report:{y}{m:02d}"
+        if already_run(db, key, date.today()):
+            logger.info("月度绩效报告已发送（%s）", key)
+            return
+        content, summary = build_monthly_report(db, y, m)
+        from app.notify import FeishuNotifier, load_config
+
+        cfg = load_config(db)
+        if not cfg["enabled"]:
+            record_task(db, key, date.today(), "skipped", "飞书通知未启用")
+            return
+        ev = db.execute(
+            _select(NotifyConfig).where(NotifyConfig.event_key == "perf_report")
+        ).scalar()
+        if ev is None or not ev.enabled:
+            record_task(db, key, date.today(), "skipped", "perf_report 通知未启用")
+            return
+        ok = FeishuNotifier(cfg).send_card(
+            f"📊 {y}-{m:02d} 月度绩效报告", content, template="blue", footer="绩效度量 · 月度")
+        record_task(db, key, date.today(),
+                    "success" if ok else "failed",
+                    "绩效报告已推送" if ok else "绩效报告推送失败",
+                    detail={"month": f"{y}-{m:02d}", "summary": summary})
+    except Exception:
+        logger.exception("月度绩效报告失败")
+        db.rollback()
+        record_task(db, f"perf_report:{date.today().strftime('%Y%m')}", date.today(),
+                    "failed", "月度绩效报告异常")
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
     scheduler = BlockingScheduler()
 
@@ -314,6 +389,8 @@ if __name__ == "__main__":
     scheduler.add_job(job_consume_factor_trials, "interval", minutes=5)
     scheduler.add_job(job_consume_remediation, "interval", minutes=5)
     scheduler.add_job(job_data_quality, "cron", hour=18, minute=30)
+    scheduler.add_job(job_perf_monthly_report, "cron", day=1, hour=21, minute=15)
+    scheduler.add_job(job_precompute_perf, "cron", hour=21, minute=20)
     scheduler.add_job(notify_tick, "interval", minutes=1)
 
     logger.info("quant-engine 调度器启动，等待定时任务...")
