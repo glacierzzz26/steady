@@ -1,7 +1,8 @@
 # 策略振荡修复 · backtest 对照验证
 
-> 归档模板：每个阶段一页。本页是**修复前置验证**（用户拍板路径：先跑持仓重构的 backtest 对照验证再改代码），不是正式阶段归档；周末改代码后补正式归档。
-> 关联：进度总表 `../../进度总表.md`（待办 · 振荡修复）· 记忆 `strategy-oscillation-fix-pending` · 策略与风控归档 [`策略与风控.md`](策略与风控.md)。
+> 正式归档：[`策略振荡修复.md`](策略振荡修复.md)（2026-08-29 修复落地，99 测试全绿 + 回归一致）。
+> 本页 = 修复前的 **backtest 对照验证**（用户拍板路径：先跑持仓重构的 backtest 对照验证再改代码）。
+> 关联：进度总表 `../../进度总表.md`（已登记修复）· 记忆 `strategy-oscillation-fix-pending` · 策略与风控归档 [`策略与风控.md`](策略与风控.md)。
 
 ## 目标
 
@@ -57,16 +58,16 @@ running +4.52% / reconstruct -0.14% / portfolio +4.51%（回撤 -15.95 / -9.10 /
 3. **当前回测（running）不忠实复现实盘**：running 无振荡（SELL 信号仅 1434），振荡缺陷从未在回测中暴露 → 修复后回测须切 `portfolio` 语义，才能与实盘闭环一致（这是本次对照最重要的旁证）。
 4. **风险确认**：实盘账户一旦有持仓（如 08-27 起持有 000651/601838），后续 mass-SELL 日会基于错误持仓判断误发 SELL——虽 ExecuteDay 按真实持仓过滤，但信号层面已失真，误卖风险真实存在。
 
-## 周末改代码依据
+## 周末改代码依据（✅ 2026-08-29 已全部落地）
 
-- `quant-engine/app/strategies/multi_factor.py`：`_reconstruct_holdings` 改从 `position`/`trade` 表重建真实持仓（实盘侧）。
+- `quant-engine/app/strategies/multi_factor.py`：`_reconstruct_holdings` 改从 `position` 表重建真实持仓（实盘侧，主账户 `quantity>0`）。
 - `quant-engine/app/backtest/replay.py`：回测持仓模式默认切 `portfolio`（引擎同步真实组合），与实盘同口径；保留 `running`/`reconstruct` 供对照与回归。
 - `quant-engine/app/backtest/engine.py`：portfolio 模式持仓同步钩子已就位（本次已实现）。
-- 测试 `tests/test_holdings_modes.py`：三种模式语义已锁定（5 用例）。
-- 附带同批：601162 天风证券 null-roe 回退（factor 取最新非空 roe）。
-- 对照脚本 `scripts/compare_holdings_modes.py` 保留，供改后回归验证。
+- 测试 `tests/test_holdings_modes.py`：三种模式语义已锁定（5 用例）；新增 `tests/test_reconstruct_holdings.py`（实盘重建 4 用例）。
+- 附带同批：601162 天风证券 null-roe 回退（`latest_by_announce` 取最新非空 roe，`test_financial.py` +1 用例）。
+- 对照脚本 `scripts/compare_holdings_modes.py` 保留，供改后回归验证（回归结果 portfolio 0 振荡 / +9.00% 与对照一致）。
 
 ## 遗留
 
-- dev DB `factor_definition` 缺 2.3b 列（version/status/params）、`strategy` 缺 zh_name/version/updated_at——GORM AutoMigrate 只在 prod 跑过，dev 落后。对照脚本已用列级 select 规避；正式修复前建议补一次 dev 迁移对齐。
-- 振荡量化指标（mass-HOLD/mass-SELL/交替次数）目前只在对照脚本，可考虑固化进 data_quality 或策略监控（待周末改代码时一并决策）。
+- ✅ dev DB 2.3b 列缺失（`factor_definition` 缺 version/status/params 等）——2026-08-29 已跑 `scripts/migrate.sh` 补齐（dev 之前从未应用迁移）。
+- 振荡量化指标（mass-HOLD/mass-SELL/交替次数）目前只在对照脚本，可考虑固化进 data_quality 或策略监控（修复后仍待办）。
