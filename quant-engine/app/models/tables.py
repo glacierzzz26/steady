@@ -168,6 +168,32 @@ class RemediationTask(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class StrategyPerf(Base):
+    """策略效果度量预计算结果（方向① 第一期，G9 同款：Python 算好落库 / Go 前端只读）
+
+    metric_type 分列：hit_rate（BUY 样本 forward 5/10/20d 收益 + 相对基准命中）、
+    nav_overlay（实盘 account_nav vs 回测 t1_open nav vs 基准 sh000300 归一叠加）。
+    幂等：UNIQUE(strategy_name, period_end, metric_type) + upsert，每日 21:20 覆盖重算。
+    DDL 以 init.sql / 迁移 006 为准。
+    """
+
+    __tablename__ = "strategy_perf"
+    __table_args__ = (
+        UniqueConstraint("strategy_name", "period_end", "metric_type",
+                         name="uq_strategy_perf"),
+        {"comment": "策略效果度量，UNIQUE(strategy_name, period_end, metric_type) 幂等"},
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    strategy_name = Column(String(50), nullable=False)  # 默认 'multi_factor'
+    period_start = Column(Date, nullable=False)
+    period_end = Column(Date, nullable=False)
+    metric_type = Column(String(20), nullable=False)  # hit_rate / nav_overlay
+    detail = Column(JSON)  # {windows:{5:{...}}, series:[{date,live,bt,benchmark}], ...}
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class FactorStat(Base):
     """因子检验统计（G9 FactorLab 数据源，quant-engine 预计算 / Go 读取聚合）
 

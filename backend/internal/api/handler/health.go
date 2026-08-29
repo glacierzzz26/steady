@@ -262,5 +262,5 @@ var assetTables = []string{
 	"factor_definition", "factor_value", "strategy_signal", "trade_calendar",
 	"strategy", "market_hotspot", "morning_brief", "backtest_job", "backtest_result",
 	"account", "account_nav", "order", "position", "trade", "task_run",
-	"notify_config", "app_config",
+	"remediation_task", "notify_config", "app_config",
 }
