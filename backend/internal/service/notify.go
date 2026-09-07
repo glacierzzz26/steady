@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -39,15 +40,17 @@ type NotifyEventDTO struct {
 	Template     string  `json:"template"`
 }
 
-// FeishuConfigDTO 飞书配置（app_config.feishu.*）
+// FeishuConfigDTO 飞书配置（app_config.feishu.*）。
+// HTTP GET 用 GetFeishuConfigView 取脱敏视图：webhook_url/secret 为掩码（"****"+末4）；
+// PUT 语义：webhook_url/secret 为空或掩码开头 = 保留已存（镜像 llm.go）。
 type FeishuConfigDTO struct {
 	Enabled      bool   `json:"enabled"`
 	WebhookURL   string `json:"webhook_url"`
 	DashboardURL string `json:"dashboard_url"`
 	Timeout      int    `json:"timeout"`
 	MaxRetries   int    `json:"max_retries"`
-	Secret       string `json:"secret"`  // 签名校验密钥；留空=不签名
-	AtAll        bool   `json:"at_all"`  // 通知卡片 @所有人
+	Secret       string `json:"secret"` // 签名校验密钥；留空=不签名
+	AtAll        bool   `json:"at_all"` // 通知卡片 @所有人
 }
 
 // ---------- 通知事件配置 ----------
@@ -132,7 +135,28 @@ func (s *NotifyService) GetFeishuConfig() (FeishuConfigDTO, error) {
 	}, nil
 }
 
+// GetFeishuConfigView 飞书配置的对外展示视图（HTTP GET 边界）：
+// webhook/secret 走 maskToken 脱敏（"****"+末4）；内部 Ready/SendCard/SendTest 发信
+// 仍需真值，继续用 GetFeishuConfig（镜像 llm.go GetConfig 掩码语义）。
+func (s *NotifyService) GetFeishuConfigView() (FeishuConfigDTO, error) {
+	cfg, err := s.GetFeishuConfig()
+	if err != nil {
+		return FeishuConfigDTO{}, err
+	}
+	cfg.WebhookURL = maskToken(cfg.WebhookURL)
+	cfg.Secret = maskToken(cfg.Secret)
+	return cfg, nil
+}
+
 func (s *NotifyService) UpdateFeishuConfig(d FeishuConfigDTO) error {
+	// 密钥守卫（镜像 llm.go UpdateConfig）：webhook/secret 为空或以 "****" 开头
+	// = 保留已存（前端 GET 回显的掩码值会在保存时整包 PUT 回，必须吸收）。
+	if d.WebhookURL == "" || strings.HasPrefix(d.WebhookURL, "****") {
+		d.WebhookURL = s.rawFeishuValue("feishu.webhook_url")
+	}
+	if d.Secret == "" || strings.HasPrefix(d.Secret, "****") {
+		d.Secret = s.rawFeishuValue("feishu.secret")
+	}
 	rows := []model.AppConfig{
 		{Key: "feishu.enabled", Value: strconv.FormatBool(d.Enabled), ValueType: "bool"},
 		{Key: "feishu.webhook_url", Value: d.WebhookURL, ValueType: "secret"},
@@ -235,6 +259,15 @@ func dashboardURL(d string) string {
 		return "http://localhost"
 	}
 	return d
+}
+
+// rawFeishuValue 读已存 feishu.* 配置原值（仅 UpdateFeishuConfig 保留守卫用，绝不回显）
+func (s *NotifyService) rawFeishuValue(key string) string {
+	var row model.AppConfig
+	if err := s.db.Where("key = ?", key).First(&row).Error; err != nil {
+		return ""
+	}
+	return row.Value
 }
 
 // genSign 飞书机器人签名：sign = base64(hmac_sha256(key=f"{ts}\n{secret}", data=空))

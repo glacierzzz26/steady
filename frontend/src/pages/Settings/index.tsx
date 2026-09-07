@@ -177,6 +177,9 @@ export default function Settings() {
                 placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
                 style={{ width: '100%' }}
               />
+              <div style={{ fontSize: 12, color: 'var(--txt3)', marginTop: 4 }}>
+                已配置时此处回显掩码；留空或以 **** 开头 = 保留已存，粘贴新值才更新
+              </div>
               <div style={{ fontSize: 14, color: 'var(--txt2)', margin: '10px 0 6px' }}>
                 启用通知
                 <input
