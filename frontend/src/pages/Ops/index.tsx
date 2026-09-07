@@ -1,9 +1,14 @@
 import { useState } from 'react'
 import Notice from '../../components/Notice'
 import HealthChecks from '../../components/HealthChecks'
+import Pager from '../../components/Pager'
 import { opsApi, type ServiceStatus } from '../../api'
 import { useApi } from '../../hooks/useApi'
 import { fmtTask } from '../../lib/names'
+
+// Issue #11-4/#11-5：时间线「展开全部」与资产表客户端分页
+const TL_PG = 20 // 时间线每页条数
+const ASSET_PG = 10 // 资产概览默认每页条数
 
 const STATUS_TEXT: Record<string, [string, string]> = {
   success: ['成功', 'ok'],
@@ -52,11 +57,19 @@ export default function Ops() {
   const items = runs.data?.items ?? []
   const dbOk = health.data?.db === 'ok'
 
-  // 任务时间线：默认仅展示最近一天，点击展开全部（runs 按 run_date 倒序返回）
+  // 任务时间线：默认仅展示最近一天，点击展开全部（runs 按 run_date 倒序返回）。
+  // 展开后 items 客户端分页（Issue #11-4）
   const [expanded, setExpanded] = useState(false)
+  const [tlPage, setTlPage] = useState(1)
   const firstDay = items[0]?.run_date ?? ''
-  const visible = expanded ? items : items.filter(it => it.run_date === firstDay)
+  const dayOnly = items.filter(it => it.run_date === firstDay)
+  const visible = expanded ? items.slice((tlPage - 1) * TL_PG, tlPage * TL_PG) : dayOnly
   const dayCount = new Set(items.map(it => it.run_date)).size
+
+  // 数据资产概览：默认 10 条/页（Issue #11-5）
+  const [asPage, setAsPage] = useState(1)
+  const assetsArr = assets.data?.items ?? []
+  const pageAssets = assetsArr.slice((asPage - 1) * ASSET_PG, asPage * ASSET_PG)
 
   // 告警记录：失败任务 + alert: 类红卡告警（「该做没做」/ 任务失败都落 task_run 台账）
   const alerts = items.filter(it => it.status === 'failed' || it.task_name.startsWith('alert:'))
@@ -97,11 +110,20 @@ export default function Ops() {
                 })}
               </div>
               {dayCount > 1 && (
-                <div className="tl-more" onClick={() => setExpanded(e => !e)}>
+                <div
+                  className="tl-more"
+                  onClick={() => {
+                    setExpanded(e => !e)
+                    setTlPage(1)
+                  }}
+                >
                   {expanded
                     ? `收起 · 仅显示 ${firstDay}`
                     : `展开全部 · 近 ${dayCount} 天 · 共 ${items.length} 条`}
                 </div>
+              )}
+              {expanded && items.length > TL_PG && (
+                <Pager total={items.length} page={tlPage} size={TL_PG} onChange={p => setTlPage(p)} />
               )}
             </>
           )}
@@ -109,7 +131,7 @@ export default function Ops() {
 
         <div className="card">
           <h3>
-            服务状态<span className="hint">6 容器实时探活</span>
+            服务状态<span className="hint">6 服务实时探活</span>
           </h3>
           {services.error ? (
             <Notice text={services.error} onRetry={services.reload} retrying={services.loading} />
@@ -132,7 +154,7 @@ export default function Ops() {
                 }}
               >
                 {dbOk
-                  ? '后端实时探测容器状态 · 悬停可见详情'
+                  ? '后端内网 HTTP 探活 · 悬停可见详情'
                   : '数据库不可达（看后端日志）'}
               </div>
             </>
@@ -210,7 +232,7 @@ export default function Ops() {
                 </tr>
               </thead>
               <tbody>
-                {(assets.data?.items ?? []).map(a => (
+                {pageAssets.map(a => (
                   <tr key={a.table}>
                     <td className="num">{a.table}</td>
                     <td className="r num">{a.rows.toLocaleString()}</td>
@@ -218,6 +240,9 @@ export default function Ops() {
                 ))}
               </tbody>
             </table>
+          )}
+          {assetsArr.length > ASSET_PG && (
+            <Pager total={assetsArr.length} page={asPage} size={ASSET_PG} onChange={p => setAsPage(p)} />
           )}
         </div>
       </div>

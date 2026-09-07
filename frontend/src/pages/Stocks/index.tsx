@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import Kpi from '../../components/Kpi'
 import Notice from '../../components/Notice'
 import Pager from '../../components/Pager'
@@ -48,13 +48,28 @@ function BoardTag({ item }: { item: StockPoolItem }) {
 
 export default function Stocks() {
   const navigate = useNavigate()
-  const [mode, setMode] = useState('全部')
+  const [searchParams] = useSearchParams()
   const [qInput, setQInput] = useState('')
   const [keyword, setKeyword] = useState('')
   const [sort, setSort] = useState('code')
   const [page, setPage] = useState(1)
 
+  // 板块过滤以 URL ?pool=hs300|zz500 为唯一事实源（Issue #11-2）：topbar 指数 chip
+  // 跳 /stocks?pool=… 直达预选；页面内 Seg 切换写回 URL（无 pool 即「全部」）
+  const pool = searchParams.get('pool')
+  const mode =
+    pool === 'hs300' ? '沪深300' : pool === 'zz500' ? '中证500' : '全部'
+  // pool 变化（chip 跳转）时回到第 1 页，避免停在旧列表的深层页
+  useEffect(() => {
+    setPage(1)
+  }, [pool])
+
   const universe = UNIVERSE_MAP[mode]
+  const setBoard = (v: string) => {
+    const p = UNIVERSE_MAP[v]
+    navigate(p ? `/stocks?pool=${p}` : '/stocks')
+    setPage(1)
+  }
   const listParams: StockListQuery = {
     page,
     page_size: POOL_PG,
@@ -97,14 +112,7 @@ export default function Stocks() {
                 onChange={e => setQInput(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && submitSearch()}
               />
-              <Seg
-                options={BOARD_OPTIONS}
-                value={mode}
-                onChange={v => {
-                  setMode(v)
-                  setPage(1)
-                }}
-              />
+              <Seg options={BOARD_OPTIONS} value={mode} onChange={setBoard} />
               <select
                 style={{ padding: '5px 8px' }}
                 value={sort}
