@@ -28,10 +28,11 @@ import pandas as pd
 from app.collectors.base import BaseCollector, to_ak_date, with_timeout
 from app.cleaners import clean_daily_rows
 from app.cleaners.factor_guard import factor_change_pairs, guard_factor
-from app.config import baostock_enabled
+from app.config import (baostock_enabled, daily_source_chain,
+                        tencent_enabled)
 from app.db import upsert
 from app.models.tables import DailyPrice
-from app.sources import baostock
+from app.sources import baostock, tencent
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,37 @@ def fetch_pair(code: str, start: str, end: str) -> tuple[pd.DataFrame, pd.DataFr
             raise RuntimeError(
                 f"{code} 东财与新浪均未返回数据（东财{reason}），判定失败触发重试")
     return raw, hfq
+
+
+def _align_hfq_to_raw(raw: pd.DataFrame, hfq: pd.DataFrame) -> pd.DataFrame:
+    """按 raw 的日期集对齐因子腿，并把日期统一成 ISO 字符串。
+
+    两腿来自不同源，除交易日集可能不齐外，**日期类型也可能不同**（腾讯 raw 为
+    字符串、新浪 hfq 为 datetime.date）——build_rows 以 `hfq_close.get(trade_date)`
+    按值取因子，类型不一致会全部取不到（因子全 None）。此处统一为字符串。
+    """
+    if raw.empty or hfq.empty:
+        return hfq
+    hfq = hfq.copy()
+    hfq["日期"] = hfq["日期"].astype(str)
+    keep = set(raw["日期"].astype(str))
+    return hfq[hfq["日期"].isin(keep)]
+
+
+def fetch_pair_tencent(code: str, start: str, end: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """腾讯不复权 OHLCV + 新浪 hfq 因子腿 → (raw, hfq)，列为东财格式
+
+    与既有 BaoStock 混合方案同构的「整对」：腾讯出 raw（快 20×、支持北交所），
+    新浪出复权因子（hfq/raw 恒等比 = 库内口径）。**腾讯 hfq 永久禁用**（见
+    sources/tencent.daily_pairs tripwire）。
+    """
+    raw = with_timeout(tencent.daily_raw, code, start, end)
+    hfq = with_timeout(
+        ak.stock_zh_a_daily, symbol=sina_symbol(code),
+        start_date=start, end_date=end, adjust="hfq",
+    )
+    hfq = normalize_sina(hfq)
+    return raw, _align_hfq_to_raw(raw, hfq)
 
 
 def build_rows(code: str, raw: pd.DataFrame, hfq: pd.DataFrame) -> list[dict]:
@@ -190,18 +222,35 @@ def cross_check_splits(code: str, rows: list[dict], window_start) -> None:
 class DailyCollector(BaseCollector):
     """按股票代码拉取日K行情，经质量校验后入库"""
 
+    # profile 名 → 拉取方法名（按名字在调用期分发，勿在 import 期快照函数对象——
+    # 会破坏 test_daily.py 的 monkeypatch）
+    _PROFILES = {
+        "akshare": "_fetch_akshare",
+        "tencent": "_fetch_tencent",
+        "baostock": "_fetch_baostock",
+    }
+
     def fetch(self, code: str, start_date, end_date, *args, **kwargs) -> list[dict]:
-        # 阶段 4：AkShare 主源（fetch_pair 内部链：东财 → 新浪）；AkShare 数据过
-        # guard_factor + 除权交叉验证，失败/拒收且源链含 BaoStock → BaoStock 兜底
-        # （兜底数据同样过守卫）。链内无 BaoStock 则 raise，触发 base.run 重试，
-        # 不静默成功。
-        try:
-            return self._fetch_akshare(code, start_date, end_date)
-        except Exception as e:
-            logger.warning("%s AkShare 拉取失败(%s)，尝试 BaoStock 兜底", code, e)
-            if not baostock_enabled("daily"):
-                raise
-        return self._fetch_baostock(code, start_date, end_date)
+        """按 DAILY_SOURCE_CHAIN 顺序尝试各 profile，左→右为降级方向。
+
+        默认链 ['akshare'] = 现状；链走完仍失败且 baostock_enabled("daily") →
+        BaoStock 兜底（保持既有阶段 4 语义）；否则 raise，触发 base.run 重试，
+        不静默成功。
+        """
+        errors = []
+        for name in daily_source_chain():
+            method = self._PROFILES.get(name)
+            if method is None:
+                logger.warning("未知日行情源 profile '%s'，跳过", name)
+                continue
+            try:
+                return getattr(self, method)(code, start_date, end_date)
+            except Exception as e:
+                logger.warning("%s 源 %s 拉取失败(%s)，尝试下一源", code, name, e)
+                errors.append(f"{name}: {e}")
+        if baostock_enabled("daily") and "baostock" not in daily_source_chain():
+            return self._fetch_baostock(code, start_date, end_date)
+        raise RuntimeError(f"{code} 源链全部失败（{'；'.join(errors) or '空链'}）")
 
     def _fetch_akshare(self, code: str, start_date, end_date) -> list[dict]:
         start_d = (date.fromisoformat(str(start_date))
@@ -220,6 +269,42 @@ class DailyCollector(BaseCollector):
             cross_check_splits(code, rows, start_d)
         rows = [r for r in rows if r["trade_date"] >= start_d]
         logger.info("%s AkShare 拉取 %s 条日行情", code, len(rows))
+        return rows
+
+    def _fetch_tencent(self, code: str, start_date, end_date) -> list[dict]:
+        """腾讯混合腿：腾讯出不复权 OHLCV，新浪出复权因子。
+
+        与 _fetch_akshare 同口径：窗口 start−7 取守卫上下文，产出过 guard_factor
+        + cross_check_splits 后才入库。
+
+        **不变量**：raw 非空但因子腿空（或对齐后因子全缺）→ raise，绝不落 NULL
+        adj_factor —— upsert 的 update_cols 含该列，NULL 会覆盖库内好因子
+        （即 08-28 指数 amount 清空事故同源坑）。
+        """
+        if not tencent_enabled("daily"):
+            raise RuntimeError(f"{code} 腾讯源未启用（TENCENT_ENABLED/TENCENT_SOURCES）")
+        start_d = (date.fromisoformat(str(start_date))
+                   if isinstance(start_date, str) else start_date)
+        start = to_ak_date(start_d - timedelta(days=7))
+        end = to_ak_date(end_date)
+        raw, hfq = fetch_pair_tencent(code, start, end)
+        if raw.empty:
+            raise RuntimeError(f"{code} 腾讯未返回日行情")
+        if hfq.empty:
+            raise RuntimeError(
+                f"{code} 腾讯 raw 有 {len(raw)} 行但新浪因子腿为空，"
+                "拒绝入库（防 NULL adj_factor 覆盖库内值）")
+        rows = build_rows(code, raw, hfq)
+        if not rows:
+            raise RuntimeError(f"{code} 腾讯数据构建入库行后为空")
+        if any(r.get("adj_factor") is None for r in rows):
+            raise RuntimeError(f"{code} 腾讯 raw 存在因子缺失行，拒绝入库")
+        _, ok = guard_factor(rows, window_start=start_d)
+        if not ok:
+            raise RuntimeError(f"{code} 腾讯复权因子守卫拒收")
+        cross_check_splits(code, rows, start_d)
+        rows = [r for r in rows if r["trade_date"] >= start_d]
+        logger.info("%s 腾讯拉取 %s 条日行情（因子腿走新浪）", code, len(rows))
         return rows
 
     def _fetch_baostock(self, code: str, start_date, end_date) -> list[dict]:
@@ -275,3 +360,33 @@ def upsert_daily_rows(db, data: list[dict]) -> int:
         )
         total += len(clean)
     return total
+
+
+def upsert_snapshot_rows(db, data: list[dict]) -> int:
+    """清洗 + upsert 批量快照行（18:10 当日同步；快照自带 prev_close 供除权判定）
+
+    与 upsert_daily_rows 关键差异：**动态剔除 update_cols** —— 快照行若缺某列
+    （如 amount 解析失败）则该列不参与 ON CONFLICT SET，避免用 NULL 覆盖库内
+    既有值（08-28 指数成交额清空事故同源坑：update_cols 含列但行值为 None）。
+    """
+    from collections import defaultdict
+
+    by_code: dict[str, list[dict]] = defaultdict(list)
+    for r in data:
+        by_code[r["code"]].append(r)
+    table_cols = set(DailyPrice.__table__.columns.keys())
+    base_cols = ["open", "high", "low", "close", "volume", "amount", "adj_factor"]
+    total = 0
+    for code, items in by_code.items():
+        clean = clean_daily_rows(code, items)
+        clean = [{k: r[k] for k in table_cols if k in r} for r in clean]
+        if not clean:
+            continue
+        # 仅更新本批全部行均有值的列（防 NULL 覆盖）
+        update_cols = [c for c in base_cols
+                       if all(r.get(c) is not None for r in clean)]
+        upsert(db, DailyPrice, clean,
+               conflict_cols=["code", "trade_date"], update_cols=update_cols)
+        total += len(clean)
+    return total
+

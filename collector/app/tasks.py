@@ -60,15 +60,78 @@ def _daily_sync_codes(db) -> list[str]:
     return sorted(with_data)
 
 
+def _latest_close_factor(db, codes: list[str]) -> dict[str, tuple]:
+    """每只股票库内最近一行的 (close, adj_factor)（Postgres DISTINCT ON）
+
+    供快照路径：adj_factor 延续 + 除权探测基准。
+    """
+    from sqlalchemy import select
+
+    rows = db.execute(
+        select(DailyPrice.code, DailyPrice.close, DailyPrice.adj_factor)
+        .where(DailyPrice.code.in_(codes))
+        .distinct(DailyPrice.code)
+        .order_by(DailyPrice.code, DailyPrice.trade_date.desc())
+    ).all()
+    return {code: (close, factor) for code, close, factor in rows}
+
+
+def _snapshot_sync(db, codes: list[str], end: date) -> list[str]:
+    """腾讯批量快照当日同步（~17s 拉全池 raw）→ 返回需逐只回退的股票。
+
+    快照只供不复权 OHLCV，不含复权因子：adj_factor 默认**延续**库内最近值
+    （无除权日因子不变）；以下情形回退逐只源链重算（自动过 guard_factor +
+    cross_check_splits，自纠）：
+      - 库内无历史（新股，无因子可延续）
+      - 快照「昨收」≠ 库内最近 close（超 TENCENT_DIV_TOL）→ 疑似除权
+      - 库内最近 adj_factor 为空（无可延续值，避免落 NULL 覆盖）
+    """
+    from app.config import TENCENT_DIV_TOL
+    from app.collectors.daily import upsert_snapshot_rows
+    from app.sources import tencent
+
+    latest = _latest_close_factor(db, codes)
+    snaps = tencent.snapshot_rows(codes, end)
+    by_code = {r["code"]: r for r in snaps}
+    deferred: list[str] = []
+    rows: list[dict] = []
+    for code in codes:
+        snap = by_code.get(code)
+        base = latest.get(code)
+        if snap is None or base is None or base[1] is None:
+            deferred.append(code)
+            continue
+        db_close, db_factor = base
+        if db_close and abs(float(snap["prev_close"]) / float(db_close) - 1) > TENCENT_DIV_TOL:
+            # 快照昨收 ≠ 库内最近收盘 → 疑似除权/复权口径变动，回退逐只重算因子
+            logger.info("快照除权探测命中 %s（昨收 %s vs 库内 %s），回退逐只",
+                        code, snap["prev_close"], db_close)
+            deferred.append(code)
+            continue
+        snap["adj_factor"] = float(db_factor)  # 因子延续
+        rows.append(snap)
+    n = upsert_snapshot_rows(db, rows)
+    logger.info("腾讯快照入库 %s 只，回退逐只 %s 只", n, len(deferred))
+    return deferred
+
+
 def job_sync_daily_price():
-    """18:10 同步当日行情：BaoStock 主源逐只（阶段 3 开关，无全市场快照接口）；
-    失败/未配置降级 AkShare 逐只（DailyCollector 内 BaoStock→AkShare 兜底链）"""
+    """18:10 同步当日行情。
+
+    TENCENT_SNAPSHOT 开启（且 scope 点名 daily）→ 先走腾讯批量快照（全池 ~17s，
+    因子延续 + 除权自动回退），仅回退股逐只补；否则全量逐只（BaoStock 主源，
+    失败降级 AkShare，见 DailyCollector 源链）。闸门默认关 = 现状。
+    """
     from app.collectors.daily import DailyCollector
+    from app.config import DAILY_FALLBACK_DAYS, DAILY_SYNC_INTERVAL, tencent_snapshot_enabled
 
     db = get_session()
     codes = _daily_sync_codes(db)
     end = date.today()
     logger.info("每日行情同步：%s 只股票", len(codes))
+    if tencent_snapshot_enabled():
+        codes = _snapshot_sync(db, codes, end)
+        logger.info("腾讯快照路径：%s 只需逐只补", len(codes))
     ok = fail = 0
     for code in codes:
         max_d = db.execute(
