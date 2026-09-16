@@ -118,6 +118,70 @@ def cmd_backfill_valuation(args):
     return True
 
 
+def cmd_audit_tencent(args):
+    """只读对账：腾讯日K vs daily_price 的 close/volume/amount 分板中位比值
+
+    翻转前验证单位表（科创板 ÷100、北交所单位当前唯一未实证项）。不写库。
+    """
+    from sqlalchemy import select
+
+    from app.collectors.daily import sina_symbol
+    from app.db import get_session
+    from app.models.tables import DailyPrice
+    from app.sources import tencent
+
+    db = get_session()
+    codes = ([c.strip().zfill(6) for c in args.codes.split(",")]
+             if args.codes else None)
+    if not codes:
+        codes = sorted(db.execute(
+            select(DailyPrice.code).where(DailyPrice.code.not_like("sh%"))
+            .distinct()).scalars().all())[:20]
+    for code in codes:
+        q = select(DailyPrice.trade_date, DailyPrice.close, DailyPrice.volume,
+                   DailyPrice.amount).where(DailyPrice.code == code)
+        if args.start:
+            q = q.where(DailyPrice.trade_date >= date.fromisoformat(args.start))
+        if args.end:
+            q = q.where(DailyPrice.trade_date <= date.fromisoformat(args.end))
+        db_rows = {d: (c, v, a) for d, c, v, a in db.execute(q).all()}
+        if not db_rows:
+            logger.info("%s 库内无数据，跳过", code)
+            continue
+        start = args.start or min(db_rows).strftime("%Y%m%d")
+        end = args.end or max(db_rows).strftime("%Y%m%d")
+        try:
+            raw = tencent.daily_raw(code, start, end)
+        except Exception as e:
+            logger.warning("%s 腾讯日K拉取失败：%s", code, e)
+            continue
+        ratios = {"close": [], "volume": [], "amount": []}
+        mismatch = 0
+        for _, r in raw.iterrows():
+            d = date.fromisoformat(str(r["日期"]))
+            if d not in db_rows:
+                continue
+            dc, dv, da = db_rows[d]
+            for key, tv, dbv in (("close", r["收盘"], dc),
+                                 ("volume", r["成交量"], dv),
+                                 ("amount", r["成交额"], da)):
+                if tv and dbv:
+                    ratios[key].append(float(tv) / float(dbv))
+            if dc and r["收盘"] and abs(float(r["收盘"]) / float(dc) - 1) > 1e-4:
+                mismatch += 1
+        med = {k: (sorted(v)[len(v) // 2] if v else None) for k, v in ratios.items()}
+        logger.info("%s n=%s 中位比值 close=%s volume=%s amount=%s 不一致=%s",
+                    code, len(raw), med["close"], med["volume"], med["amount"],
+                    mismatch)
+        if args.snapshot:
+            try:
+                snaps = tencent.snapshot_rows([code])
+                logger.info("%s 快照：%s", code, snaps[0] if snaps else "缺")
+            except Exception as e:
+                logger.warning("%s 快照拉取失败：%s", code, e)
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(prog="quant-collector")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -148,6 +212,14 @@ def main():
     p_bv.add_argument("--codes", help="只回填指定代码（逗号分隔）")
     p_bv.add_argument("--dry-run", action="store_true")
 
+    p_audit = sub.add_parser("audit-tencent",
+                             help="只读对账：腾讯 vs 库内 close/volume/amount")
+    p_audit.add_argument("--codes", help="指定代码（逗号分隔）")
+    p_audit.add_argument("--start", help="起始日期 YYYYMMDD")
+    p_audit.add_argument("--end", help="结束日期 YYYYMMDD")
+    p_audit.add_argument("--snapshot", action="store_true",
+                         help="同时打印腾讯快照行")
+
     args = parser.parse_args()
 
     try:
@@ -170,6 +242,8 @@ def main():
             ok = cmd_sync_valuation(args)
         elif args.cmd == "backfill-valuation":
             ok = cmd_backfill_valuation(args)
+        elif args.cmd == "audit-tencent":
+            ok = cmd_audit_tencent(args)
         else:
             parser.error(f"未知命令: {args.cmd}")
         sys.exit(0 if ok else 1)

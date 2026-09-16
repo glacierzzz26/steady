@@ -10,6 +10,15 @@ def _str(name: str, default: str) -> str:
     return os.getenv(name, default)
 
 
+def _float(name: str, default: float) -> float:
+    return float(os.getenv(name, str(default)))
+
+
+def _list(name: str, default: str) -> list[str]:
+    """逗号列表 env → 去空字符串列表"""
+    return [s.strip() for s in os.getenv(name, default).split(",") if s.strip()]
+
+
 # 请求限速（秒/只）：回填与每日同步共用，避免触发 AkShare 限速
 RATE_LIMIT_SECONDS = _int("COLLECTOR_RATE_LIMIT", 3)
 
@@ -76,6 +85,45 @@ def baostock_enabled(scope: str | None = None) -> bool:
     if scope is None:
         return bool(BAOSTOCK_SOURCES)
     return scope in BAOSTOCK_SOURCES
+
+
+# ---------- 腾讯行情源（Issue #15）----------
+# 保险丝（镜像 baostock_enabled）：TENCENT_ENABLED × TENCENT_SOURCES 双闸门，
+# 两者都不点名腾讯 → 一条腾讯请求都不发 → 部署代码本身不改生产路径。
+TENCENT_ENABLED = os.getenv("TENCENT_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+TENCENT_SOURCES = _list("TENCENT_SOURCES", "")
+# 逐只源链顺序（profile 名，左→右为降级方向）；默认 akshare = 现状
+DAILY_SOURCE_CHAIN = _list("DAILY_SOURCE_CHAIN", "akshare")
+# 18:10 当日同步是否走腾讯批量快照（qt.gtimg.cn，全池 ~17s）
+TENCENT_SNAPSHOT = os.getenv("TENCENT_SNAPSHOT", "").strip().lower() in ("1", "true", "yes", "on")
+TENCENT_RATE_LIMIT = _float("TENCENT_RATE_LIMIT", 0.2)
+TENCENT_TIMEOUT = _int("TENCENT_TIMEOUT", 10)
+TENCENT_BATCH_SIZE = _int("TENCENT_BATCH_SIZE", 50)
+# 快照除权探测阈值：|快照昨收/库内最近收盘 − 1| 超此值 → 疑似除权，回退逐只链
+TENCENT_DIV_TOL = _float("TENCENT_DIV_TOL", 0.005)
+
+
+def tencent_enabled(scope: str | None = None) -> bool:
+    """scope 的源链中是否包含腾讯（TENCENT_ENABLED × TENCENT_SOURCES 控制）
+
+    无参保留全局语义（任一 scope 生效即 True）。未启用或 scope 不在
+    TENCENT_SOURCES → False（链内无腾讯）。
+    """
+    if not TENCENT_ENABLED:
+        return False
+    if scope is None:
+        return bool(TENCENT_SOURCES)
+    return scope in TENCENT_SOURCES
+
+
+def daily_source_chain() -> list[str]:
+    """逐只日行情源链（profile 名，左→右为降级方向）；默认为 ['akshare']"""
+    return DAILY_SOURCE_CHAIN or ["akshare"]
+
+
+def tencent_snapshot_enabled() -> bool:
+    """18:10 当日同步是否走腾讯批量快照（需保险丝与 scope 同时点名 daily）"""
+    return TENCENT_SNAPSHOT and tencent_enabled("daily")
 
 # 热点采集（早盘简报数据源，Issue #4）：每日早晨采集一次
 HOTSPOT_TOP_N = _int("COLLECTOR_HOTSPOT_TOP_N", 10)          # 板块/人气榜取 TOP N

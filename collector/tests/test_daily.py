@@ -404,3 +404,140 @@ def test_save_upserts_clean_rows(monkeypatch):
     # 冲突判定列编译进 SQL
     sql = str(stmt.compile(dialect=pg_dialect()))
     assert "ON CONFLICT (code, trade_date) DO UPDATE" in sql
+
+
+# ---------- 腾讯源链 / 混合腿（Issue #15） ----------
+
+def test_source_chain_dispatches_by_name(monkeypatch):
+    """DAILY_SOURCE_CHAIN=tencent → 按 profile 名分发到腾讯腿，不触碰 AkShare 东财"""
+    from app.collectors import daily as dm
+
+    hist_calls = []
+
+    def fake_hist(*a, **k):
+        hist_calls.append(a)
+        raise AssertionError("AkShare 东财不应被调用")
+
+    # 腾讯 raw（东财中文列）
+    tencent_raw = pd.DataFrame({
+        "日期": ["2026-08-01", "2026-08-02"],
+        "开盘": [10.0, 10.5], "最高": [10.5, 11.0], "最低": [9.5, 10.0],
+        "收盘": [10.0, 10.5], "成交量": [10000, 12000], "成交额": [1e8, 1.2e8],
+    })
+    # 新浪 hfq 腿（sina 原始列名）
+    sina_hfq = pd.DataFrame({"date": ["2026-08-01", "2026-08-02"],
+                             "close": [62.6, 65.73]})
+
+    monkeypatch.setattr(dm.tencent, "daily_raw", lambda code, s, e: tencent_raw)
+    monkeypatch.setattr(dm.ak, "stock_zh_a_hist", fake_hist)
+    monkeypatch.setattr(dm.ak, "stock_zh_a_daily",
+                        lambda symbol, start_date, end_date, adjust: sina_hfq)
+    monkeypatch.setattr(dm, "daily_source_chain", lambda: ["tencent"])
+    monkeypatch.setattr(dm, "tencent_enabled", lambda *a, **k: True)
+
+    rows = DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
+    assert [r["adj_factor"] for r in rows] == [6.26, 6.26]  # 因子来自新浪腿
+    assert [r["close"] for r in rows] == [10.0, 10.5]      # 行情来自腾讯腿
+    assert hist_calls == []
+
+
+def test_fetch_pair_tencent_aligns_hfq_to_raw():
+    """两腿交易日集不齐 → hfq 按 raw 日期集对齐"""
+    from app.collectors.daily import _align_hfq_to_raw
+
+    raw = pd.DataFrame({"日期": ["2026-08-01", "2026-08-02"]})
+    hfq = pd.DataFrame({"日期": ["2026-08-01", "2026-08-02", "2026-08-03"],
+                        "收盘": [62.6, 65.7, 68.8]})
+    out = _align_hfq_to_raw(raw, hfq)
+    assert list(out["日期"]) == ["2026-08-01", "2026-08-02"]
+
+
+def test_tencent_empty_factor_leg_raises(monkeypatch):
+    """不变量：raw 非空但因子腿空 → raise，绝不落 NULL adj_factor"""
+    import pytest
+
+    from app.collectors import daily as dm
+
+    raw = pd.DataFrame({
+        "日期": ["2026-08-01"], "开盘": [10.0], "最高": [10.5], "最低": [9.5],
+        "收盘": [10.0], "成交量": [10000], "成交额": [1e8],
+    })
+    monkeypatch.setattr(dm, "tencent_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(dm.tencent, "daily_raw", lambda *a, **k: raw)
+    monkeypatch.setattr(dm.ak, "stock_zh_a_daily",
+                        lambda **k: pd.DataFrame({"date": [], "close": []}))
+    monkeypatch.setattr(dm, "daily_source_chain", lambda: ["tencent"])
+    monkeypatch.setattr(dm, "baostock_enabled", lambda *a, **k: False)
+    with pytest.raises(RuntimeError):
+        DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
+
+
+def test_tencent_disabled_raises_then_chain_falls_through(monkeypatch):
+    """链含 tencent 但保险丝未开 → 该 profile 抛错 → 落到下一源 akshare"""
+    import pytest
+
+    from app.collectors import daily as dm
+
+    monkeypatch.setattr(dm, "tencent_enabled", lambda *a, **k: False)
+    monkeypatch.setattr(dm, "baostock_enabled", lambda *a, **k: False)
+
+    def fake_hist(*a, **k):
+        raise RuntimeError("AkShare 全挂")
+
+    monkeypatch.setattr(dm.ak, "stock_zh_a_hist", fake_hist)
+    monkeypatch.setattr(dm.ak, "stock_zh_a_daily", fake_hist)
+    monkeypatch.setattr(dm, "daily_source_chain", lambda: ["tencent", "akshare"])
+    with pytest.raises(RuntimeError):
+        DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
+
+
+def test_upsert_snapshot_rows_skips_null_columns(monkeypatch):
+    """快照 upsert：amount 为 None → 该列不进 update_cols（防 NULL 覆盖库内值）"""
+    from sqlalchemy.dialects.postgresql import dialect as pg_dialect
+
+    from app.collectors.daily import upsert_snapshot_rows
+
+    db = FakeSession()
+    rows = [
+        {"code": "600519", "trade_date": date(2026, 9, 16), "open": 1273.93,
+         "high": 1274.98, "low": 1254.10, "close": 1258.0, "volume": 26235,
+         "amount": None, "adj_factor": 6.26, "prev_close": 1272.75},
+    ]
+    upsert_snapshot_rows(db, rows)
+    sql = str(db.executed[0].compile(dialect=pg_dialect()))
+    assert "amount" not in sql.split("DO UPDATE")[1]   # 无值 → 不更新
+    assert "adj_factor" in sql.split("DO UPDATE")[1]    # 有值 → 更新
+    assert "open" in sql.split("DO UPDATE")[1]
+
+
+def test_align_hfq_normalizes_date_types():
+    """新浪 hfq 日期是 datetime.date、腾讯 raw 是字符串——类型不一会导致
+    build_rows 按值取因子全取不到（实测踩坑），对齐须统一成字符串"""
+    from app.collectors.daily import _align_hfq_to_raw, build_rows
+
+    raw = pd.DataFrame({
+        "日期": ["2026-08-01", "2026-08-02"],
+        "开盘": [10.0, 10.5], "最高": [10.5, 11.0], "最低": [9.5, 10.0],
+        "收盘": [10.0, 10.5], "成交量": [10000, 12000], "成交额": [1e8, 1.2e8],
+    })
+    hfq = pd.DataFrame({"日期": [date(2026, 8, 1), date(2026, 8, 2)],
+                        "收盘": [62.6, 65.73]})
+    rows = build_rows("600519", raw, _align_hfq_to_raw(raw, hfq))
+    assert [r["adj_factor"] for r in rows] == [6.26, 6.26]  # 非 None
+
+
+def test_latest_close_factor_query(monkeypatch):
+    """_latest_close_factor 取每只最近一行 (close, adj_factor)"""
+    from app.tasks import _latest_close_factor
+
+    class DB:
+        def execute(self, stmt):
+            class R:
+                def all(self):
+                    return [("600519", 1272.75, 6.26), ("000001", 11.0, None)]
+            return R()
+
+    out = _latest_close_factor(DB(), ["600519", "000001"])
+    assert out["600519"] == (1272.75, 6.26)
+    assert out["000001"] == (11.0, None)
+
