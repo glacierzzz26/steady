@@ -56,7 +56,12 @@ def _process(db, task: RemediationTask, summary: dict) -> None:
         return
 
     from app.collectors.daily import DailyCollector
-    from app.sources.baostock import is_source_blocked
+    from app.sources import tencent
+    from app.sources.baostock import is_source_blocked as baostock_blocked
+
+    def _blocked(exc: Exception) -> bool:
+        # 任一源被限（BaoStock 封禁冷却 / 腾讯 403-429）→ source_blocked，不重试
+        return baostock_blocked(exc) or tencent.is_source_blocked(exc)
 
     collector = DailyCollector(db)
     failed_codes: list[str] = []
@@ -74,7 +79,7 @@ def _process(db, task: RemediationTask, summary: dict) -> None:
                 # save 返回实际入库条数（清洗会丢弃 volume<=0 的停牌行 → 0）
                 repaired += collector.save(rows) or 0
         except Exception as e:
-            if is_source_blocked(e):
+            if _blocked(e):
                 # 源被限：立即中止整批，绝不逐只反复轰（08-28 事故根因）
                 task.status = "source_blocked"
                 logger.error("自愈源被限 %s %s（%s）→ source_blocked，不重试",

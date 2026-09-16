@@ -37,7 +37,7 @@ func GetNotifyConfig(notifySvc *service.NotifyService) gin.HandlerFunc {
 			response.Fail(c, http.StatusInternalServerError, response.CodeInternalError, "查询通知配置失败")
 			return
 		}
-		feishu, err := notifySvc.GetFeishuConfig()
+		feishu, err := notifySvc.GetFeishuConfigView() // 脱敏视图：webhook/secret 掩码回显
 		if err != nil {
 			response.Fail(c, http.StatusInternalServerError, response.CodeInternalError, "查询飞书配置失败")
 			return

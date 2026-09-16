@@ -1,4 +1,4 @@
-import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { marketApi, type IndexQuote, type MarketStatus } from '../api'
 import { useApi } from '../hooks/useApi'
 import { fmtChg } from '../lib/format'
@@ -6,6 +6,13 @@ import { crumbs } from '../mock/data'
 
 /** 行情概览指数（topbar 芯片；与后端 /index/quotes 一致） */
 const QUOTE_CODES = ['sh000001', 'sh000300', 'sh000905']
+
+/** 指数 chip → 股票池 universe 过滤（Issue #11-2）：沪深300/中证500 对应 Seg 按钮，
+ * 上证指数 (sh000001) 无对应池子（stock_basic 只有 hs300/zz500 维度）→ 落「全部」 */
+const POOL_UNIVERSE: Record<string, string | undefined> = {
+  sh000300: 'hs300',
+  sh000905: 'zz500',
+}
 
 interface NavItem {
   to: string
@@ -101,18 +108,29 @@ function crumbKey(pathname: string): string {
 
 export default function MainLayout() {
   const { pathname } = useLocation()
+  const navigate = useNavigate()
   const [title, sub] = crumbs[crumbKey(pathname)] ?? ['', '']
   const mkt = useApi(() => marketApi.getStatus(), [])
   const quotes = useApi(() => marketApi.getQuotes(QUOTE_CODES), [])
   const chip = marketChip(mkt.data)
 
-  /** 指数芯片：真实行情；无数据/接口异常则不渲染（不做写死 mock） */
-  const quoteChips = (quotes.data?.items ?? []).map((q: IndexQuote) => (
-    <span className="chip" key={q.code} title={`${q.name} ${q.trade_date} 收盘 ${q.close}`}>
-      {q.name}{' '}
-      <b className={`num ${q.change_pct >= 0 ? 'up' : 'down'}`}>{fmtChg(q.change_pct)}</b>
-    </span>
-  ))
+  /** 指数芯片：真实行情；无数据/接口异常则不渲染（不做写死 mock）。
+   * 点击跳股票池并预选对应 universe Seg（Issue #11-2）。 */
+  const quoteChips = (quotes.data?.items ?? []).map((q: IndexQuote) => {
+    const pool = POOL_UNIVERSE[q.code]
+    return (
+      <span
+        key={q.code}
+        className="chip jump"
+        role="button"
+        title={`${q.name} ${q.trade_date} 收盘 ${q.close} · 点击查看对应股票池`}
+        onClick={() => navigate(pool ? `/stocks?pool=${pool}` : '/stocks')}
+      >
+        {q.name}{' '}
+        <b className={`num ${q.change_pct >= 0 ? 'up' : 'down'}`}>{fmtChg(q.change_pct)}</b>
+      </span>
+    )
+  })
 
   return (
     <div className="app">
