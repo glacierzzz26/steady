@@ -80,16 +80,17 @@ def job_sync_index():
 
 
 def _daily_sync_codes(db) -> list[str]:
-    """每日同步范围：已有日行情数据的股票（增量更新）
+    """每日同步范围：采集范围内的股票（Issue #13 起走 collect_codes helper）
 
-    无历史数据的股票不在每日同步内补 30 天，避免污染 backfill 的
-    断点判断（covered 按 min(trade_date) 判定），完整历史由
-    python -m app.collectors.backfill 负责。
+    旧实现读 `DISTINCT code FROM daily_price`（**不看 universe**）——一旦 daily_price
+    扩到 5212，18:10 逐只同步会自动膨胀到 5212 只 × ~2s ≈ 2.9h，且无任何报错
+    （Issue #13 R4）。改走 helper：默认 pool 分支 = 现状 800 只，a_share 分支 =
+    全量。`include_pool=True` 保证策略股票池兜底在采（data_scope 漂移也不漏采）。
+    顺带修既有瑕疵：`sz399106`（深证综指，索引器写入 daily_price）不再被当股票同步。
     """
-    with_data = db.execute(
-        select(DailyPrice.code).where(DailyPrice.code.not_like("sh%")).distinct()
-    ).scalars().all()
-    return sorted(with_data)
+    from app.collectors.scope import collect_codes
+
+    return collect_codes(db, include_pool=True)
 
 
 def _latest_close_factor(db, codes: list[str]) -> dict[str, tuple]:
@@ -117,8 +118,12 @@ def _snapshot_sync(db, codes: list[str], end: date) -> list[str]:
       - 库内无历史（新股，无因子可延续）
       - 快照「昨收」≠ 库内最近 close（超 TENCENT_DIV_TOL）→ 疑似除权
       - 库内最近 adj_factor 为空（无可延续值，避免落 NULL 覆盖）
+
+    **deferred 上限**（TENCENT_DEFER_MAX）：扩池首日全池无历史 → 全部 deferred
+    → 逐只补 ~2s/只 把快照收益归零（Issue #13 R5）。超上限只回退前 N 只，其余
+    留给夜间回填（回填后即有历史，次日快照命中），并告警。上限内的回退不告警。
     """
-    from app.config import TENCENT_DIV_TOL
+    from app.config import TENCENT_DEFER_MAX, TENCENT_DIV_TOL
     from app.collectors.daily import upsert_snapshot_rows
     from app.sources import tencent
 
@@ -143,6 +148,12 @@ def _snapshot_sync(db, codes: list[str], end: date) -> list[str]:
         snap["adj_factor"] = float(db_factor)  # 因子延续
         rows.append(snap)
     n = upsert_snapshot_rows(db, rows)
+    if len(deferred) > TENCENT_DEFER_MAX:
+        logger.warning(
+            "腾讯快照回退 %s 只超上限 %s：仅回退前 %s 只，其余交夜间回填"
+            "（扩池首日常见，回填后次日即命中快照）",
+            len(deferred), TENCENT_DEFER_MAX, TENCENT_DEFER_MAX)
+        deferred = deferred[:TENCENT_DEFER_MAX]
     logger.info("腾讯快照入库 %s 只，回退逐只 %s 只", n, len(deferred))
     return deferred
 
@@ -193,17 +204,12 @@ def job_sync_finance():
 def job_sync_valuation():
     """18:15 同步日度估值：BaoStock 主源逐只（阶段 3 开关）；失败/未配置降级
     AkShare 逐只（ValuationCollector 内 BaoStock→AkShare 兜底链）"""
+    from app.collectors.scope import collect_codes
     from app.collectors.valuation import ValuationCollector
-    from app.models.tables import DailyValuation, StockBasic
+    from app.models.tables import DailyValuation
 
     db = get_session()
-    codes = sorted(
-        db.execute(
-            select(StockBasic.code).where(
-                StockBasic.universe.in_(("hs300", "zz500"))
-            )
-        ).scalars().all()
-    )
+    codes = collect_codes(db)
     latest = {
         code: max_d
         for code, max_d in db.execute(
@@ -278,15 +284,19 @@ if __name__ == "__main__":
     # 当日数据统一 18:00+ BaoStock 产出（阶段 3 去 Tushare 依赖）：
     #   index 16:15→18:15、daily 16:30→18:10、valuation 16:45→18:15
     # （BaoStock 当日 18:00 后出数据；同日回退规则保留作早跑/降级安全网）
-    scheduler.add_job(job_sync_hotspot, "cron", hour=8, minute=45)
-    scheduler.add_job(job_sync_stock_list, "cron", hour=9, minute=0)
-    scheduler.add_job(job_sync_calendar, "cron", hour=9, minute=5)
-    scheduler.add_job(job_sync_index, "cron", hour=18, minute=15)
-    scheduler.add_job(job_sync_daily_price, "cron", hour=18, minute=10)
-    scheduler.add_job(job_sync_valuation, "cron", hour=18, minute=15)
-    scheduler.add_job(job_sync_finance, "cron", hour=18, minute=0)
-    scheduler.add_job(job_nightly_backfill, "cron", hour=18, minute=5)
-    scheduler.add_job(job_consume_remediation, "interval", minutes=5)
+    # max_instances=1 + coalesce=True：任务超时（如扩池后回填/同步变长）时**不并发
+    # 重入**，堆积的触发折叠成一次（Issue #13 R16）。原实现无此约束 → interval 5min
+    # 的自愈若跑超 5min 会叠起第二个实例，两个同时逐只补数、同时写库。
+    _job_kw = {"max_instances": 1, "coalesce": True}
+    scheduler.add_job(job_sync_hotspot, "cron", hour=8, minute=45, **_job_kw)
+    scheduler.add_job(job_sync_stock_list, "cron", hour=9, minute=0, **_job_kw)
+    scheduler.add_job(job_sync_calendar, "cron", hour=9, minute=5, **_job_kw)
+    scheduler.add_job(job_sync_index, "cron", hour=18, minute=15, **_job_kw)
+    scheduler.add_job(job_sync_daily_price, "cron", hour=18, minute=10, **_job_kw)
+    scheduler.add_job(job_sync_valuation, "cron", hour=18, minute=15, **_job_kw)
+    scheduler.add_job(job_sync_finance, "cron", hour=18, minute=0, **_job_kw)
+    scheduler.add_job(job_nightly_backfill, "cron", hour=18, minute=5, **_job_kw)
+    scheduler.add_job(job_consume_remediation, "interval", minutes=5, **_job_kw)
 
     _start_healthz("collector", 9200)
     logger.info("collector 调度器启动，等待定时任务...")

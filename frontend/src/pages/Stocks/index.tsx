@@ -144,6 +144,7 @@ export default function Stocks() {
                 <th className="r">最新价</th>
                 <th className="r">涨跌幅</th>
                 <th className="r">成交额</th>
+                <th className="r">换手率</th>
                 <th className="r">PE(TTM)</th>
                 <th className="r">PB</th>
                 <th className="r">ROE</th>
@@ -155,7 +156,7 @@ export default function Stocks() {
             <tbody>
               {list.loading && !list.data ? (
                 <tr>
-                  <td colSpan={12}>
+                  <td colSpan={13}>
                     <div className="empty">加载中…</div>
                   </td>
                 </tr>
@@ -175,14 +176,17 @@ export default function Stocks() {
                         {s.price === undefined ? '—' : s.price.toFixed(2)}
                       </td>
                       <td
-                        className={`r num ${s.chg !== undefined && s.chg >= 0 ? 'up' : 'down'}`}
-                        title={s.chg === undefined ? G2_HINT : undefined}
+                        className={`r num ${
+                          s.chg != null && s.chg >= 0 ? 'up' : 'down'
+                        }`}
+                        title={s.chg == null ? G2_HINT : undefined}
                       >
                         {fmtChg(s.chg)}
                       </td>
                       <td className="r num" title={s.amount === undefined ? G2_HINT : undefined}>
                         {fmtWanYi(s.amount)}
                       </td>
+                      <G2Cell v={s.turnover_rate} />
                       <G2Cell v={s.pe} />
                       <G2Cell v={s.pb} />
                       <G2Cell v={s.roe && s.roe > 0 ? s.roe : undefined} />
@@ -197,7 +201,7 @@ export default function Stocks() {
               )}
               {list.data && list.data.items.length === 0 && (
                 <tr>
-                  <td colSpan={12}>
+                  <td colSpan={13}>
                     <div className="empty">无匹配股票</div>
                   </td>
                 </tr>

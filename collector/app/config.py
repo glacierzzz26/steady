@@ -125,6 +125,24 @@ def tencent_snapshot_enabled() -> bool:
     """18:10 当日同步是否走腾讯批量快照（需保险丝与 scope 同时点名 daily）"""
     return TENCENT_SNAPSHOT and tencent_enabled("daily")
 
+
+# ---------- 采集范围（Issue #13）----------
+# 采集范围闸门：pool（默认，= 现状 800 只，按 universe 取）或 a_share
+# （全量 5212 只，按 data_scope='a_share'）。默认 pool → 部署本批代码生产行为
+# 零变化；翻 a_share 才扩采集范围。**策略选股域（universe / factor_service）
+# 不受此闸门影响** —— 拆列的要点。
+COLLECT_SCOPE = _str("COLLECT_SCOPE", "pool").strip().lower()
+
+
+def collect_scope() -> str:
+    """当前采集范围：'pool'（默认）或 'a_share'（未知值回退 pool，防呆）"""
+    return COLLECT_SCOPE if COLLECT_SCOPE in ("pool", "a_share") else "pool"
+
+
+# 快照首日扩池时全部无历史 → 全部 deferred → 逐只补把收益归零。上限内的
+# deferred 交夜间回填处理，超上限才告警（Issue #13 R5）。
+TENCENT_DEFER_MAX = _int("TENCENT_DEFER_MAX", 300)
+
 # 热点采集（早盘简报数据源，Issue #4）：每日早晨采集一次
 HOTSPOT_TOP_N = _int("COLLECTOR_HOTSPOT_TOP_N", 10)          # 板块/人气榜取 TOP N
 HOTSPOT_INDICES = _str("COLLECTOR_HOTSPOT_INDICES", ".DJI,.IXIC,.INX")  # 隔夜外盘代码

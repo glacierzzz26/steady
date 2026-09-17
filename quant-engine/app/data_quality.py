@@ -19,6 +19,7 @@ check_data_quality 返回 detail JSONB（task_run.detail 记录 + 通知卡片�
 }
 """
 import logging
+import os
 from datetime import date, timedelta
 
 from sqlalchemy import func, select
@@ -30,6 +31,7 @@ logger = logging.getLogger("data_quality")
 
 # ---- 阈值 ----
 COVERAGE_MIN = 0.90           # 行情覆盖下限（与 market_ready 一致）
+COVERAGE_DRIFT_WARN = 0.02    # 采集范围分母漂移 >2% → warn（Issue #13 R2）
 MISSING_DAY_WINDOW = 10       # 缺失交易日：回溯最近 N 个开市日
 VALUATION_WARN_LAG = 1        # 估值落后 ≥1 天 warn
 VALUATION_FAIL_LAG = 3        # 落后 ≥3 天 fail
@@ -38,6 +40,17 @@ FINANCIAL_NEW_LIST_DAYS = 90  # 新股豁免：上市不足 90 天无财报属�
 FINANCIAL_COVERAGE_MIN = 0.90  # 财务覆盖下限
 LIMIT_HARD = 30.5             # 日涨跌幅 > 30.5% 必错（A股上限 30%，仅北交所）
 BOARD_LIMIT_TOL = 0.5         # 板块涨跌幅容差（百分点）
+
+
+def _collect_scope() -> str:
+    """采集范围闸门（Issue #13）：读 `COLLECT_SCOPE` env。
+
+    'pool'（默认）→ coverage 分母 = 800 池（现状，逐字不变）；
+    'a_share'      → 分母 = 全量（data_scope='a_share'），且启用三重过滤。
+    **必须与 collector 侧同批翻** —— 只翻一边会造成 coverage 假绿/假红中间态。
+    """
+    return ("a_share" if os.getenv("COLLECT_SCOPE", "pool").strip().lower() == "a_share"
+            else "pool")
 
 
 def _board_limit(code: str) -> float:
@@ -59,10 +72,31 @@ def _market_latest(db) -> date | None:
 
 # ---------- 单项检查 ----------
 
-def _check_coverage(db, td: date) -> dict:
-    pool = db.execute(
-        select(StockBasic.code).where(StockBasic.universe.in_(("hs300", "zz500")))
+def _coverage_pool(db, td: date) -> list[str]:
+    """coverage 分母（采集范围内的代码），按闸门分档（Issue #13）。
+
+    - pool（默认）：`universe IN ('hs300','zz500')` —— **与旧实现逐字等价**；
+    - a_share：`data_scope='a_share'`，再叠**三重过滤**，每条都对应一个静默故障：
+        · `status='L'`     —— 退市股不再要求有 bar（否则永久 missing → 自愈空转，R3）；
+        · `list_date<=td`  —— 未上市股不要求（新股/待上市，R3）；
+        · （data_scope 已排除北交所/指数）。
+      不过滤会让停牌/退市/未上市股永久进 missing_codes，自愈每日空跑、红卡不消。
+    """
+    if _collect_scope() != "a_share":
+        return db.execute(
+            select(StockBasic.code).where(StockBasic.universe.in_(("hs300", "zz500")))
+        ).scalars().all()
+    return db.execute(
+        select(StockBasic.code).where(
+            StockBasic.data_scope == "a_share",
+            StockBasic.status == "L",
+            StockBasic.list_date <= td,
+        )
     ).scalars().all()
+
+
+def _check_coverage(db, td: date) -> dict:
+    pool = _coverage_pool(db, td)
     if not pool:
         return {"name": "coverage", "level": "warn",
                 "message": "行情覆盖　股票池为空", "metrics": {"pool": 0}}
@@ -75,12 +109,50 @@ def _check_coverage(db, td: date) -> dict:
     msg = f"行情覆盖　{len(with_bar)}/{len(pool)} 股票有行情（{ratio * 100:.1f}%）"
     if level != "ok":
         msg += f"，低于 {COVERAGE_MIN * 100:.0f}%"
-    # missing_codes = 池内缺行情的代码清单（自愈 stage1 的 diff-repair 输入，见任务 005）
-    missing_codes = sorted(set(pool) - set(with_bar))
-    return {"name": "coverage", "level": level, "message": msg,
-            "metrics": {"pool": len(pool), "with_bar": len(with_bar),
-                        "pct": round(ratio * 100, 2),
-                        "missing_codes": missing_codes}}
+
+    # missing_all = 分母内当日无 bar 的全部代码（含停牌等，供人看）。
+    missing_all = sorted(set(pool) - set(with_bar))
+    # suspect = 「昨日有 bar 而今日无」—— 真缺口（当日同步未跑完/失败），
+    # 而非停牌。**这是自愈 stage1 的 diff-repair 输入**（Issue #13）：只看真缺口，
+    # 停牌股昨日今日都无 bar、不进 suspect，自愈不再每日空跑。
+    prev = db.execute(
+        select(func.max(DailyPrice.trade_date))
+        .where(DailyPrice.code.not_like("sh%"), DailyPrice.trade_date < td)
+    ).scalar()
+    suspect: list[str] = []
+    if prev is not None:
+        prev_bar = set(db.execute(
+            select(DailyPrice.code).distinct().where(
+                DailyPrice.trade_date == prev, DailyPrice.code.in_(pool))
+        ).scalars().all())
+        suspect = sorted(prev_bar - set(with_bar))
+    # 自愈用 suspect；suspect 为空而 miss 不为空 → 是停牌面而非缺口，不触自愈
+    missing_codes = suspect if _collect_scope() == "a_share" else missing_all
+
+    # 分母漂移守卫（R2）：data_scope 标记由 stock.py 单点重标，若列表生产者漏写
+    # 新 IPO，分母会悄悄偏小 → coverage 假绿。此处用 market 真值交叉校验：
+    # 偏差 >2% 说明标记漂移，降 warn 提醒（不 fail —— 数据本身可能是好的）。
+    metrics = {"pool": len(pool), "with_bar": len(with_bar),
+               "pct": round(ratio * 100, 2),
+               "missing_codes": missing_codes,
+               "missing_all": missing_all,
+               "suspect": suspect}
+    if _collect_scope() == "a_share":
+        truth = db.execute(
+            select(func.count()).select_from(StockBasic)
+            .where(StockBasic.market.in_(("SH", "SZ")),
+                   StockBasic.status == "L",
+                   StockBasic.list_date <= td)
+        ).scalar() or 0
+        drift = abs(len(pool) - truth) / truth if truth else 0.0
+        metrics["expect_pool"] = truth
+        metrics["drift_pct"] = round(drift * 100, 2)
+        if drift > COVERAGE_DRIFT_WARN:
+            msg += (f"　⚠️ 分母漂移 {drift * 100:.1f}%（预期 {truth}，"
+                    f"实 {len(pool)}）——data_scope 标记可能未更新")
+            if level == "ok":
+                level = "warn"
+    return {"name": "coverage", "level": level, "message": msg, "metrics": metrics}
 
 
 def _check_missing_days(db, td: date) -> dict:
@@ -219,10 +291,20 @@ def _check_financial(db, td: date) -> dict:
                 "message": "财务　无行情数据", "metrics": {}}
     cutoff = p_latest - timedelta(days=FINANCIAL_FRESH_DAYS)
     new_cutoff = p_latest - timedelta(days=FINANCIAL_NEW_LIST_DAYS)
-    pool = db.execute(
-        select(StockBasic.code, StockBasic.list_date)
-        .where(StockBasic.universe.in_(("hs300", "zz500")))
-    ).all()
+    # 财务已是全市场入库（finance.py 只按 stock_basic 存在性过滤），故 a_share
+    # 下分母同样翻全量；默认 pool 分支与旧实现逐字等价（策略域）。
+    if _collect_scope() == "a_share":
+        pool = db.execute(
+            select(StockBasic.code, StockBasic.list_date)
+            .where(StockBasic.data_scope == "a_share",
+                   StockBasic.status == "L",
+                   StockBasic.list_date <= p_latest)
+        ).all()
+    else:
+        pool = db.execute(
+            select(StockBasic.code, StockBasic.list_date)
+            .where(StockBasic.universe.in_(("hs300", "zz500")))
+        ).all()
     if not pool:
         return {"name": "financial", "level": "warn",
                 "message": "财务　股票池为空", "metrics": {}}

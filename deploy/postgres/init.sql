@@ -17,12 +17,14 @@ CREATE TABLE IF NOT EXISTS stock_basic (
     industry   VARCHAR(50),
     list_date  DATE,
     status     VARCHAR(10)  DEFAULT 'L',   -- L=上市 / D=退市
-    universe   VARCHAR(20),                -- hs300 / zz500 / NULL=全市场
+    universe   VARCHAR(20),                -- hs300 / zz500 / NULL=全市场（**策略选股域**）
+    data_scope VARCHAR(16),                -- a_share=SH+SZ 采集范围；NULL=不采集(BJ/INDEX)
     created_at TIMESTAMP    DEFAULT NOW(),
     updated_at TIMESTAMP    DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_stock_basic_universe ON stock_basic (universe);
+CREATE INDEX IF NOT EXISTS idx_stock_basic_data_scope ON stock_basic (data_scope);
 
 -- ------------------------------------------------------------
 -- 2. 日行情
@@ -37,11 +39,14 @@ CREATE TABLE IF NOT EXISTS daily_price (
     close      DECIMAL(10,2),
     volume     BIGINT,                       -- 成交量（手）
     amount     DECIMAL(15,2),                -- 成交额（元）
-    adj_factor DECIMAL(10,4)                 -- 复权因子
+    adj_factor DECIMAL(10,4),                -- 复权因子
+    turnover_rate DECIMAL(10,4)              -- 换手率（%），腾讯日K[7]/快照[38]
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_daily_price_code_date
     ON daily_price (code, trade_date);
+CREATE INDEX IF NOT EXISTS idx_daily_price_trade_date
+    ON daily_price (trade_date);
 
 -- ------------------------------------------------------------
 -- 3. 财务指标（含公告日，防止未来函数）
