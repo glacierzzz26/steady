@@ -146,6 +146,27 @@ class RemediationTask(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class TaskRun(Base):
+    """任务执行账本（与 quant-engine/models/tables.py 同构，DDL 以 init.sql 为准）
+
+    采集侧原先**不写** task_run（Issue #14 起由 watchdog 写 `collector_watchdog` /
+    `watchdog` 失败行）——quant-engine 的 notify_scheduler._check_task_alerts 对当日
+    所有 failed 行推飞书红卡，故这是采集侧告警的现成通道（零新增管道）。
+    status: success / skipped / failed；UNIQUE(task_name, run_date) 幂等 upsert。
+    """
+
+    __tablename__ = "task_run"
+    __table_args__ = (UniqueConstraint("task_name", "run_date", name="uq_task_run"),)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    task_name = Column(String(64), nullable=False)
+    run_date = Column(Date, nullable=False)
+    status = Column(String(16), nullable=False)
+    message = Column(String)
+    detail = Column(JSON)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class MarketHotspot(Base):
     """市场热点快照（早盘简报数据源，Issue #4）：每日早晨采集一次。
 

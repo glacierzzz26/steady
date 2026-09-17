@@ -33,6 +33,7 @@ from app.config import (baostock_enabled, daily_source_chain,
 from app.db import upsert
 from app.models.tables import DailyPrice
 from app.sources import baostock, tencent
+from app.sources.net import is_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,9 @@ def fetch_pair(code: str, start: str, end: str) -> tuple[pd.DataFrame, pd.DataFr
         )
         return raw, hfq
     except Exception as e:
-        reason = "超时" if isinstance(e, TimeoutError) else str(e)
+        # requests 的 ReadTimeout/ConnectTimeout 是 OSError，不是内置 TimeoutError——
+        # 用 net.is_timeout 统一判定，否则日志里"超时"会退化成原始异常串
+        reason = "超时" if is_timeout(e) else str(e)
         logger.warning("%s 东财接口失败(%s)，降级新浪源", code, reason)
         raw = with_timeout(
             ak.stock_zh_a_daily, symbol=sina_symbol(code),

@@ -47,7 +47,28 @@ DAILY_SYNC_INTERVAL = _int("COLLECTOR_DAILY_INTERVAL", 1)
 
 # 数据源请求超时（秒）：AkShare 底层 requests 无 timeout，遇到半开连接会永久挂起
 # （曾卡死同步），这里统一兜底；超时抛异常走降级/重试，而非无限等待。
+#
+# ⚠️ 这是 with_timeout **兜底网** 的超时（Issue #14 起 with_timeout 已去死锁）；
+# 真正的请求层根因修法是 sources/net.py 给 requests 注入 socket 超时。
+# 不变式：HTTP_READ_TIMEOUT ≤ REQUEST_TIMEOUT —— L1 先触发，L2 才是最后一道。
 REQUEST_TIMEOUT = _int("COLLECTOR_REQUEST_TIMEOUT", 15)
+
+# ---------- 请求层超时补丁（Issue #14）----------
+# AkShare 底层 requests 无有效 timeout：东财 stock_zh_a_hist 是 timeout=None 转发
+# （等效无限），新浪腿 stock_zh_a_daily 更是**裸 requests.get 完全无 timeout**。
+# ⚠️ socket.setdefaulttimeout 对它无效（urllib3 内部会显式 settimeout(None) 覆盖），
+# 故只能在 requests.Session.request 层注入（见 sources/net.py）。
+# connect/read 拆开：连接超时宜短（DNS/TCP 快失败），读超时给响应体留时间。
+HTTP_CONNECT_TIMEOUT = _float("COLLECTOR_HTTP_CONNECT_TIMEOUT", 5)
+HTTP_READ_TIMEOUT = _float("COLLECTOR_HTTP_READ_TIMEOUT", 15)
+# 杀开关：置 0 硬旁路补丁（当日回滚，无需重建）。默认开。
+HTTP_TIMEOUT_PATCH = os.getenv(
+    "COLLECTOR_HTTP_TIMEOUT_PATCH", "1").strip().lower() in ("1", "true", "yes", "on")
+# 故障注入（验收用）：URL 命中任意子串 → 抛一次 ReadTimeout，验证降级链。
+# 默认空 = 关；COLLECTOR_FAULT_INJECT_ONCE=1 时每进程只注入一次。
+FAULT_INJECT_TIMEOUT_HOSTS = _list("COLLECTOR_FAULT_INJECT_TIMEOUT_HOSTS", "")
+FAULT_INJECT_ONCE = os.getenv(
+    "COLLECTOR_FAULT_INJECT_ONCE", "").strip().lower() in ("1", "true", "yes", "on")
 
 # BaoStock 开关（阶段 3：prod 已全源翻 BaoStock，Tushare 依赖已移除）
 BAOSTOCK_ENABLED = os.getenv("BAOSTOCK_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")

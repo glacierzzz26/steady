@@ -1,6 +1,6 @@
 """采集器基类：统一异常处理与重试逻辑"""
-import concurrent.futures
 import logging
+import threading
 import time
 from abc import ABC, abstractmethod
 from datetime import date, datetime
@@ -17,20 +17,61 @@ def to_ak_date(value) -> str:
     return str(value).replace("-", "").replace("/", "")
 
 
-def with_timeout(fn, *args, timeout=None, **kwargs):
-    """在线程内执行 AkShare 请求并施加超时；超时抛 TimeoutError。
+# ---------- 请求超时兜底（Issue #14）----------
+# 泄漏 worker 计数：每次强制超时遗弃一个 daemon 线程（Python 线程不可杀），
+# 该线程自清（socket 带 HTTP_READ_TIMEOUT，到点抛异常即退），不持有 DB session
+# （所有 with_timeout 调用点都是纯 fetch，无一写库）。稳态为 0，供看门狗探测。
+_leak_lock = threading.Lock()
+_leaked_workers = 0
+MAX_LEAKED_WORKERS = 8
 
-    AkShare 底层 requests 未设置 timeout，对端半开连接时会永久挂起
-    （曾因此卡死整个同步）。此包装器兜底：超时抛 TimeoutError，
-    由调用方按"降级/重试"处理，而不是无限等待。
+
+def leaked_workers() -> int:
+    """累计被遗弃的 worker 线程数（看门狗探测用）"""
+    return _leaked_workers
+
+
+def with_timeout(fn, *args, timeout=None, name=None, **kwargs):
+    """在**一次性 daemon 线程**内执行请求并施加超时；超时抛 TimeoutError。
+
+    ⚠️ 历史坑（Issue #14）：原实现用
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            ex.submit(fn, ...).result(timeout=timeout)
+    超时后 `with` 退出执行 `shutdown(wait=True)` → **永久阻塞在还挂着的 worker 上**
+    （09-08 采集卡死 24h+ 的根因）；且 `concurrent.futures.thread` 注册的
+    `_python_exit` 会在解释器退出时再 join 每个 worker → 二次阻塞，连正常退出都做不到。
+    故改为原生 daemon `threading.Thread`：它**不登记**在任何地方（只有 concurrent.futures
+    碰 `_threads_queues`），超时即弃线程返回，调用方/进程都不会挂。
+
+    请求层的真正修法在 sources/net.py（给 requests 注入 socket 超时）；本函数是
+    兜底网，覆盖 requests 之外可能阻塞的环节（DNS/TLS/解析）。
     """
     if timeout is None:
         timeout = REQUEST_TIMEOUT
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+    label = name or getattr(fn, "__name__", str(fn))
+    box: dict = {}
+    done = threading.Event()
+
+    def _run():
         try:
-            return ex.submit(fn, *args, **kwargs).result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
-            raise TimeoutError(f"请求超时（>{timeout}s）")
+            box["value"] = fn(*args, **kwargs)
+        except BaseException as e:  # noqa: BLE001 —— 原样转抛给调用方
+            box["error"] = e
+        finally:
+            done.set()
+
+    threading.Thread(target=_run, name=f"with_timeout:{label}", daemon=True).start()
+    if not done.wait(timeout):
+        global _leaked_workers
+        with _leak_lock:
+            _leaked_workers += 1
+            n = _leaked_workers
+        logging.getLogger(__name__).error(
+            "请求超时（>%ss，%s）——遗弃 worker 线程（累计 %s）", timeout, label, n)
+        raise TimeoutError(f"请求超时（>{timeout}s）")
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
 
 
 class BaseCollector(ABC):

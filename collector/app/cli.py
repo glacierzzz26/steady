@@ -178,6 +178,11 @@ def cmd_audit_tencent(args):
 
 
 def main():
+    # 请求层超时（Issue #14）：手工入口同样要装，覆盖 AkShare 无 timeout 调用
+    from app.sources.net import install_http_timeouts
+
+    install_http_timeouts()
+
     parser = argparse.ArgumentParser(prog="quant-collector")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
