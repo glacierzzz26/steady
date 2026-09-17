@@ -147,6 +147,8 @@ class StockCollector(BaseCollector):
         return rows
 
     def save(self, data):
+        from sqlalchemy import text
+
         # 1. UPSERT 全市场股票列表
         upsert(
             self.db,
@@ -173,11 +175,21 @@ class StockCollector(BaseCollector):
         updated = sum(1 for r in data if r["universe"])
         logger.info("入库 %s 只，其中股票池 %s 只", len(data), updated)
 
+        # 2.5 重标采集范围（Issue #13）：单点 SQL，避免三个列表生产者各写一遍。
+        #     无条件幂等 UPDATE —— a_share = market IN ('SH','SZ')，其余（BJ/INDEX）
+        #     置 NULL。新 IPO 每日入库即被标上，不会漏（R2）；顺带自愈任何误标。
+        #     注：**不写进步骤 2 的 update_cols** —— data_scope 由 market 派生而非
+        #     来自采集行，且无条件重写才能覆盖漂移。
+        self.db.execute(text(
+            "UPDATE stock_basic SET data_scope = "
+            "CASE WHEN market IN ('SH','SZ') THEN 'a_share' ELSE NULL END"
+        ))
+        self.db.commit()
+        logger.info("采集范围重标：a_share = market IN ('SH','SZ')")
+
         # 3. 补全上市日期与行业（纯 UPDATE：UPSERT 的 ON CONFLICT 在冲突探测前
         #    先强制 NOT NULL 检查，缺 name 的行即使命中冲突也会报错，
         #    与 finance.py 行业回填同理）
-        from sqlalchemy import text
-
         # 列表自带 list_date（BaoStock ipoDate）时直接回填；否则走交易所接口补全
         own_dates = {r["code"]: r["list_date"] for r in data if r.get("list_date")}
         dates = own_dates or fetch_list_dates()

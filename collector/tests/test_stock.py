@@ -76,9 +76,9 @@ def test_save_marks_universe(monkeypatch):
     db = FakeSession()
     ok = StockCollector(db).run()
     assert ok
-    # 4 次写入：upsert 列表 + upsert 股票池 + UPDATE 上市日期 + UPDATE 行业
-    # （fetch 里的只读 select 被 write_execs 过滤）
-    assert len(write_execs(db)) == 4
+    # 5 次写入：upsert 列表 + upsert 股票池 + UPDATE 采集范围(data_scope)
+    # + UPDATE 上市日期 + UPDATE 行业（Fetch 里的只读 select 被 write_execs 过滤）
+    assert len(write_execs(db)) == 5
     assert called == ["list", "000300", "000905"]
 
 

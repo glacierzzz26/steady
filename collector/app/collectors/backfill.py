@@ -34,13 +34,20 @@ class BackfillJob:
     # ---------- 基础 ----------
 
     def pool_codes(self) -> list[str]:
-        """股票池代码（沪深300 + 中证500）"""
+        """股票池代码（沪深300 + 中证500）——策略选股域，**不随采集范围变**"""
         rows = self.db.execute(
             select(StockBasic.code).where(
                 StockBasic.universe.in_(("hs300", "zz500"))
             )
         ).scalars().all()
         return sorted(rows)
+
+    def scope_codes(self) -> list[str]:
+        """当前采集范围代码（Issue #13）：COLLECT_SCOPE=pool（默认）时等于
+        pool_codes()；=a_share 时为全量 5212。历史回填按此扩范围。"""
+        from app.collectors.scope import collect_codes
+
+        return collect_codes(self.db, include_pool=True)
 
     def covered_codes(self, start_date: date) -> set[str]:
         """已完成回填的股票：日线真实覆盖到起始日（min(trade_date) <= start_date）
@@ -62,7 +69,7 @@ class BackfillJob:
     def daily(self, start_date: date, end_date: date,
               codes: list[str] | None = None) -> dict:
         """回填股票池日行情（含复权因子），返回统计"""
-        codes = codes or self.pool_codes()
+        codes = codes or self.scope_codes()
         covered = self.covered_codes(start_date)
         todo = [c for c in codes if c not in covered]
         logger.info("股票池 %s 只，已完成 %s 只，待回填 %s 只",
@@ -94,7 +101,7 @@ class BackfillJob:
                    DailyPrice.trade_date <= end_date)
             .group_by(DailyPrice.code)
         ).all()
-        pool = set(self.pool_codes())
+        pool = set(self.scope_codes())  # 采集范围（Issue #13：a_share 时含全量）
         low = [(c, n) for c, n in rows if c in pool and n < 10]
         if low:
             logger.warning("回填校验：%s 只股票行数偏少（<10），可能停牌或上市较晚：%s",
@@ -111,7 +118,7 @@ class BackfillJob:
         """
         from datetime import date
 
-        codes = codes or self.pool_codes()
+        codes = codes or self.scope_codes()
         latest = {
             code: max_d
             for code, max_d in self.db.execute(
@@ -142,18 +149,23 @@ class BackfillJob:
     # ---------- 财务数据回填 ----------
 
     def finance(self, quarters: int, codes: set[str] | None = None) -> int:
-        """回填最近 N 个报告期财务数据（只写股票池，含行业回填）"""
-        pool = set(self.pool_codes()) if codes is None else codes
+        """回填最近 N 个报告期财务数据（含行业回填）
+
+        `codes=None` → **不过滤**：财务接口本就是全市场快照，`FinanceCollector.save`
+        只按 `stock_basic` 存在性过滤（见 finance.py:144-152）。旧实现误限 800 池，
+        是扩池主体之外的一处不一致（Issue #13：财务已是全市场入库，仅此处误限）。
+        """
         periods = quarter_ends(quarters)
         logger.info("财务回填：最近 %s 个报告期 %s", len(periods), periods[:4])
         if self.dry_run:
             return 0
         collector = FinanceCollector(self.db)
         rows = collector.fetch(report_periods=periods)
-        pool_rows = [r for r in rows if r["code"] in pool]
-        collector.save(pool_rows)
-        logger.info("财务回填完成：%s 只股票 x %s 期", len(pool_rows), len(periods))
-        return len(pool_rows)
+        if codes is not None:  # 显式指定代码时按指定集过滤
+            rows = [r for r in rows if r["code"] in codes]
+        collector.save(rows)
+        logger.info("财务回填完成：%s 只股票 x %s 期", len(rows), len(periods))
+        return len(rows)
 
 
 def run_backfill(start: str | None, end: str | None, quarters: int | None,
