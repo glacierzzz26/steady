@@ -193,6 +193,11 @@ def run_backfill(start: str | None, end: str | None, quarters: int | None,
 if __name__ == "__main__":
     import argparse
 
+    # 请求层超时（Issue #14）：回填是长时间批量拉取，最需要超时保护
+    from app.sources.net import install_http_timeouts
+
+    install_http_timeouts()
+
     parser = argparse.ArgumentParser(description="历史数据回填")
     parser.add_argument("--start", help="起始日期 YYYYMMDD（默认近10年）")
     parser.add_argument("--end", help="结束日期 YYYYMMDD（默认今天）")

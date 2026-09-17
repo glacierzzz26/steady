@@ -15,6 +15,8 @@ from app.db import get_session, upsert
 from app.models.tables import DailyPrice, StockBasic, StrategySignal
 from app.notify_scheduler import tick as notify_tick
 from app.task_run import already_run, record_task
+from app.watchdog import (guarded, healthz_status, register_catchup,
+                          spawn_startup_catchup, start_watchdog)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,11 +26,14 @@ logging.basicConfig(
 logger = logging.getLogger("tasks")
 
 
-def _start_healthz(service: str, default_port: int) -> None:
+def _start_healthz(service: str, default_port: int, status_provider=None) -> None:
     """启动最小健康端点（Issue #9-3）：backend 容器不挂 docker.sock、无 docker CLI，
     探活改走内网 HTTP —— 本进程是纯 APScheduler 守护，需此 /healthz 供 backend 探测。
     BlockingScheduler 占主线程 → 用守护线程跑 stdlib ThreadingHTTPServer。
+
+    `status_provider`（Issue #14）：返回 (code, payload) 反映调度器存活，不传维持原语义。
     """
+    import json
     import os
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -41,7 +46,12 @@ def _start_healthz(service: str, default_port: int) -> None:
                 self.send_response(404)
                 self.end_headers()
                 return
-            body = f'{{"status":"ok","service":"{service}"}}'.encode()
+            if status_provider is not None:
+                code, payload = status_provider()
+                payload = {"service": service, **payload}
+            else:
+                code, payload = 200, {"status": "ok", "service": service}
+            body = json.dumps(payload, ensure_ascii=False).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -125,6 +135,7 @@ def signal_failure_snapshot(db, td: date) -> dict:
     }
 
 
+@guarded
 def job_calc_factors():
     """19:00 计算因子并写入 factor_value 表"""
     db = get_session()
@@ -191,6 +202,7 @@ def generate_signals(db, td: date) -> int:
     return len(rows)
 
 
+@guarded
 def job_generate_signals():
     """19:30 运行多因子策略，信号写入 strategy_signal 表（幂等 upsert）"""
     db = get_session()
@@ -251,6 +263,7 @@ def job_generate_signals():
         db.close()
 
 
+@guarded
 def job_consume_backtests():
     """回测任务消费者：每 5 分钟领取 pending 任务并落库（APScheduler 线程池执行，
     与 19:00/19:30 任务并行不冲突——回测只读因子/行情，不写 factor_value）"""
@@ -268,6 +281,7 @@ def job_consume_backtests():
         db.close()
 
 
+@guarded
 def job_consume_factor_trials():
     """G10 试算/寻优任务消费者：每 5 分钟领取 pending 并落库（复用 backtest_job 模式）
 
@@ -305,6 +319,7 @@ def _enqueue_coverage_repair(db, td: date, missing_codes: list[str]) -> None:
     db.commit()
 
 
+@guarded
 def job_data_quality():
     """18:30 数据健康检查：7 项体检结果写 task_run 台账（notify_scheduler 18:35 推送）。
     执行成功即记 success（发现问题是产出而非失败）；job 崩溃才记 failed。
@@ -342,6 +357,7 @@ def job_data_quality():
         db.close()
 
 
+@guarded
 def job_consume_remediation():
     """自愈 stage2 消费者：每 5 分钟领取 repaired 任务（Issue #4）
 
@@ -364,6 +380,7 @@ def job_consume_remediation():
         db.close()
 
 
+@guarded
 def job_precompute_factor_stat():
     """19:05 预计算因子检验统计（2.3 G9：factor_stat/factor_corr，幂等 upsert）
 
@@ -393,6 +410,7 @@ def job_precompute_factor_stat():
         db.close()
 
 
+@guarded
 def job_morning_brief():
     """09:10 早盘简报（热点采集 + 昨日回顾 + 今日计划，Issue #4）。
     非交易日/无行情 skip；组装逻辑见 app/morning_brief.py。"""
@@ -401,6 +419,7 @@ def job_morning_brief():
     _job()
 
 
+@guarded
 def job_precompute_perf():
     """21:20 策略效果度量预计算：命中率 + 实盘vs回测对照 + 因子贡献归因。
 
@@ -434,6 +453,7 @@ def job_precompute_perf():
         db.close()
 
 
+@guarded
 def job_perf_monthly_report():
     """每月 1 日 21:15 发送上月绩效报告卡片（notify_config['perf_report'] 门控）。
 
@@ -481,6 +501,53 @@ def job_perf_monthly_report():
         db.close()
 
 
+def _probe_factor_value(_delta: float) -> bool:
+    """当日因子是否已产出（factor_value 含最新交易日行）"""
+    from app.models.tables import FactorValue
+
+    db = get_session()
+    try:
+        td = latest_trade_date(db)
+        if td is None:
+            return True  # 无行情，谈不上补算
+        return db.execute(
+            select(FactorValue.code).where(FactorValue.trade_date == td).limit(1)
+        ).scalar() is not None
+    finally:
+        db.close()
+
+
+def _probe_strategy_signal(_delta: float) -> bool:
+    """当日策略信号是否已产出"""
+    from app.models.tables import FactorValue, StrategySignal
+
+    db = get_session()
+    try:
+        td = latest_trade_date(db)
+        if td is None:
+            return True
+        return db.execute(
+            select(StrategySignal.code).where(StrategySignal.trade_date == td).limit(1)
+        ).scalar() is not None
+    finally:
+        db.close()
+
+
+def _never_catchup(_delta: float) -> bool:
+    """恒 True：该 job 不参与启动补跑"""
+    return True
+
+
+def register_catchups() -> None:
+    """注册启动补跑探针（Issue #14）。因子/信号是当日链路的硬依赖，必补；
+    数据质量/绩效等有自身幂等或周期语义，不补。独立成函数便于单测。"""
+    register_catchup("job_calc_factors", _probe_factor_value)
+    register_catchup("job_generate_signals", _probe_strategy_signal)
+    for _j in ("job_data_quality", "job_precompute_factor_stat", "job_precompute_perf",
+               "job_morning_brief"):
+        register_catchup(_j, _never_catchup)
+
+
 if __name__ == "__main__":
     scheduler = BlockingScheduler()
 
@@ -494,8 +561,12 @@ if __name__ == "__main__":
     scheduler.add_job(job_data_quality, "cron", hour=18, minute=30)
     scheduler.add_job(job_perf_monthly_report, "cron", day=1, hour=21, minute=15)
     scheduler.add_job(job_precompute_perf, "cron", hour=21, minute=20)
-    scheduler.add_job(notify_tick, "interval", minutes=1)
+    # notify_tick 是导入的（notify_scheduler.tick），在注册处以 guarded 包一层计时
+    scheduler.add_job(guarded(notify_tick), "interval", minutes=1)
 
-    _start_healthz("quant-engine", 9201)
+    _start_healthz("quant-engine", 9201, status_provider=healthz_status)
+    register_catchups()
+    start_watchdog()
+    spawn_startup_catchup()
     logger.info("quant-engine 调度器启动，等待定时任务...")
     scheduler.start()

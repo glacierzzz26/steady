@@ -101,10 +101,14 @@ def main():
     from app.db import get_session, upsert
     from app.models.tables import DailyPrice
     from app.sources import baostock
+    from app.sources.net import install_http_timeouts
     from app.collectors.base import to_ak_date
     from app.collectors.daily import build_rows, fetch_pair
     from app.cleaners.factor_guard import guard_factor
     from sqlalchemy import text
+
+    # 请求层超时（Issue #14）：本脚本经 fetch_pair 批量拉 AkShare，需装补丁
+    install_http_timeouts()
 
     db = get_session()
 

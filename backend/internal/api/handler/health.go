@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -207,15 +208,26 @@ func probeService(pidFile, probeURL string) (string, string) {
 }
 
 // httpProbe 内网 HTTP 探活（backend 容器无 docker CLI/socket，见 serviceDefs 注释）。
-// 有 HTTP 响应（含非 2xx）即判 ok——探的是「容器在不在、服务进程活不活」；
 // 连接被拒 = down（服务确实没起）；DNS 解析失败/超时 = unknown（非 compose 同网络环境）。
+//
+// 响应码语义（Issue #14）：2xx = ok；**非 2xx = degraded**（服务活着但自报不健康，
+// 如看门狗探到 job 卡死时 /healthz 答 503）。原实现「有响应即 ok」会把卡死藏成正常，
+// 运维页看不见——这正是 09-08 采集卡死后无人知晓的一环。
 func httpProbe(url string) (string, string) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(url)
 	if err == nil {
-		_, _ = io.Copy(io.Discard, resp.Body) // 排干连接体，允许复用
-		_ = resp.Body.Close()
-		return "ok", "内网 HTTP 探活通过"
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return "ok", "内网 HTTP 探活通过"
+		}
+		detail := strings.TrimSpace(string(body))
+		if detail != "" {
+			return "degraded", fmt.Sprintf("服务自报不健康（HTTP %d）：%s",
+				resp.StatusCode, detail)
+		}
+		return "degraded", fmt.Sprintf("服务自报不健康（HTTP %d）", resp.StatusCode)
 	}
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {

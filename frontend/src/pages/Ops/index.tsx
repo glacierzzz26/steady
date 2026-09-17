@@ -18,12 +18,16 @@ const STATUS_TEXT: Record<string, [string, string]> = {
 
 /** 服务状态行（来自 /health/services 6 容器实时探活） */
 function ServiceRow({ svc }: { svc: ServiceStatus }) {
+  // degraded（Issue #14）：服务活着但自报不健康（如看门狗探到 job 卡死，/healthz 答 503），
+  // 用 warn 色单列——原先「有响应即 ok」会把它藏成运行中。
   const cfg =
     svc.status === 'ok'
       ? ['运行中', '100%', 'var(--ok)']
-      : svc.status === 'down'
-        ? ['异常', '40%', 'var(--down)']
-        : ['未知', '15%', 'rgba(139,147,167,.35)']
+      : svc.status === 'degraded'
+        ? ['降级', '60%', 'var(--warn)']
+        : svc.status === 'down'
+          ? ['异常', '40%', 'var(--down)']
+          : ['未知', '15%', 'rgba(139,147,167,.35)']
   return (
     <div className="health" title={svc.detail || undefined}>
       <span style={{ width: 110 }}>

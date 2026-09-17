@@ -612,7 +612,8 @@ export interface TaskRunsData {
 export interface ServiceStatus {
   name: string
   label: string
-  status: 'ok' | 'down' | 'unknown'
+  // degraded：服务活着但自报不健康（Issue #14 起 /healthz 可答 503，如看门狗探到 job 卡死）
+  status: 'ok' | 'degraded' | 'down' | 'unknown'
   detail?: string
 }
 
