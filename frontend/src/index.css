@@ -92,6 +92,8 @@ body {
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border: 1px solid var(--line2); border-radius: 14px; font-size: 13px; }
 .chip.rest { color: var(--warn); border-color: rgba(233, 162, 59, 0.35); }
 .chip.live { color: var(--ok); border-color: rgba(47, 191, 113, 0.35); }
+.chip.jump { cursor: pointer; }
+.chip.jump:hover { color: #fff; border-color: rgba(168, 192, 255, 0.55); }
 .avatar {
   width: 30px; height: 30px; border-radius: 50%;
   background: linear-gradient(135deg, #4C7DFF, #6C5CE7);

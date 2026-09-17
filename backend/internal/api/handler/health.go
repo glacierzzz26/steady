@@ -2,9 +2,11 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
@@ -150,21 +152,23 @@ type serviceRow struct {
 	Detail string `json:"detail,omitempty"`
 }
 
-// serviceDefs 各服务探活定义：pidFile 为开发模式 host 进程 pid（相对 backend 工作目录），
-// container 为 docker 容器名（生产/开发兜底）。pid 存活优先，其次 docker，否则 unknown。
+// serviceDefs 各服务探活定义（Issue #9-3 非 docker 方案）：
+// pidFile 为开发模式 host 进程 pid（相对 backend 工作目录）；
+// probeURL 为生产（compose 同网络 DNS）内网 HTTP 端点。pid 存活优先，其次 HTTP 探活。
 var serviceDefs = []struct {
-	name, label, pidFile, container string
+	name, label, pidFile, probeURL string
 }{
-	{"backend", "backend 交易后端", "../.dev/backend.pid", "quant-backend"},
-	{"collector", "collector 数据采集", "../.dev/collector.pid", "quant-collector"},
-	{"quant-engine", "quant-engine 因子引擎", "../.dev/quant-engine.pid", "quant-engine"},
-	{"frontend", "frontend 前端", "../.dev/vite.pid", "quant-frontend"},
-	{"nginx", "nginx 网关", "", "quant-nginx"},
-	{"postgres", "postgres 数据库", "", "quant-postgres"},
+	{"backend", "backend 交易后端", "../.dev/backend.pid", ""},
+	{"collector", "collector 数据采集", "../.dev/collector.pid", "http://collector:9200/healthz"},
+	{"quant-engine", "quant-engine 因子引擎", "../.dev/quant-engine.pid", "http://quant-engine:9201/healthz"},
+	{"frontend", "frontend 前端", "../.dev/vite.pid", "http://frontend:80/"},
+	{"nginx", "nginx 网关", "", "http://nginx:80/"},
+	{"postgres", "postgres 数据库", "", ""},
 }
 
 // GetServices 服务状态（GET /health/services）
-// 探活顺序：host 进程 pid 存活 → docker 容器运行 → unknown；backend/postgres 用自身状态
+// 探活顺序：host 进程 pid 存活（dev）→ 内网 HTTP 探活（prod，Issue #9-3）→ unknown；
+// backend/postgres 用自身状态。
 func GetServices(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		out := make([]serviceRow, 0, len(serviceDefs))
@@ -183,7 +187,7 @@ func GetServices(db *gorm.DB) gin.HandlerFunc {
 					row.Detail = "数据库连接失败"
 				}
 			default:
-				row.Status, row.Detail = probeService(d.pidFile, d.container)
+				row.Status, row.Detail = probeService(d.pidFile, d.probeURL)
 			}
 			out = append(out, row)
 		}
@@ -191,21 +195,40 @@ func GetServices(db *gorm.DB) gin.HandlerFunc {
 	}
 }
 
-// probeService 探活单个服务：host pid 优先，docker 兜底，均不可得为 unknown
-func probeService(pidFile, container string) (string, string) {
+// probeService 探活单个服务：host pid 优先（dev 本地进程），HTTP 端点兜底（compose 内）
+func probeService(pidFile, probeURL string) (string, string) {
 	if pidFile != "" && hostPidAlive(pidFile) {
 		return "ok", "host 进程运行中"
 	}
-	if container != "" {
-		if state, ok := dockerState(container); ok {
-			if state == "running" {
-				return "ok", "docker 容器运行中"
-			}
-			return "down", "docker 容器未运行"
-		}
-		return "unknown", "docker 不可用"
+	if probeURL != "" {
+		return httpProbe(probeURL)
 	}
 	return "unknown", "无探活途径"
+}
+
+// httpProbe 内网 HTTP 探活（backend 容器无 docker CLI/socket，见 serviceDefs 注释）。
+// 有 HTTP 响应（含非 2xx）即判 ok——探的是「容器在不在、服务进程活不活」；
+// 连接被拒 = down（服务确实没起）；DNS 解析失败/超时 = unknown（非 compose 同网络环境）。
+func httpProbe(url string) (string, string) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err == nil {
+		_, _ = io.Copy(io.Discard, resp.Body) // 排干连接体，允许复用
+		_ = resp.Body.Close()
+		return "ok", "内网 HTTP 探活通过"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "unknown", "无法解析主机（未在 compose 网络内运行）"
+	}
+	var nerr net.Error
+	if errors.As(err, &nerr) && nerr.Timeout() {
+		return "unknown", "连接超时"
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return "down", "连接被拒（服务未运行）"
+	}
+	return "unknown", "HTTP 探活失败"
 }
 
 // hostPidAlive 读 pid 文件并探测进程存活（signal 0）
@@ -223,21 +246,6 @@ func hostPidAlive(path string) bool {
 		return false
 	}
 	return proc.Signal(syscall.Signal(0)) == nil
-}
-
-// dockerState 查询容器状态；docker 命令不可用返回 (_, false)
-func dockerState(name string) (string, bool) {
-	out, err := exec.Command("docker", "ps", "-a", "--format", "{{.Names}} {{.State}}").Output()
-	if err != nil {
-		return "", false
-	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.Fields(line)
-		if len(parts) == 2 && parts[0] == name {
-			return parts[1], true
-		}
-	}
-	return "", true // docker 可用但容器不存在
 }
 
 // GetDataAssets 数据资产概览（GET /health/data-assets）：各表精确行数

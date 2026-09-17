@@ -19,9 +19,25 @@ def create_db_engine() -> Engine:
     return create_engine(get_dsn(), pool_size=5, max_overflow=10, pool_pre_ping=True)
 
 
+# 进程级单例引擎/会话工厂：连接池（5+10）整进程复用。
+# 若每次 get_session 新建 engine，旧池 idle 连接依赖 GC 才关闭，
+# 会缓慢堆积直到打满 Postgres max_connections（2026-08-30 生产事故）。
+_engine: Engine | None = None
+_session_factory = None
+
+
+def get_engine() -> Engine:
+    global _engine
+    if _engine is None:
+        _engine = create_db_engine()
+    return _engine
+
+
 def get_session() -> Session:
-    factory = sessionmaker(bind=create_db_engine())
-    return factory()
+    global _session_factory
+    if _session_factory is None:
+        _session_factory = sessionmaker(bind=get_engine())
+    return _session_factory()
 
 
 def upsert(session: Session, model, rows: list[dict],

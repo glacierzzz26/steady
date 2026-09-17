@@ -24,6 +24,38 @@ logging.basicConfig(
 logger = logging.getLogger("tasks")
 
 
+def _start_healthz(service: str, default_port: int) -> None:
+    """启动最小健康端点（Issue #9-3）：backend 容器不挂 docker.sock、无 docker CLI，
+    探活改走内网 HTTP —— 本进程是纯 APScheduler 守护，需此 /healthz 供 backend 探测。
+    BlockingScheduler 占主线程 → 用守护线程跑 stdlib ThreadingHTTPServer。
+    """
+    import os
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    port = int(os.environ.get("HEALTH_PORT", default_port))
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 (http.server 命名约定)
+            if self.path != "/healthz":
+                self.send_response(404)
+                self.end_headers()
+                return
+            body = f'{{"status":"ok","service":"{service}"}}'.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):  # 健康轮询每 ~10s 一次，静默避免刷日志
+            pass
+
+    server = ThreadingHTTPServer(("0.0.0.0", port), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logger.info("健康端点已启动 :%s/healthz (service=%s)", port, service)
+
+
 def latest_trade_date(db) -> date | None:
     """最近一个已有行情数据的交易日（跳过指数伪股票）"""
     return db.execute(
@@ -47,6 +79,52 @@ def market_ready(db, td: date) -> bool:
     return len(with_bar) / len(pool) >= 0.9
 
 
+def factor_ready(db, td: date) -> bool:
+    """当日 factor_value 是否有产出（generate_signals 前置检查，Issue #9-2）
+
+    calc_factors 19:00 先行：行情就绪但因子未产（calc 崩溃 / coverage 不足被跳过）时，
+    generate_signals 不应硬跑抛 RuntimeError 记 failed，而应记 skipped 交由自愈兜底。
+    """
+    from app.models.tables import FactorValue
+
+    return db.execute(
+        select(FactorValue.code).where(FactorValue.trade_date == td).limit(1)
+    ).scalar() is not None
+
+
+def failed_detail(td, e: Exception, extra: dict | None = None) -> dict:
+    """失败现场 detail：错误类型+消息 + traceback + 交易日 + 调用方可补快照。
+
+    Issue #9-2：此前失败分支只传 message、detail 恒 {}，告警与页面查不到任何现场。
+    除 record_task 之外无副作用，纯函数便于单测。
+    """
+    import traceback
+
+    detail = {
+        "trade_date": str(td) if td else None,
+        "error": f"{type(e).__name__}: {e}",
+        "traceback": traceback.format_exc(limit=6),
+    }
+    if extra:
+        detail.update(extra)
+    return detail
+
+
+def signal_failure_snapshot(db, td: date) -> dict:
+    """信号失败快照：当日因子行数 / active 策略（供失败 detail 落库用）"""
+    from app.models.tables import FactorValue, Strategy
+
+    return {
+        "factor_value_rows": db.execute(
+            select(func.count()).select_from(FactorValue)
+            .where(FactorValue.trade_date == td)
+        ).scalar() or 0,
+        "active_strategy": db.execute(
+            select(Strategy.name).where(Strategy.status == "active")
+        ).scalar(),
+    }
+
+
 def job_calc_factors():
     """19:00 计算因子并写入 factor_value 表"""
     db = get_session()
@@ -67,11 +145,11 @@ def job_calc_factors():
         record_task(db, "calc_factors", td, "success",
                     f"计算完成（{stats.get('factors', len(stats))} 类因子）",
                     detail={"trade_date": str(td), "stats": stats})
-    except Exception:
+    except Exception as e:
         logger.exception("因子计算任务失败")
         db.rollback()
         record_task(db, "calc_factors", td or date.today(), "failed",
-                    "因子计算异常")
+                    "因子计算异常", detail=failed_detail(td, e))
     finally:
         db.close()
 
@@ -123,11 +201,23 @@ def job_generate_signals():
             logger.warning("无行情数据，跳过策略信号")
             record_task(db, "generate_signals", date.today(), "skipped", "无行情数据")
             return
+        # 数据就绪预检（与 calc_factors 同口径）：未就绪记 skipped 而非 failed，
+        # 让失败告警只盯真实异常（Issue #9-2 根因：coverage 不足日 calc 跳过 →
+        # generate 硬跑抛 RuntimeError 误报 failed）
+        if not market_ready(db, td):
+            logger.warning("%s 行情就绪比例不足，跳过策略信号", td)
+            record_task(db, "generate_signals", td, "skipped",
+                        "行情就绪比例不足，跳过策略信号（calc_factors 同口径）")
+            return
+        if not factor_ready(db, td):
+            logger.warning("%s 因子数据未就绪，跳过策略信号", td)
+            record_task(db, "generate_signals", td, "skipped",
+                        "因子数据未就绪（calc_factors 未产出当日因子）")
+            return
         n = generate_signals(db, td)
         if n == 0:
-            logger.warning("%s 无信号输出（可能因子数据未就绪）", td)
-            record_task(db, "generate_signals", td, "skipped",
-                        "无信号输出（因子数据可能未就绪）")
+            logger.warning("%s 无信号输出（无候选通过筛选）", td)
+            record_task(db, "generate_signals", td, "skipped", "无信号输出")
             return
         counts = {a: c for a, c in db.execute(
             select(StrategySignal.action, func.count())
@@ -144,11 +234,19 @@ def job_generate_signals():
                     f"生成 {n} 条信号",
                     detail={"trade_date": str(td), "total": n,
                             "counts": counts, "top_buys": top_buys})
-    except Exception:
+    except Exception as e:
         logger.exception("策略信号任务失败")
         db.rollback()
+        # 失败必须带现场（Issue #9-2）：traceback + 当日因子行数 + active 策略快照；
+        # 快照查询自身失败（如 DB 断连）不掩盖原始异常，降级为纯现场。
+        extra = {}
+        if td:
+            try:
+                extra = signal_failure_snapshot(db, td)
+            except Exception:
+                pass
         record_task(db, "generate_signals", td or date.today(), "failed",
-                    "策略信号生成异常")
+                    "策略信号生成异常", detail=failed_detail(td, e, extra))
     finally:
         db.close()
 
@@ -398,5 +496,6 @@ if __name__ == "__main__":
     scheduler.add_job(job_precompute_perf, "cron", hour=21, minute=20)
     scheduler.add_job(notify_tick, "interval", minutes=1)
 
+    _start_healthz("quant-engine", 9201)
     logger.info("quant-engine 调度器启动，等待定时任务...")
     scheduler.start()

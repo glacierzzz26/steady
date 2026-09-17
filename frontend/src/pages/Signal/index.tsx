@@ -6,7 +6,7 @@ import Seg from '../../components/Seg'
 import Tag from '../../components/Tag'
 import { mapAction, signalsApi, type SignalAction, type StrategyInfo } from '../../api'
 import { useApi } from '../../hooks/useApi'
-import { fmtNum } from '../../lib/format'
+import { fmtChg, fmtNum } from '../../lib/format'
 import { fmtName } from '../../lib/names'
 
 const SIG_PG = 10
@@ -44,6 +44,18 @@ function G1Cell({ v, cls }: { v?: number | null; cls?: string }) {
     </td>
   ) : (
     <td className={`r num ${cls ?? ''}`}>{fmtNum(v)}</td>
+  )
+}
+
+/** 20日涨幅列（Issue #11-3）：后端口径为百分比数值（qfq (c1/c21-1)*100），
+ * 补 +/- 与 % 单位；缺失 → — + G1 提示 */
+function ChgCell({ v }: { v?: number | null }) {
+  const miss = v === undefined || v === null || Number.isNaN(v)
+  const cls = miss ? '' : v >= 0 ? 'up' : 'down'
+  return (
+    <td className={`r num ${miss ? 'muted' : cls}`} title={miss ? G1_HINT : undefined}>
+      {miss ? '—' : fmtChg(v)}
+    </td>
   )
 }
 
@@ -201,10 +213,7 @@ export default function Signal() {
                     <G1Cell v={s.quality} />
                     <G1Cell v={s.risk} />
                     <G1Cell v={s.pe} />
-                    <G1Cell
-                      v={s.chg20}
-                      cls={s.chg20 !== undefined && s.chg20 >= 0 ? 'up' : 'down'}
-                    />
+                    <ChgCell v={s.chg20} />
                   </tr>
                 ))
               )}

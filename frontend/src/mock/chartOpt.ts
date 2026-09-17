@@ -15,6 +15,15 @@ export const axis = {
 
 const tip = tokens.tooltip
 
+/**
+ * 数值去长尾（Issue #11-1）：IC/前向收益等数量级 ~±0.01-0.2，
+ * tooltip 固定 3 位小数（2 位会把 0.0047 → 0.00 失真）；相关性等 -1~1 量级用 2 位。
+ */
+const v3 = (value: unknown): string =>
+  typeof value === 'number' ? value.toFixed(3) : String(value ?? '--')
+const v2 = (value: unknown): string =>
+  typeof value === 'number' ? value.toFixed(2) : String(value ?? '--')
+
 export interface LineSeriesDef {
   name: string
   data: (number | null)[] // null = 断点（对齐两个日期序列时用）
@@ -73,7 +82,7 @@ export function lineOpt(
 export function icBarOpt(months: string[], icBars: number[], cumIc: number[]): EChartsOption {
   return {
     grid: { left: 44, right: 48, top: 22, bottom: 26 },
-    tooltip: { trigger: 'axis', ...tip },
+    tooltip: { trigger: 'axis', ...tip, valueFormatter: v3 },
     xAxis: { type: 'category', data: months, ...axis, axisLabel: { ...axis.axisLabel, interval: 11 } },
     yAxis: { type: 'value', ...axis },
     series: [
@@ -102,7 +111,7 @@ export function decayOpt(dates: string[], series: LineSeriesDef[]): EChartsOptio
   const colors = ['#4C7DFF', '#2FBF71', '#E9A23B', '#F0524F', '#A8C0FF', '#B87BFF']
   return {
     grid: { left: 44, right: 16, top: 26, bottom: 28 },
-    tooltip: { trigger: 'axis', ...tip },
+    tooltip: { trigger: 'axis', ...tip, valueFormatter: v3 },
     legend: {
       textStyle: { color: '#8B93A7', fontSize: 13 }, top: 0,
       data: series.map(s => s.name),
@@ -126,7 +135,7 @@ export function quintileOpt(labels: string[], rets: (number | null)[]): EChartsO
   const colors = ['#F0524F', '#E9863F', '#E9C23B', '#5BBA6D', '#2FBF71']
   return {
     grid: { left: 52, right: 16, top: 26, bottom: 28 },
-    tooltip: { trigger: 'axis', ...tip },
+    tooltip: { trigger: 'axis', ...tip, valueFormatter: v3 },
     xAxis: { type: 'category', data: labels, ...axis },
     yAxis: { type: 'value', ...axis, axisLabel: { ...axis.axisLabel, formatter: (v: number) => v.toFixed(3) } },
     series: [{
@@ -147,7 +156,7 @@ export function corrOpt(facs: string[], corr: number[][]): EChartsOption {
       ...tip,
       formatter: (p: unknown) => {
         const d = (p as { value: [number, number, number] }).value
-        return `${facs[d[1]]} × ${facs[d[0]]}：<b>${corr[d[1]][d[0]]}</b>`
+        return `${facs[d[1]]} × ${facs[d[0]]}：<b>${corr[d[1]][d[0]].toFixed(2)}</b>`
       },
     },
     xAxis: { type: 'category', data: facs, ...axis },

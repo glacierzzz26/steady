@@ -21,6 +21,38 @@ logging.basicConfig(
 logger = logging.getLogger("tasks")
 
 
+def _start_healthz(service: str, default_port: int) -> None:
+    """启动最小健康端点（Issue #9-3）：backend 容器不挂 docker.sock、无 docker CLI，
+    探活改走内网 HTTP —— 本进程是纯 APScheduler 守护，需此 /healthz 供 backend 探测。
+    BlockingScheduler 占主线程 → 用守护线程跑 stdlib ThreadingHTTPServer。
+    """
+    import os
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    port = int(os.environ.get("HEALTH_PORT", default_port))
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 (http.server 命名约定)
+            if self.path != "/healthz":
+                self.send_response(404)
+                self.end_headers()
+                return
+            body = f'{{"status":"ok","service":"{service}"}}'.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):  # 健康轮询每 ~10s 一次，静默避免刷日志
+            pass
+
+    server = ThreadingHTTPServer(("0.0.0.0", port), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logger.info("健康端点已启动 :%s/healthz (service=%s)", port, service)
+
+
 def get_session():
     from app.db import get_session as _get
 
@@ -256,5 +288,6 @@ if __name__ == "__main__":
     scheduler.add_job(job_nightly_backfill, "cron", hour=18, minute=5)
     scheduler.add_job(job_consume_remediation, "interval", minutes=5)
 
+    _start_healthz("collector", 9200)
     logger.info("collector 调度器启动，等待定时任务...")
     scheduler.start()
