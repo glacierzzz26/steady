@@ -43,6 +43,14 @@ services:
       # 仅挂日志目录；代码跑镜像内构建产物（稳定、可复现，改代码需重新 build）
       - ./logs:/app/logs
     command: python -m app.tasks
+    # ⚠️ 仅买「可观测性」：docker ps 显示 (unhealthy)，不触发重启（见 run.yml 同注）
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request as u;u.urlopen('http://127.0.0.1:9200/healthz',timeout=5)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     deploy:
       resources:
         limits:
@@ -68,6 +76,14 @@ services:
       # 仅挂日志目录；代码跑镜像内构建产物（稳定、可复现，改代码需重新 build）
       - ./logs:/app/logs
     command: python -m app.tasks
+    # 同 collector：仅买可观测性，不触发重启（见上）
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request as u;u.urlopen('http://127.0.0.1:9201/healthz',timeout=5)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     deploy:
       resources:
         limits:

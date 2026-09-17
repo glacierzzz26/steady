@@ -33,6 +33,7 @@ from app.config import (baostock_enabled, daily_source_chain,
 from app.db import upsert
 from app.models.tables import DailyPrice
 from app.sources import baostock, tencent
+from app.sources.net import is_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ COLUMN_MAP = {
     "收盘": "close",
     "成交量": "volume",
     "成交额": "amount",
+    "换手率": "turnover_rate",  # 仅腾讯源提供；BaoStock/新浪腿无此列
 }
 
 
@@ -83,7 +85,9 @@ def fetch_pair(code: str, start: str, end: str) -> tuple[pd.DataFrame, pd.DataFr
         )
         return raw, hfq
     except Exception as e:
-        reason = "超时" if isinstance(e, TimeoutError) else str(e)
+        # requests 的 ReadTimeout/ConnectTimeout 是 OSError，不是内置 TimeoutError——
+        # 用 net.is_timeout 统一判定，否则日志里"超时"会退化成原始异常串
+        reason = "超时" if is_timeout(e) else str(e)
         logger.warning("%s 东财接口失败(%s)，降级新浪源", code, reason)
         raw = with_timeout(
             ak.stock_zh_a_daily, symbol=sina_symbol(code),
@@ -153,6 +157,12 @@ def build_rows(code: str, raw: pd.DataFrame, hfq: pd.DataFrame) -> list[dict]:
                 "close": raw_close,
                 "volume": int(r["volume"]) if pd.notna(r["volume"]) else None,
                 "amount": float(r["amount"]) if pd.notna(r["amount"]) else None,
+                # 换手率：仅腾讯源有该列（%）；其余腿缺失 → None（不可用 r[...] 直取，
+                # 会 KeyError）。None 值由 upsert 的全 None 剔除保护，不覆盖库内已采值。
+                "turnover_rate": (
+                    float(r["turnover_rate"])
+                    if pd.notna(r.get("turnover_rate")) else None
+                ),
                 # 转 Python float：numpy 类型无法被 psycopg2 直接绑定
                 "adj_factor": (
                     round(float(hfq_c) / raw_close, 4)
@@ -344,19 +354,27 @@ def upsert_daily_rows(db, data: list[dict]) -> int:
     for r in data:
         by_code[r["code"]].append(r)
     table_cols = set(DailyPrice.__table__.columns.keys())
+    base_cols = ["open", "high", "low", "close", "volume", "amount", "adj_factor",
+                 "turnover_rate"]
     total = 0
     for code, items in by_code.items():
         # prev_close 仅供涨跌幅校验使用，入库前过滤掉
         clean = clean_daily_rows(code, items)
         clean = [{k: r[k] for k in table_cols if k in r} for r in clean]
+        if not clean:
+            continue
+        # 全 None 剔除：update_cols 含列但本批行值全为 None → 会清空库内既采值
+        # （08-28 指数成交额清空事故同源坑，见 memory: upsert-null-wipe-amount）。
+        # 换手率尤为关键：BaoStock/新浪腿无此列（恒 None），若静态写入即把腾讯
+        # 已采的换手率清 NULL。先例：index.py:110-112 对 amount 同法处置。
+        update_cols = [c for c in base_cols
+                       if any(r.get(c) is not None for r in clean)]
         upsert(
             db,
             DailyPrice,
             clean,
             conflict_cols=["code", "trade_date"],
-            update_cols=[
-                "open", "high", "low", "close", "volume", "amount", "adj_factor",
-            ],
+            update_cols=update_cols,
         )
         total += len(clean)
     return total
@@ -375,7 +393,8 @@ def upsert_snapshot_rows(db, data: list[dict]) -> int:
     for r in data:
         by_code[r["code"]].append(r)
     table_cols = set(DailyPrice.__table__.columns.keys())
-    base_cols = ["open", "high", "low", "close", "volume", "amount", "adj_factor"]
+    base_cols = ["open", "high", "low", "close", "volume", "amount", "adj_factor",
+                 "turnover_rate"]
     total = 0
     for code, items in by_code.items():
         clean = clean_daily_rows(code, items)

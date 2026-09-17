@@ -45,6 +45,16 @@ services:
     volumes:
       - ./logs:/app/logs
     command: python -m app.tasks
+    # ⚠️ 仅买「可观测性」：docker ps 会显示 (unhealthy)，供人看 / 宿主侧哨兵探。
+    # **不触发重启**（纯 compose 无 autoheal/Swarm）；真正自愈是进程内看门狗触发
+    # os._exit → restart: unless-stopped 拉起。探针用 python（slim 镜像无 curl）。
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request as u;u.urlopen('http://127.0.0.1:9200/healthz',timeout=5)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     deploy:
       resources:
         limits:
@@ -64,6 +74,14 @@ services:
     volumes:
       - ./logs:/app/logs
     command: python -m app.tasks
+    # 同 collector：只买可观测性，不触发重启（见上）
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request as u;u.urlopen('http://127.0.0.1:9201/healthz',timeout=5)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     deploy:
       resources:
         limits:

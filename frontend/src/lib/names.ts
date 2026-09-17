@@ -40,6 +40,9 @@ export const TASK_ZH: Record<string, string> = {
   generate_signals: '信号生成',
   morning_brief: '早盘简报',
   nav_snapshot: '净值快照',
+  // Issue #14：任务超时看门狗的自杀/告警记录（job 卡死时写入）
+  collector_watchdog: '采集看门狗',
+  watchdog: '引擎看门狗',
 }
 
 /** 任务名中文标签：notify:xxx → 「通知·xxx」；alert:xxx → 「告警·xxx」；未收录退回原名 */

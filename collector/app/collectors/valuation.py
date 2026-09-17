@@ -112,17 +112,12 @@ def sync_valuation(codes: list[str] | None = None, rate_limit: float = 1.0) -> b
     from sqlalchemy import func, select
 
     from app.db import get_session
-    from app.models.tables import StockBasic
 
     db = get_session()
     if codes is None:
-        codes = sorted(
-            db.execute(
-                select(StockBasic.code).where(
-                    StockBasic.universe.in_(("hs300", "zz500"))
-                )
-            ).scalars().all()
-        )
+        from app.collectors.scope import collect_codes
+
+        codes = collect_codes(db, include_pool=True)
     latest = {
         code: max_d
         for code, max_d in db.execute(

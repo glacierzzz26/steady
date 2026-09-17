@@ -26,20 +26,15 @@ logger = logging.getLogger("cli")
 
 
 def _codes_for_daily_sync(db) -> list[str]:
-    """每日同步范围：股票池 ∪ 已有日行情数据的股票（不含指数）"""
-    from sqlalchemy import select
+    """每日同步范围：采集范围内的股票（Issue #13 起走 collect_codes helper）
 
-    from app.models.tables import DailyPrice, StockBasic
+    旧实现 = universe 池 ∪ 已有日行情数据的股票；后者不看 universe（同 tasks
+    `_daily_sync_codes` 的 R4 自放大坑），故整体收敛到 helper。默认 pool 分支
+    = 现状；`include_pool=True` 保证策略池兜底在采。
+    """
+    from app.collectors.scope import collect_codes
 
-    pool = db.execute(
-        select(StockBasic.code).where(
-            StockBasic.universe.in_(("hs300", "zz500"))
-        )
-    ).scalars().all()
-    with_data = db.execute(
-        select(DailyPrice.code).where(DailyPrice.code.not_like("sh%")).distinct()
-    ).scalars().all()
-    return sorted(set(pool) | set(with_data))
+    return collect_codes(db, include_pool=True)
 
 
 def cmd_sync_daily(args):
@@ -183,6 +178,11 @@ def cmd_audit_tencent(args):
 
 
 def main():
+    # 请求层超时（Issue #14）：手工入口同样要装，覆盖 AkShare 无 timeout 调用
+    from app.sources.net import install_http_timeouts
+
+    install_http_timeouts()
+
     parser = argparse.ArgumentParser(prog="quant-collector")
     sub = parser.add_subparsers(dest="cmd", required=True)
 

@@ -5,6 +5,11 @@ status ∈ success/skipped/failed；同 (task_name, run_date) 幂等 upsert。
 - 通知调度器据此做「该做没做」检查与失败告警
 - 页面据此展示最近任务执行状态
 - detail 为结构化明细，供后续大模型消费
+
+⚠️ 写入方（Issue #14 起）：本服务 + backend Go 服务 + **collector**。
+collector 原先不写账本，现由 `collector/app/watchdog.py` 在 job 卡死时写
+`collector_watchdog` 失败行——正是靠 notify_scheduler._check_task_alerts（对当日
+所有 failed 行推红卡，**不受数据新鲜度门控**）把采集侧卡死告警送达飞书。
 """
 import logging
 

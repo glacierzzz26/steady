@@ -47,7 +47,28 @@ DAILY_SYNC_INTERVAL = _int("COLLECTOR_DAILY_INTERVAL", 1)
 
 # 数据源请求超时（秒）：AkShare 底层 requests 无 timeout，遇到半开连接会永久挂起
 # （曾卡死同步），这里统一兜底；超时抛异常走降级/重试，而非无限等待。
+#
+# ⚠️ 这是 with_timeout **兜底网** 的超时（Issue #14 起 with_timeout 已去死锁）；
+# 真正的请求层根因修法是 sources/net.py 给 requests 注入 socket 超时。
+# 不变式：HTTP_READ_TIMEOUT ≤ REQUEST_TIMEOUT —— L1 先触发，L2 才是最后一道。
 REQUEST_TIMEOUT = _int("COLLECTOR_REQUEST_TIMEOUT", 15)
+
+# ---------- 请求层超时补丁（Issue #14）----------
+# AkShare 底层 requests 无有效 timeout：东财 stock_zh_a_hist 是 timeout=None 转发
+# （等效无限），新浪腿 stock_zh_a_daily 更是**裸 requests.get 完全无 timeout**。
+# ⚠️ socket.setdefaulttimeout 对它无效（urllib3 内部会显式 settimeout(None) 覆盖），
+# 故只能在 requests.Session.request 层注入（见 sources/net.py）。
+# connect/read 拆开：连接超时宜短（DNS/TCP 快失败），读超时给响应体留时间。
+HTTP_CONNECT_TIMEOUT = _float("COLLECTOR_HTTP_CONNECT_TIMEOUT", 5)
+HTTP_READ_TIMEOUT = _float("COLLECTOR_HTTP_READ_TIMEOUT", 15)
+# 杀开关：置 0 硬旁路补丁（当日回滚，无需重建）。默认开。
+HTTP_TIMEOUT_PATCH = os.getenv(
+    "COLLECTOR_HTTP_TIMEOUT_PATCH", "1").strip().lower() in ("1", "true", "yes", "on")
+# 故障注入（验收用）：URL 命中任意子串 → 抛一次 ReadTimeout，验证降级链。
+# 默认空 = 关；COLLECTOR_FAULT_INJECT_ONCE=1 时每进程只注入一次。
+FAULT_INJECT_TIMEOUT_HOSTS = _list("COLLECTOR_FAULT_INJECT_TIMEOUT_HOSTS", "")
+FAULT_INJECT_ONCE = os.getenv(
+    "COLLECTOR_FAULT_INJECT_ONCE", "").strip().lower() in ("1", "true", "yes", "on")
 
 # BaoStock 开关（阶段 3：prod 已全源翻 BaoStock，Tushare 依赖已移除）
 BAOSTOCK_ENABLED = os.getenv("BAOSTOCK_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
@@ -124,6 +145,24 @@ def daily_source_chain() -> list[str]:
 def tencent_snapshot_enabled() -> bool:
     """18:10 当日同步是否走腾讯批量快照（需保险丝与 scope 同时点名 daily）"""
     return TENCENT_SNAPSHOT and tencent_enabled("daily")
+
+
+# ---------- 采集范围（Issue #13）----------
+# 采集范围闸门：pool（默认，= 现状 800 只，按 universe 取）或 a_share
+# （全量 5212 只，按 data_scope='a_share'）。默认 pool → 部署本批代码生产行为
+# 零变化；翻 a_share 才扩采集范围。**策略选股域（universe / factor_service）
+# 不受此闸门影响** —— 拆列的要点。
+COLLECT_SCOPE = _str("COLLECT_SCOPE", "pool").strip().lower()
+
+
+def collect_scope() -> str:
+    """当前采集范围：'pool'（默认）或 'a_share'（未知值回退 pool，防呆）"""
+    return COLLECT_SCOPE if COLLECT_SCOPE in ("pool", "a_share") else "pool"
+
+
+# 快照首日扩池时全部无历史 → 全部 deferred → 逐只补把收益归零。上限内的
+# deferred 交夜间回填处理，超上限才告警（Issue #13 R5）。
+TENCENT_DEFER_MAX = _int("TENCENT_DEFER_MAX", 300)
 
 # 热点采集（早盘简报数据源，Issue #4）：每日早晨采集一次
 HOTSPOT_TOP_N = _int("COLLECTOR_HOTSPOT_TOP_N", 10)          # 板块/人气榜取 TOP N

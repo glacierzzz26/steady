@@ -34,6 +34,15 @@ def test_to_lots_and_yuan():
     assert tencent._to_yuan("330793") == 3.30793e9          # 万元 → 元
 
 
+def test_to_pct_is_percent_verbatim():
+    """换手率源侧已是 %，**不做换算**（勿混入新浪小数口径，否则 100×）"""
+    assert tencent._to_pct("0.21") == 0.21
+    assert tencent._to_pct("1.85") == 1.85
+    assert tencent._to_pct("") is None
+    assert tencent._to_pct(None) is None
+    assert tencent._to_pct("bad") is None
+
+
 # ---------- 日K ----------
 
 def _kline_row(d, o, c, h, l, v, amt):
@@ -54,12 +63,13 @@ def test_daily_raw_parses_close_at_index_2(monkeypatch):
     monkeypatch.setattr(tencent, "_kline_page", fake_page)
     df = tencent.daily_raw("600519", "20260901", "20260916")
     assert captured["symbol"] == "sh600519"
-    assert list(df.columns) == ["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"]
+    assert list(df.columns) == ["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额", "换手率"]
     r = df.iloc[0]
     assert r["收盘"] == 1275.16   # 下标 2 是 close，不是 high
     assert r["最高"] == 1290.00   # 下标 3
     assert r["最低"] == 1270.00   # 下标 4
     assert r["成交额"] == 3.30793e9
+    assert r["换手率"] == 0.5      # [7] 换手率（%），源侧已是百分数
 
 
 def test_daily_raw_star_board_volume_divided(monkeypatch):
@@ -84,7 +94,7 @@ def test_daily_raw_empty_when_no_data(monkeypatch):
     monkeypatch.setattr(tencent, "_kline_page", lambda *a: [])
     df = tencent.daily_raw("600519", "20260901", "20260916")
     assert df.empty
-    assert list(df.columns) == ["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"]
+    assert list(df.columns) == ["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额", "换手率"]
 
 
 def test_daily_raw_paginates_backward(monkeypatch):

@@ -31,6 +31,10 @@ class StockBasic(Base):
     list_date = Column(Date)
     status = Column(String(10), default="L")  # L=上市 / D=退市
     universe = Column(String(20))  # hs300 / zz500 / NULL=全市场
+    # 采集范围（Issue #13）：'a_share' = market IN ('SH','SZ')，NULL = 不采集。
+    # 与 universe 正交 —— 前者管「采哪些」，后者管「策略选哪些」。由 stock.py
+    # 每日无条件重标（单点）；采集侧过滤读此列，策略侧仍读 universe。
+    data_scope = Column(String(16))
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=datetime.now)
 
@@ -53,6 +57,9 @@ class DailyPrice(Base):
     volume = Column(BigInteger)  # 成交量（手）
     amount = Column(Numeric(15, 2))  # 成交额（元）
     adj_factor = Column(Numeric(10, 4))  # 复权因子
+    # 换手率（%）：腾讯日K[7]/快照[38] 写入；BaoStock/新浪腿无此列（恒 None）。
+    # ⚠️ 口径为百分数（0.21 = 0.21%），勿混入新浪小数口径（0.0021）。
+    turnover_rate = Column(Numeric(10, 4))
 
 
 class FinancialIndicator(Base):
@@ -137,6 +144,27 @@ class RemediationTask(Base):
     detail = Column(JSON)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class TaskRun(Base):
+    """任务执行账本（与 quant-engine/models/tables.py 同构，DDL 以 init.sql 为准）
+
+    采集侧原先**不写** task_run（Issue #14 起由 watchdog 写 `collector_watchdog` /
+    `watchdog` 失败行）——quant-engine 的 notify_scheduler._check_task_alerts 对当日
+    所有 failed 行推飞书红卡，故这是采集侧告警的现成通道（零新增管道）。
+    status: success / skipped / failed；UNIQUE(task_name, run_date) 幂等 upsert。
+    """
+
+    __tablename__ = "task_run"
+    __table_args__ = (UniqueConstraint("task_name", "run_date", name="uq_task_run"),)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    task_name = Column(String(64), nullable=False)
+    run_date = Column(Date, nullable=False)
+    status = Column(String(16), nullable=False)
+    message = Column(String)
+    detail = Column(JSON)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class MarketHotspot(Base):

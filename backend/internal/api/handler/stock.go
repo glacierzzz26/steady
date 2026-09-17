@@ -100,6 +100,7 @@ func GetStockList(stockRepo *repository.StockRepository,
 				item["price"] = m.Price
 				item["chg"] = m.Chg
 				item["amount"] = m.Amount
+				item["turnover_rate"] = m.TurnoverRate
 			}
 			if v, ok := val[s.Code]; ok {
 				item["pe"] = v.Pe

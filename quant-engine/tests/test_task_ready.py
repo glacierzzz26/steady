@@ -76,3 +76,64 @@ def test_failed_detail_without_td():
         d = failed_detail(None, e)
     assert d["trade_date"] is None
     assert "ValueError" in d["error"]
+
+
+# ---------- market_ready：策略就绪闸门（Issue #13 R6）----------
+
+def test_market_ready_reads_universe_only(db):
+    """market_ready 只认 universe 池；data_scope 扩到全量不影响它就绪判定（R6）。
+
+    扩池采集 5212 只但策略域仍 800：某日只有 3/3 池股有 bar → ready True，
+    即便库里另有大量 data_scope='a_share' 的非池股无 bar。
+    """
+    from app.models.tables import DailyPrice, StockBasic
+    from app.tasks import market_ready
+
+    for i, code in enumerate(["600519", "000001", "000002"]):
+        db.add(StockBasic(code=code, name=f"池{i}", market="SH",
+                          universe="hs300", data_scope="a_share"))
+    # 非池股：采集范围内但 universe=NULL，当日无 bar
+    for i, code in enumerate(["002415", "688111", "300750"]):
+        db.add(StockBasic(code=code, name=f"非池{i}", market="SZ",
+                          data_scope="a_share"))
+    pid = 0
+    for code in ["600519", "000001", "000002"]:
+        pid += 1
+        db.add(DailyPrice(id=pid, code=code, trade_date=TD, open=10, high=10,
+                          low=10, close=10, volume=100, amount=1000.0))
+    db.commit()
+    assert market_ready(db, TD) is True   # 3/3 池股有 bar
+
+
+def test_market_ready_threshold_is_90pct(db):
+    """阈值 0.9：10 只池股仅 8 只有 bar → False（锁死阈值不被误改）"""
+    from app.models.tables import DailyPrice, StockBasic
+    from app.tasks import market_ready
+
+    codes = [f"6000{i:02d}" for i in range(10)]
+    for code in codes:
+        db.add(StockBasic(code=code, name=code, market="SH", universe="hs300"))
+    pid = 0
+    for code in codes[:8]:          # 8/10 = 80% < 90%
+        pid += 1
+        db.add(DailyPrice(id=pid, code=code, trade_date=TD, open=10, high=10,
+                          low=10, close=10, volume=100, amount=1000.0))
+    db.commit()
+    assert market_ready(db, TD) is False
+
+
+def test_market_ready_9_of_10_passes(db):
+    """9/10 = 90% ≥ 0.9 → True（边界）"""
+    from app.models.tables import DailyPrice, StockBasic
+    from app.tasks import market_ready
+
+    codes = [f"6001{i:02d}" for i in range(10)]
+    for code in codes:
+        db.add(StockBasic(code=code, name=code, market="SH", universe="hs300"))
+    pid = 100
+    for code in codes[:9]:
+        pid += 1
+        db.add(DailyPrice(id=pid, code=code, trade_date=TD, open=10, high=10,
+                          low=10, close=10, volume=100, amount=1000.0))
+    db.commit()
+    assert market_ready(db, TD) is True
