@@ -31,6 +31,10 @@ class StockBasic(Base):
     list_date = Column(Date)
     status = Column(String(10), default="L")  # L=上市 / D=退市
     universe = Column(String(20))  # hs300 / zz500 / NULL=全市场
+    # 采集范围（Issue #13）：'a_share' = market IN ('SH','SZ')，NULL = 不采集。
+    # 与 universe 正交 —— 前者管「采哪些」，后者管「策略选哪些」。由 stock.py
+    # 每日无条件重标（单点）；采集侧过滤读此列，策略侧仍读 universe。
+    data_scope = Column(String(16))
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=datetime.now)
 
@@ -53,6 +57,9 @@ class DailyPrice(Base):
     volume = Column(BigInteger)  # 成交量（手）
     amount = Column(Numeric(15, 2))  # 成交额（元）
     adj_factor = Column(Numeric(10, 4))  # 复权因子
+    # 换手率（%）：腾讯日K[7]/快照[38] 写入；BaoStock/新浪腿无此列（恒 None）。
+    # ⚠️ 口径为百分数（0.21 = 0.21%），勿混入新浪小数口径（0.0021）。
+    turnover_rate = Column(Numeric(10, 4))
 
 
 class FinancialIndicator(Base):

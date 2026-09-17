@@ -32,6 +32,9 @@ class StockBasic(Base):
     list_date = Column(Date)
     status = Column(String(10), default="L")
     universe = Column(String(20))  # hs300 / zz500 / NULL
+    # 采集范围（Issue #13）：'a_share' = SH+SZ，NULL = 不采集（BJ/INDEX）。
+    # ⚠️ **策略侧不读此列** —— 选股域只看 universe / factor_service.pool_codes()。
+    data_scope = Column(String(16))
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=datetime.now)
 
@@ -51,6 +54,8 @@ class DailyPrice(Base):
     volume = Column(BigInteger)
     amount = Column(Numeric(15, 2))
     adj_factor = Column(Numeric(10, 4))
+    # 换手率（%）：腾讯源写入（0.21 = 0.21%）；BaoStock/新浪腿恒 None
+    turnover_rate = Column(Numeric(10, 4))
 
 
 class FinancialIndicator(Base):

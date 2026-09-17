@@ -52,7 +52,7 @@ _HEADERS = {
                    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"),
 }
 # 腾讯日K列名（输出对齐 BaoStock/AkShare 的中文列）
-_KLINE_COLS = ["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"]
+_KLINE_COLS = ["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额", "换手率"]
 
 _session: requests.Session | None = None
 _session_lock = threading.Lock()
@@ -152,6 +152,21 @@ def _to_yuan(raw_amount) -> float | None:
         return None
 
 
+def _to_pct(raw) -> float | None:
+    """腾讯换手率原始值 → 百分数（**源侧已是 %，不做换算**）。
+
+    日K `[7]` 与快照 `[38]` 均为「换手率 %」（如 0.21 = 0.21%），实测与
+    成交量/流通股本自洽（见 docs/phase2/design/数据源评估-全量股票池.md §3.3）。
+    ⚠️ 新浪 `turnover` 是小数（0.0021）——不可混入本列（100× 静默错位）。
+    """
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _ymd(d) -> str:
     """date / str → 腾讯需要的 YYYY-MM-DD（兼容 YYYYMMDD 紧凑式）"""
     if isinstance(d, date):
@@ -228,6 +243,7 @@ def daily_raw(code: str, start_date, end_date) -> pd.DataFrame:
                 "收盘": float(r[2]),  # close 在下标 2
                 "成交量": _to_lots(code, r[5]),
                 "成交额": _to_yuan(r[8]),
+                "换手率": _to_pct(r[7]),
             })
         except (TypeError, ValueError):
             logger.warning("%s 腾讯日K数值异常行 %s，丢弃", code, d)
@@ -293,7 +309,7 @@ def snapshot_rows(codes: list[str], trade_date: date | None = None) -> list[dict
     快照只供当日不复权 OHLCV，**不含复权因子** —— 返回行 `adj_factor=None`，
     由调用方按「因子延续 / 除权回退」填充（见 tasks.job_sync_daily_price）。
     字段下标：`[3]`=现价 `[4]`=昨收 `[5]`=开盘 `[6]`=成交量 `[33]`=最高
-    `[34]`=最低 `[37]`=成交额(万元) `[30]`=时间戳。
+    `[34]`=最低 `[37]`=成交额(万元) `[38]`=换手率(%) `[30]`=时间戳。
     """
     if not codes:
         return []
@@ -307,7 +323,7 @@ def snapshot_rows(codes: list[str], trade_date: date | None = None) -> list[dict
     rows = []
     for sym, f in quotes.items():
         code = sym2code[sym]
-        if len(f) < 38:
+        if len(f) < 39:  # 需读 [38] 换手率
             logger.warning("腾讯快照 %s 字段不足（%s），丢弃", code, len(f))
             continue
         try:
@@ -323,6 +339,7 @@ def snapshot_rows(codes: list[str], trade_date: date | None = None) -> list[dict
                 "close": close,
                 "volume": _to_lots(code, f[6]),
                 "amount": _to_yuan(f[37]),
+                "turnover_rate": _to_pct(f[38]),
                 "adj_factor": None,
                 "prev_close": float(f[4]),
             })

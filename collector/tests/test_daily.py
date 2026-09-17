@@ -510,6 +510,40 @@ def test_upsert_snapshot_rows_skips_null_columns(monkeypatch):
     assert "open" in sql.split("DO UPDATE")[1]
 
 
+def test_upsert_daily_rows_turnover_not_wiped_when_absent(monkeypatch):
+    """R1（P0）：换手率列在源缺失时**不得**进 update_cols。
+
+    场景：腾讯腿先写入 turnover_rate，随后同区间被 BaoStock/新浪腿重跑
+    （两腿无该列 → turnover_rate=None）。若静态 update_cols 含该列，
+    ON CONFLICT SET 会用 NULL 清空已采值（08-28 指数成交额事故同源坑）。
+    """
+    from sqlalchemy.dialects.postgresql import dialect as pg_dialect
+
+    from app.collectors.daily import upsert_daily_rows
+
+    # 1. 腾讯腿：有换手率 → 该列必须更新
+    db1 = FakeSession()
+    upsert_daily_rows(db1, [
+        {"code": "600519", "trade_date": date(2026, 9, 16), "open": 1273.93,
+         "high": 1274.98, "low": 1254.10, "close": 1258.0, "volume": 26235,
+         "amount": 1e8, "adj_factor": 6.26, "prev_close": 1272.75,
+         "turnover_rate": 0.21},
+    ])
+    set_clause = str(db1.executed[0].compile(dialect=pg_dialect())).split("DO UPDATE")[1]
+    assert "turnover_rate" in set_clause
+
+    # 2. BaoStock/新浪腿：无该列（None）→ 不得出现在 SET，否则清 NULL
+    db2 = FakeSession()
+    upsert_daily_rows(db2, [
+        {"code": "600519", "trade_date": date(2026, 9, 16), "open": 1273.93,
+         "high": 1274.98, "low": 1254.10, "close": 1258.0, "volume": 26235,
+         "amount": 1e8, "adj_factor": 6.26, "prev_close": 1272.75,
+         "turnover_rate": None},
+    ])
+    set_clause2 = str(db2.executed[0].compile(dialect=pg_dialect())).split("DO UPDATE")[1]
+    assert "turnover_rate" not in set_clause2
+
+
 def test_align_hfq_normalizes_date_types():
     """新浪 hfq 日期是 datetime.date、腾讯 raw 是字符串——类型不一会导致
     build_rows 按值取因子全取不到（实测踩坑），对齐须统一成字符串"""

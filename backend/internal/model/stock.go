@@ -4,13 +4,15 @@ import "time"
 
 // StockBasic 股票基本信息（对应表 stock_basic）
 type StockBasic struct {
-	Code      string    `gorm:"primaryKey;size:10"`
-	Name      string    `gorm:"size:50;not null"`
-	Market    string    `gorm:"size:10"`   // SH / SZ / BJ
-	Industry  string    `gorm:"size:50"`
-	ListDate  time.Time `gorm:"type:date"`
-	Status    string    `gorm:"size:10;default:L"` // L=上市 / D=退市
-	Universe  string    `gorm:"size:20;index"`     // hs300 / zz500 / NULL
+	Code     string    `gorm:"primaryKey;size:10"`
+	Name     string    `gorm:"size:50;not null"`
+	Market   string    `gorm:"size:10"` // SH / SZ / BJ
+	Industry string    `gorm:"size:50"`
+	ListDate time.Time `gorm:"type:date"`
+	Status   string    `gorm:"size:10;default:L"` // L=上市 / D=退市
+	Universe string    `gorm:"size:20;index"`     // hs300 / zz500 / NULL
+	// 采集范围（Issue #13）：a_share = SH+SZ，NULL = 不采集。与 Universe 正交。
+	DataScope string `gorm:"size:16;index"`
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -29,6 +31,9 @@ type DailyPrice struct {
 	Volume    int64     // 成交量（手）
 	Amount    float64   `gorm:"type:decimal(15,2)"` // 成交额（元）
 	AdjFactor float64   `gorm:"type:decimal(10,4)"` // 复权因子
+	// 换手率（%）：腾讯源写入（0.21 = 0.21%）；BaoStock/新浪腿为空。
+	// 可空 → 指针类型，避免缺失被渲染成 0（见 R11）。
+	TurnoverRate *float64 `gorm:"type:decimal(10,4)" json:"turnover_rate"`
 }
 
 func (DailyPrice) TableName() string { return "daily_price" }
