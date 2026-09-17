@@ -103,11 +103,12 @@ func stockSortClause(sort, order string) string {
 // ---- G2 列表扩展：行情 / 估值 / 财务（批量一次 JOIN，避免 N+1）----
 // 缺失字段一律为 nil（前端空态「—」，不造假）
 
-// PoolMarket 最新行情（G2）：price / chg(%) / amount(元)
+// PoolMarket 最新行情（G2）：price / chg(%) / amount(元) / turnover_rate(%)
 type PoolMarket struct {
-	Price  *float64
-	Chg    *float64
-	Amount *float64
+	Price        *float64
+	Chg          *float64
+	Amount       *float64
+	TurnoverRate *float64 // 换手率（%），Issue #13；腾讯源写入，BaoStock/新浪腿为 NULL
 }
 
 // GetPoolMarket 批量最新行情 + 涨跌幅
@@ -118,21 +119,22 @@ func (r *StockRepository) GetPoolMarket(codes []string) (map[string]*PoolMarket,
 		return out, nil
 	}
 	type row struct {
-		Code   string
-		Price  float64
-		Chg    *float64
-		Amount float64
+		Code         string
+		Price        float64
+		Chg          *float64
+		Amount       float64
+		TurnoverRate *float64
 	}
 	var rows []row
 	err := r.db.Raw(`
 		WITH ranked AS (
-			SELECT code, close, amount,
+			SELECT code, close, amount, turnover_rate,
 				LAG(close) OVER (PARTITION BY code ORDER BY trade_date) AS prev_close,
 				ROW_NUMBER() OVER (PARTITION BY code ORDER BY trade_date DESC) AS rn
 			FROM daily_price
 			WHERE code IN (?)
 		)
-		SELECT code, close AS price, amount,
+		SELECT code, close AS price, amount, turnover_rate,
 			CASE WHEN prev_close IS NOT NULL AND prev_close > 0
 				 THEN (close / prev_close - 1) * 100 END AS chg
 		FROM ranked WHERE rn = 1`, codes).Scan(&rows).Error
@@ -140,7 +142,8 @@ func (r *StockRepository) GetPoolMarket(codes []string) (map[string]*PoolMarket,
 		return nil, err
 	}
 	for _, rr := range rows {
-		out[rr.Code] = &PoolMarket{Price: &rr.Price, Chg: rr.Chg, Amount: &rr.Amount}
+		out[rr.Code] = &PoolMarket{Price: &rr.Price, Chg: rr.Chg,
+			Amount: &rr.Amount, TurnoverRate: rr.TurnoverRate}
 	}
 	return out, nil
 }

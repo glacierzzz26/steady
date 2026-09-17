@@ -34,6 +34,7 @@ export interface StockPoolItem extends StockBasic {
   price?: number // 最新价
   chg?: number // 涨跌幅 %
   amount?: number // 成交额（元）
+  turnover_rate?: number // 换手率 %（腾讯源写入；缺失为 undefined → 空态）
   pe?: number // PE(TTM)
   pb?: number
   roe?: number // %
