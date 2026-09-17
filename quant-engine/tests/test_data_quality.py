@@ -194,3 +194,81 @@ def test_no_market_data(db):
     db.commit()
     r = check_data_quality(db, None)
     assert r["checks_total"] == 0 and r["overall"] == "fail"
+
+
+# ---------- 采集范围（Issue #13）：coverage 三重过滤 / suspect / 漂移 ----------
+
+def _a_share(monkeypatch):
+    from app import data_quality as dq
+    monkeypatch.setattr(dq, "_collect_scope", lambda: "a_share")
+
+
+def test_a_share_scope_filters_delisted_and_unlisted(db, monkeypatch):
+    """a_share 分母三重过滤：退市 / 未上市 不算缺失（R3）"""
+    _a_share(monkeypatch)
+    from sqlalchemy import select as _sel
+    # 只标池内 3 只（300001 保持未标 → 不参与分母也不进真值，避免触发漂移守卫）
+    for st in db.execute(_sel(StockBasic).where(StockBasic.code.in_(POOL))).scalars().all():
+        st.data_scope = "a_share"
+        st.market = "SH" if st.code.startswith("6") else "SZ"
+        st.status = "L"
+        st.list_date = date(2020, 1, 1)
+    # 采集范围内的退市股（status='D'）与被过滤的未上市股（list_date > TD）
+    db.add(StockBasic(code="600002", name="退市股", market="SH",
+                      data_scope="a_share", status="D", list_date=date(2019, 1, 1)))
+    db.add(StockBasic(code="600003", name="未上市", market="SH",
+                      data_scope="a_share", status="L", list_date=date(2026, 10, 1)))
+    db.commit()
+    r = check_data_quality(db, TD)
+    d = r["check_details"]["coverage"]
+    # 分母 = 采集范围内 status='L' 且已上市 = 3 只池股（退市/未上市被过滤）
+    assert d["pool"] == 3
+    assert d["with_bar"] == 3
+    assert r["overall"] == "ok"
+
+
+def test_a_share_suspect_excludes_suspended(db, monkeypatch):
+    """suspect = 昨日有 bar 今日无；停牌股（两日都无）不进 suspect（R3）"""
+    _a_share(monkeypatch)
+    from sqlalchemy import select as _sel
+    for st in db.execute(_sel(StockBasic)).scalars().all():
+        st.data_scope = "a_share"
+        st.market = "SH" if st.code.startswith("6") else "SZ"
+        st.status = "L"
+        st.list_date = date(2020, 1, 1)
+    # 停牌股：PREV 有 bar，TD 无 → 是 suspect（真缺口）
+    db.add(DailyPrice(id=200, code="000002", trade_date=PREV, open=20, high=20,
+                      low=20, close=20, volume=100, amount=1000.0))
+    # 长期停牌股：两日都无
+    db.add(StockBasic(code="000099", name="长期停牌", market="SZ",
+                      data_scope="a_share", status="L", list_date=date(2020, 1, 1)))
+    db.commit()
+    r = check_data_quality(db, TD)
+    d = r["check_details"]["coverage"]
+    assert "000099" in d["missing_all"]      # 分母内无 bar
+    assert "000099" not in d["suspect"]      # 但昨日也无 → 非缺口
+
+
+def test_a_share_drift_guard_warns(db, monkeypatch):
+    """分母漂移 >2% → warn（R2：data_scope 标记未更新）"""
+    _a_share(monkeypatch)
+    from sqlalchemy import select as _sel
+    # 只给池内 3 只标 data_scope，但真值（market SH/SZ + L + 已上市）更多
+    for st in db.execute(_sel(StockBasic)).scalars().all():
+        st.data_scope = "a_share" if st.code in POOL else None
+        st.market = "SH" if st.code.startswith("6") else "SZ"
+        st.status = "L"
+        st.list_date = date(2020, 1, 1)
+    # 新增 4 只应采集但未标 data_scope 的股票 → 真值 8（种子 4 + 新增 4），
+    # 分母 3 → 漂移 >2%
+    for i, c in enumerate(["000010", "000011", "000012", "000013"]):
+        db.add(StockBasic(code=c, name=f"漏标{i}", market="SZ",
+                          data_scope=None, status="L", list_date=date(2020, 1, 1)))
+    db.commit()
+    r = check_data_quality(db, TD)
+    d = r["check_details"]["coverage"]
+    assert d["pool"] == 3
+    assert d["expect_pool"] == 8
+    assert d["drift_pct"] > 2
+    cov = next(x for x in r["results"] if x["name"] == "coverage")
+    assert cov["level"] == "warn"
