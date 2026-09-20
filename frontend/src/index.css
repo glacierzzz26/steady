@@ -350,6 +350,8 @@ input[type="range"] { accent-color: var(--brand); width: 100%; }
 /* ---------- stock pool & detail ---------- */
 .ptag { font-size: 11.5px; padding: 1px 6px; border-radius: 5px; background: rgba(76, 125, 255, 0.12); color: #A8C0FF; margin-left: 6px; white-space: nowrap; }
 .ptag.zz { background: rgba(108, 92, 231, 0.15); color: #A99CF0; }
+/* 采集域标签（Issue #13 全A股）：中性色，刻意弱于指数标签 —— 它是「已登记」而非「有评分」 */
+.ptag.all { background: rgba(255, 255, 255, 0.06); color: var(--txt2); }
 tr.clickable { cursor: pointer; }
 
 /* ---------- brief ---------- */
