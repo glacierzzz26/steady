@@ -218,17 +218,47 @@ def test_akshare_no_split_no_cross_check(monkeypatch):
 
 
 def test_akshare_cross_check_skips_when_baostock_down(monkeypatch):
-    """潜在除权日但 BaoStock 不可用（封禁/未装）→ 交叉验证跳过，不误伤，接受 AkShare"""
+    """合法送转但 BaoStock 不可用（封禁/未装）→ 守卫放行 + 交叉验证跳过，接受 AkShare。
+
+    issue #22 起守卫改判「后复权比」直判涨跌停（假缩股型 601155 现由守卫直接拒收，
+    见 test_akshare_split_glitch_guard_rejects_directly），本用例改用**合法送转**
+    （ratio=1.0，守卫必放行）验证「BaoStock 不可用不误伤合法数据」这一原始意图。
+    """
     monkeypatch.setattr(daily_mod, "baostock_enabled", lambda *a, **k: True)
-    monkeypatch.setattr(daily_mod.ak, "stock_zh_a_hist",
-                        lambda symbol, period, start_date, end_date, adjust:
-                        make_601155_glitch()[0 if adjust == "" else 1])
+
+    def fake_hist(symbol, period, start_date, end_date, adjust):
+        if adjust == "":
+            return pd.DataFrame({
+                "日期": ["2026-08-01", "2026-08-02"],
+                "开盘": [10.0, 20.0], "最高": [10.5, 21.0], "最低": [9.5, 19.0],
+                "收盘": [10.0, 20.0], "成交量": [10000, 5000], "成交额": [1e8, 1e9],
+            })
+        return pd.DataFrame({"日期": ["2026-08-01", "2026-08-02"],
+                             "收盘": [20.0, 20.0]})  # 2:1 送转，ratio=1.0
+
+    monkeypatch.setattr(daily_mod.ak, "stock_zh_a_hist", fake_hist)
     monkeypatch.setattr(daily_mod.baostock, "get_session",
                         lambda: (_ for _ in ()).throw(RuntimeError("BaoStock 封禁冷却中")))
     rows = DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
-    # BaoStock 不可用 → 交叉验证跳过，AkShare 数据（守卫放行）照常返回
-    assert len(rows) == 2
-    assert rows[1]["adj_factor"] == 0.0762
+    # BaoStock 不可用 → 交叉验证跳过，AkShare 合法送转数据照常返回（因子 2→1）
+    assert [r["adj_factor"] for r in rows] == [2.0, 1.0]
+
+
+def test_akshare_split_glitch_guard_rejects_directly(monkeypatch):
+    """issue #22 加严：东财假缩股（601155 型）由守卫**直接拒收**，不再依赖交叉验证。
+
+    守卫改判后复权比 0.6414 偏离 1 超板块容差 → 即便 BaoStock 不可用也不放行
+    （原实现靠 cross_check 拦截，BaoStock 挂时该缺陷会漏过）。
+    """
+    import pytest
+
+    monkeypatch.setattr(daily_mod, "baostock_enabled", lambda *a, **k: False)
+    monkeypatch.setattr(daily_mod.ak, "stock_zh_a_hist",
+                        lambda symbol, period, start_date, end_date, adjust:
+                        make_601155_glitch()[0 if adjust == "" else 1])
+    with pytest.raises(RuntimeError, match="源链全部失败"):
+        DailyCollector(None).fetch("600519", "2026-08-01", "2026-08-20")
+
 
 
 def test_akshare_primary_skips_baostock(monkeypatch):
