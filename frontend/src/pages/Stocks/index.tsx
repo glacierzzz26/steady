@@ -1,22 +1,17 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
+import BoardTag from '../../components/BoardTag'
 import Kpi from '../../components/Kpi'
 import Notice from '../../components/Notice'
 import Pager from '../../components/Pager'
 import Seg from '../../components/Seg'
 import Tag from '../../components/Tag'
-import { mapAction, mapUniverse, stocksApi, type StockListQuery, type StockPoolItem } from '../../api'
+import { mapAction, stocksApi, type StockListQuery } from '../../api'
 import { useApi } from '../../hooks/useApi'
+import { BOARD_OPTIONS, boardQuery, parsePool, poolOf, type BoardKey } from '../../lib/board'
 import { fmtChg, fmtNum, fmtPct, fmtWanYi } from '../../lib/format'
 
 const POOL_PG = 12
-
-const BOARD_OPTIONS = ['全部', '沪深300', '中证500']
-const UNIVERSE_MAP: Record<string, StockListQuery['universe'] | undefined> = {
-  全部: undefined,
-  沪深300: 'hs300',
-  中证500: 'zz500',
-}
 
 // 后端排序白名单：code/name/list_date/market/industry（rank/chg/amt 待 G2 加入）
 const SORT_OPTIONS = [
@@ -40,12 +35,6 @@ function G2Cell({ v, hint = G2_HINT }: { v?: number | null; hint?: string }) {
   )
 }
 
-function BoardTag({ item }: { item: StockPoolItem }) {
-  const board = mapUniverse(item.universe)
-  if (!board) return <span className="num muted">—</span>
-  return <span className={`ptag${board === 'zz' ? ' zz' : ''}`}>{board === 'hs' ? '沪深300' : '中证500'}</span>
-}
-
 export default function Stocks() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
@@ -54,19 +43,18 @@ export default function Stocks() {
   const [sort, setSort] = useState('code')
   const [page, setPage] = useState(1)
 
-  // 板块过滤以 URL ?pool=hs300|zz500 为唯一事实源（Issue #11-2）：topbar 指数 chip
-  // 跳 /stocks?pool=… 直达预选；页面内 Seg 切换写回 URL（无 pool 即「全部」）
+  // 板块过滤以 URL ?pool=hs300|zz500|a_share 为唯一事实源（Issue #11-2 / #13）：topbar
+  // 指数 chip 跳 /stocks?pool=… 直达预选；页面内 Seg 切换写回 URL（无 pool 即「全部」）
   const pool = searchParams.get('pool')
-  const mode =
-    pool === 'hs300' ? '沪深300' : pool === 'zz500' ? '中证500' : '全部'
+  const mode = parsePool(pool)
   // pool 变化（chip 跳转）时回到第 1 页，避免停在旧列表的深层页
   useEffect(() => {
     setPage(1)
   }, [pool])
 
-  const universe = UNIVERSE_MAP[mode]
+  const { universe, scope } = boardQuery(mode)
   const setBoard = (v: string) => {
-    const p = UNIVERSE_MAP[v]
+    const p = poolOf(v as BoardKey)
     navigate(p ? `/stocks?pool=${p}` : '/stocks')
     setPage(1)
   }
@@ -75,15 +63,21 @@ export default function Stocks() {
     page_size: POOL_PG,
     keyword: keyword || undefined,
     universe,
+    scope,
     sort: sort as StockListQuery['sort'],
     order: 'asc',
   }
 
   // —— 列表 + KPI 总数（page_size=1 只取 total）——
-  const list = useApi(() => stocksApi.getStocks(listParams), [page, universe, keyword, sort])
+  // ⚠️ scope 必须在 deps 里：否则「沪深300 → 全A股」切换会继续显示上一档的列表
+  const list = useApi(
+    () => stocksApi.getStocks(listParams),
+    [page, universe, scope, keyword, sort],
+  )
   const total = useApi(() => stocksApi.getStocks({ page: 1, page_size: 1 }), [])
   const totalHs = useApi(() => stocksApi.getStocks({ page: 1, page_size: 1, universe: 'hs300' }), [])
   const totalZz = useApi(() => stocksApi.getStocks({ page: 1, page_size: 1, universe: 'zz500' }), [])
+  const totalAll = useApi(() => stocksApi.getStocks({ page: 1, page_size: 1, scope: 'a_share' }), [])
 
   const submitSearch = () => {
     setKeyword(qInput.trim())
@@ -93,10 +87,18 @@ export default function Stocks() {
   return (
     <section className="page">
       <div className="grid" style={{ gridTemplateColumns: 'repeat(4,1fr)', marginBottom: 14 }}>
-        <Kpi lb="股票池总数" v={total.data?.total ?? '—'} d={total.loading ? '加载中…' : 'hs300 + zz500'} />
+        <Kpi
+          lb="全市场登记"
+          v={total.data?.total ?? '—'}
+          d={total.loading ? '加载中…' : '含北交所 · 非策略池'}
+        />
         <Kpi lb="沪深300" v={totalHs.data?.total ?? '—'} d="大盘核心" />
         <Kpi lb="中证500" v={totalZz.data?.total ?? '—'} d="中盘成长" />
-        <Kpi lb="今日有效评分" v="待 G2" d="评分/排名/信号待后端补齐" vClass="muted" />
+        <Kpi
+          lb="全A股"
+          v={totalAll.data?.total ?? '—'}
+          d={totalAll.loading ? '加载中…' : '沪深两市采集域 · 不含北交所'}
+        />
       </div>
 
       <div className="card">
@@ -170,7 +172,7 @@ export default function Stocks() {
                         <b>{s.name}</b>
                       </td>
                       <td>
-                        <BoardTag item={s} />
+                        <BoardTag universe={s.universe} fallback={<span className="num muted">—</span>} />
                       </td>
                       <td className="r num" title={s.price === undefined ? G2_HINT : undefined}>
                         {s.price === undefined ? '—' : s.price.toFixed(2)}

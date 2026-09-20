@@ -14,6 +14,8 @@ export interface ApiResponse<T> {
 
 export type Market = 'SH' | 'SZ' | 'BJ'
 export type Universe = 'hs300' | 'zz500'
+// 采集域（Issue #13）：a_share = 沪深两市 5212 只。与 Universe（策略选股域，800 只）正交
+export type Scope = 'a_share'
 export type Adjust = 'none' | 'qfq' | 'hfq'
 export type SortField = 'code' | 'name' | 'list_date' | 'market' | 'industry'
 export type SignalAction = 'BUY' | 'SELL' | 'HOLD'
@@ -27,6 +29,7 @@ export interface StockBasic {
   list_date: string // YYYY-MM-DD，缺失为空串
   status: string
   universe: string // hs300 / zz500 / ''（空串=全市场候选）
+  data_scope?: string // 'a_share' / ''（采集域，Issue #13）；后端未返回时 undefined
 }
 
 /** G2 扩展项：行情/估值/评分/信号（后端缺口补齐前可空） */
@@ -57,6 +60,7 @@ export interface StockListQuery {
   keyword?: string
   market?: Market
   universe?: Universe
+  scope?: Scope
   sort?: SortField
   order?: 'asc' | 'desc'
 }

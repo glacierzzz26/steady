@@ -31,6 +31,15 @@ func GetStockList(stockRepo *repository.StockRepository,
 			return
 		}
 
+		// 采集域过滤（Issue #13）：值域是封闭单值枚举，故严格校验（同 market）。
+		// 默认宽放会把 ?scope=ashare 变成「0 只」——一个自称浏览全A股的页面返回空，
+		// 是静默的数据覆盖谎言。空串合法：前端 http.ts 会剥空参数，但手敲 ?scope= 不该 400。
+		scope := c.Query("scope")
+		if scope != "" && scope != "a_share" {
+			response.Fail(c, http.StatusBadRequest, response.CodeInvalidParam, "scope 仅支持 a_share")
+			return
+		}
+
 		query := repository.StockListQuery{
 			Page:     page,
 			PageSize: pageSize,
@@ -38,6 +47,7 @@ func GetStockList(stockRepo *repository.StockRepository,
 			Keyword:  strings.TrimSpace(c.Query("keyword")),
 			Market:   market,
 			Universe: c.Query("universe"),
+			Scope:    scope,
 			Sort:     c.Query("sort"),
 			Order:    c.Query("order"),
 		}
@@ -95,6 +105,7 @@ func GetStockList(stockRepo *repository.StockRepository,
 				"code": s.Code, "name": s.Name, "market": s.Market,
 				"industry": s.Industry, "list_date": formatDate(s.ListDate),
 				"status": s.Status, "universe": s.Universe,
+				"data_scope": s.DataScope,
 			}
 			if m, ok := marketData[s.Code]; ok {
 				item["price"] = m.Price

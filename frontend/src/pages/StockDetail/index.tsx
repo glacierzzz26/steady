@@ -1,9 +1,10 @@
 import { useMemo } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import BoardTag from '../../components/BoardTag'
 import EChart from '../../components/EChart'
 import Notice from '../../components/Notice'
 import Tag from '../../components/Tag'
-import { mapAction, mapUniverse, stocksApi, tradeApi } from '../../api'
+import { mapAction, stocksApi, tradeApi } from '../../api'
 import { useApi } from '../../hooks/useApi'
 import { klineOpt, radarOpt } from '../../mock/chartOpt'
 import { fmtChg, fmtPct } from '../../lib/format'
@@ -42,7 +43,6 @@ export default function StockDetail() {
   const hasRadar =
     !!fs && [fs.trend, fs.value, fs.quality, fs.risk].every(v => v !== undefined && v !== null)
   const isHeld = (positions.data?.items ?? []).some(p => p.code === code)
-  const board = detail.data ? mapUniverse(detail.data.universe) : undefined
 
   if (detail.loading && !detail.data) {
     return (
@@ -80,7 +80,11 @@ export default function StockDetail() {
             {stock.code}
           </span>
         </span>
-        {board && <span className={`ptag${board === 'zz' ? ' zz' : ''}`}>{board === 'hs' ? '沪深300' : '中证500'}</span>}
+        {/* 指数归属 + 采集域 chip。二者正交：hs300 股票同时也是 a_share，
+            故只在「在采集域内、但非指数成分」时补一个中性「全A股」标签，
+            避免与指数标签并排时表达矛盾。 */}
+        <BoardTag universe={stock.universe} />
+        {!stock.universe && stock.data_scope === 'a_share' && <span className="ptag all">全A股</span>}
         {isHeld && <Tag type="buy" label="当前持仓" />}
         <span className="num" style={{ marginLeft: 'auto', fontSize: 16 }}>
           {lastClose !== null ? lastClose.toFixed(2) : '--'}{' '}

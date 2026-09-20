@@ -88,14 +88,16 @@ func seedTestData(t *testing.T, db *gorm.DB) {
 	}
 
 	stocks := []model.StockBasic{
-		{Code: "600519", Name: "贵州茅台", Market: "SH", Industry: "白酒", ListDate: day("2001-08-27"), Status: "L", Universe: "hs300"},
-		{Code: "000001", Name: "平安银行", Market: "SZ", Industry: "银行", ListDate: day("1991-04-03"), Status: "L", Universe: "hs300"},
+		{Code: "600519", Name: "贵州茅台", Market: "SH", Industry: "白酒", ListDate: day("2001-08-27"), Status: "L", Universe: "hs300", DataScope: "a_share"},
+		{Code: "000001", Name: "平安银行", Market: "SZ", Industry: "银行", ListDate: day("1991-04-03"), Status: "L", Universe: "hs300", DataScope: "a_share"},
 	}
 	if err := db.Create(&stocks).Error; err != nil {
 		t.Fatalf("种子股票插入失败: %v", err)
 	}
 	// 688111 无行情/无财务/无上市日期；用原生 SQL 省略 list_date 列以真正产生 NULL
-	// （GORM 会把零值 time.Time 插成 0001-01-01，无法用于 NULL 排序回归）
+	// （GORM 会把零值 time.Time 插成 0001-01-01，无法用于 NULL 排序回归）。
+	// data_scope 同样显式留 NULL：它是**采集域外**的样本（模拟北交所/指数伪行的语义），
+	// 使 ?scope=a_share（2 只）与无参（3 只）可区分 —— 若三行全在域内，scope 过滤就测不出来。
 	if err := db.Exec(
 		"INSERT INTO stock_basic (code, name, market, industry, status) VALUES (?, ?, ?, ?, ?)",
 		"688111", "金山办公", "SH", "计算机", "L",
@@ -247,6 +249,65 @@ func TestGetStockList(t *testing.T) {
 		}
 	})
 
+	t.Run("scope 采集域过滤（Issue #13）", func(t *testing.T) {
+		// 种子：600519/000001 在采集域内，688111 在域外 → scope=a_share 应为 2
+		status, body := doJSON(t, r, "/api/v1/stocks?scope=a_share")
+		assertOK(t, status, body)
+		d := dataOf(t, body)
+		if d["total"].(float64) != 2 {
+			t.Fatalf("scope=a_share total 不符: %v", d["total"])
+		}
+		// 响应必须带 data_scope（详情页「全A股」chip 依赖）
+		if it := itemsOf(d); it[0]["data_scope"] != "a_share" {
+			t.Fatalf("items[0].data_scope 不符: %v", it[0]["data_scope"])
+		}
+		// 域外样本必须被排除
+		for _, it := range itemsOf(d) {
+			if it["code"] == "688111" {
+				t.Fatal("scope=a_share 不应返回域外的 688111")
+			}
+		}
+
+		// keyword 与 scope 相交（688111 在域外 → 交集为空）
+		status, body = doJSON(t, r, "/api/v1/stocks?scope=a_share&keyword=688111")
+		assertOK(t, status, body)
+		if d := dataOf(t, body); d["total"].(float64) != 0 {
+			t.Fatalf("scope+keyword 交集 total 不符: %v", d["total"])
+		}
+
+		// market 与 scope 相交（域内只有 000001 是 SZ）
+		status, body = doJSON(t, r, "/api/v1/stocks?scope=a_share&market=SZ")
+		assertOK(t, status, body)
+		if d := dataOf(t, body); d["total"].(float64) != 1 {
+			t.Fatalf("scope+market total 不符: %v", d["total"])
+		}
+
+		// universe 与 scope 正交 → 同时下发即 AND（hs300 两只都在采集域内）
+		status, body = doJSON(t, r, "/api/v1/stocks?scope=a_share&universe=hs300")
+		assertOK(t, status, body)
+		if d := dataOf(t, body); d["total"].(float64) != 2 {
+			t.Fatalf("scope+universe（正交 AND）total 不符: %v", d["total"])
+		}
+
+		// 空值合法：手敲 ?scope= 不应 400（http.ts 会剥空参数，但 URL 可被手改）
+		status, body = doJSON(t, r, "/api/v1/stocks?scope=")
+		assertOK(t, status, body)
+		if d := dataOf(t, body); d["total"].(float64) != 3 {
+			t.Fatalf("scope= 空值应等价无参（3 只）: %v", d["total"])
+		}
+	})
+
+	t.Run("非法 scope 返回 40001", func(t *testing.T) {
+		// 值域是封闭单值枚举：宽松放行会把 ?scope=ashare 变成「0 只」——静默的覆盖谎言
+		for _, bad := range []string{"ashare", "A_SHARE", "pool"} {
+			status, body := doJSON(t, r, "/api/v1/stocks?scope="+bad)
+			if status != http.StatusBadRequest {
+				t.Fatalf("scope=%s HTTP 状态不符: got %d want 400", bad, status)
+			}
+			assertFail(t, status, 40001, body)
+		}
+	})
+
 	t.Run("排序与 page_size 上限", func(t *testing.T) {
 		// 688111 list_date 为 NULL，应排最后（NULLS LAST），不占首位
 		status, body := doJSON(t, r, "/api/v1/stocks?sort=list_date&order=desc")
@@ -291,6 +352,10 @@ func TestGetStockDetail(t *testing.T) {
 		d := dataOf(t, body)
 		if d["code"] != "600519" || d["name"] != "贵州茅台" || d["market"] != "SH" {
 			t.Fatalf("基本信息不符: %v", d)
+		}
+		// 采集域字段（Issue #13）：详情页「全A股」chip 依赖它
+		if d["data_scope"] != "a_share" {
+			t.Fatalf("详情 data_scope 不符: %v", d["data_scope"])
 		}
 		bar := d["latest_bar"].(map[string]any)
 		assertClose(t, bar["close"].(float64), 1610)

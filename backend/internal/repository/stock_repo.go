@@ -22,7 +22,8 @@ type StockListQuery struct {
 	Industry string // 行业精确匹配
 	Keyword  string // 代码/名称模糊匹配（ILIKE）
 	Market   string // SH / SZ / BJ
-	Universe string // hs300 / zz500 / NULL
+	Universe string // hs300 / zz500 / NULL（策略选股域，800 只）
+	Scope    string // a_share / NULL（采集域，Issue #13：SH+SZ 5212 只，与 Universe 正交）
 	Sort     string // 白名单：code / name / list_date / market / industry
 	Order    string // asc / desc
 }
@@ -45,6 +46,13 @@ func (r *StockRepository) GetList(q StockListQuery) ([]model.StockBasic, int64, 
 	}
 	if q.Universe != "" {
 		query = query.Where("universe = ?", q.Universe)
+	}
+	// 采集域过滤（Issue #13）。与 Universe 正交：一只 hs300 股票同时也是 a_share，
+	// 两个条件同时下发即 AND（如 ?universe=hs300&scope=a_share → 仍是 300）。
+	// 走 idx_stock_basic_data_scope（migration 007）。**不要**改写成 market IN ('SH','SZ')：
+	// 今日二者等价只因重标规则恰好如此，读 data_scope 才经得起规则变更。
+	if q.Scope != "" {
+		query = query.Where("data_scope = ?", q.Scope)
 	}
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, err
