@@ -15,6 +15,9 @@ type StockBasicDTO struct {
 	ListDate string `json:"list_date"`
 	Status   string `json:"status"`
 	Universe string `json:"universe"`
+	// DataScope 采集域（Issue #13）：a_share = SH+SZ 5212 只，空 = 不在采集域。
+	// 与 Universe 正交（universe 是策略选股域，仍 800 只）。
+	DataScope string `json:"data_scope"`
 }
 
 // klineItem K线单条（对齐技术准备文档 §6.3.1 响应示例）
@@ -164,13 +167,14 @@ func parseDate(s string) (time.Time, error) {
 
 func toStockBasicDTO(m model.StockBasic) StockBasicDTO {
 	return StockBasicDTO{
-		Code:     m.Code,
-		Name:     m.Name,
-		Market:   m.Market,
-		Industry: m.Industry,
-		ListDate: formatDate(m.ListDate),
-		Status:   m.Status,
-		Universe: m.Universe,
+		Code:      m.Code,
+		Name:      m.Name,
+		Market:    m.Market,
+		Industry:  m.Industry,
+		ListDate:  formatDate(m.ListDate),
+		Status:    m.Status,
+		Universe:  m.Universe,
+		DataScope: m.DataScope,
 	}
 }
 

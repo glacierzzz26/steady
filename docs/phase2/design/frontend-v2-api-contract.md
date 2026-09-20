@@ -16,15 +16,19 @@ frontend-v2 把系统定位从「数据监控 + 模拟交易」升级为「个�
 - **分页**：请求 `page`/`page_size`，响应 `{total, page, page_size, items}`。
 - **日期**：`YYYY-MM-DD`（如 `2026-08-21`）；金额单位：元；涨跌幅/收益：百分比数值（前端加 `%`）。
 - **信号 action**：后端 `BUY/SELL/HOLD`（大写），前端 `buy/sell/hold`（小写），接入层统一转换。
-- **股票池 board**：后端 `universe`（`hs300`/`zz500`），前端 `hs`/`zz`，接入层映射。
+- **股票池 board**：`?pool=` → Seg 四档 —— `hs300`(沪深300) / `zz500`(中证500) / `a_share`(全A股) / 无 pool(全部)。
+  `?pool=` 与档位文案一一对应（`lib/board.ts` 单一事实源）。**两个查询维度和两个 `?pool=` 值不是一回事**：
+  `universe`（策略选股域，hs300/zz500，共 800 只）与 `scope`（采集域，`a_share` = 沪深两市 5212 只，Issue #13）**正交** ——
+  一只 hs300 股票同时也是 a_share，故 `?pool=hs300` 发 `universe=hs300`，`?pool=a_share` 发 `scope=a_share`，二者不混用。
+  `transform.ts` 原 `mapUniverse`（后端 universe → 前端 `hs`/`zz`）**已删除**：第三档无法用二值联合类型表达，
+  且任何 `board === 'hs' ? … : '中证500'` 的旧三元会把新档渲染成中证500（静默错标）。指数标签统一走 `components/BoardTag.tsx`。
 
 ## 3. 页面 → 接口映射总表
 
 | # | 页面 | 数据需求 | 接口 | 现状 | 缺口 | 归属 |
 |---|---|---|---|---|---|---|
 | 1 | Settings | 数据源/通知/LLM 配置读写 | `/config/tushare`、`/notify/config*`、`/config/llm` | ✅ 完整 | — | 2.1 |
-| 2 | Stocks | 股票池 + 最新价/涨跌/成交额 + PE/PB/ROE + 综合分/排名/信号 | `GET /stocks` | ⚠️ 只有基础信息 | G2 | 2.1 |
-| 3 | StockDetail | 详情 + K线 + 财务 + 因子得分雷达 + 信号历史 | `/stocks/:code`、`/kline/:code`、`/stocks/:code/financial`、`/signals/:code` | ⚠️ 缺因子得分/信号/排名 | G3 | 2.1 |
+| 2 | Stocks | 股票池 + 最新价/涨跌/成交额 + PE/PB/ROE + 综合分/排名/信号 | `GET /stocks` | ⚠️ 只有基础信息 | G2 | 2.1 || 3 | StockDetail | 详情 + K线 + 财务 + 因子得分雷达 + 信号历史 | `/stocks/:code`、`/kline/:code`、`/stocks/:code/financial`、`/signals/:code` | ⚠️ 缺因子得分/信号/排名 | G3 | 2.1 |
 | 4 | Signal | 信号明细 + 因子分项(趋势/价值/质量/风险) + 策略卡 | `GET /signals`、`GET /strategies` | ⚠️ 缺因子分项/rank/pe/chg20 | G1 | 2.1 |
 | 5 | Trade | 账户卡 + 净值 + 持仓 + 委托 + 成交 | `/account`、`/account/nav`、`/positions`、`/orders`、`/trades` | ⚠️ orders/trades 缺名称 | G4 | 2.1 |
 | 6 | Dash | 净值 vs 基准 + 持仓快照 + 今日信号 + 数据健康 | `/account/nav`、`/index/nav/:code`、`/positions`、`/signals`、数据健康 | ⚠️ 缺数据健康检查接口 | G5 | 2.1 |
@@ -42,16 +46,26 @@ frontend-v2 把系统定位从「数据监控 + 模拟交易」升级为「个�
 > 已核对 handler 与 DTO，以下为真实响应形状。
 
 ### 4.1 `GET /stocks` —— 股票列表（⚠️ 需扩展，见 G2）
+
+**查询参数**：`page` / `page_size`（>100 静默 clamp 为 20）/ `industry` / `keyword`（代码或名称 ILIKE）/ `market`（`SH`/`SZ`/`BJ`，非法 400/40001）/ `universe`（`hs300`/`zz500`）/ **`scope`（`a_share`，非法 400/40001；空串等价不传）** / `sort`（白名单 `code`/`name`/`list_date`/`market`/`industry`）/ `order`（`asc`/`desc`）。
+
+> `scope` 是 Issue #13 新增的采集域过滤（读 `stock_basic.data_scope`）——**不要**与 `universe` 混用，二者正交：`?universe=hs300&scope=a_share` 是 AND，仍为 300 只。
+> 严格校验（非 `""` 且非 `a_share` 即 400）是因为值域是封闭单值枚举：宽松放行会把 `?scope=ashare` 静默变成「0 只」。
+
 ```jsonc
 { "total": 801, "page": 1, "page_size": 20,
   "items": [{ "code":"000001","name":"平安银行","market":"SZ",
-              "industry":"银行Ⅱ","list_date":"1991-04-03","status":"L","universe":"hs300" }] }
+              "industry":"银行Ⅱ","list_date":"1991-04-03","status":"L","universe":"hs300",
+              "data_scope":"a_share" }] }
 ```
+
+> `data_scope`：`a_share`（采集域内）/ `""`（域外，如北交所/指数伪行）。生产口径（2026-09-20）：
+> 无参 **5554**（SH 2315 + SZ 2897 + BJ 338 + INDEX 4）/ `universe=hs300` **300** / `universe=zz500` **500** / `scope=a_share` **5212**。
 
 ### 4.2 `GET /stocks/:code` —— 个股详情
 ```jsonc
 { "code":"000001","name":"平安银行","market":"SZ","industry":"银行Ⅱ",
-  "list_date":"1991-04-03","status":"L","universe":"hs300",
+  "list_date":"1991-04-03","status":"L","universe":"hs300","data_scope":"a_share",
   "latest_bar": { "date":"2026-08-21","open":..,"high":..,"low":..,"close":..,"volume":..,"amount":.. },
   "financial_summary": { "report_date":"..","announce_date":"..","pe":..,"pb":..,"roe":..,
                          "profit_growth":..,"revenue_growth":..,"debt_ratio":..,"gross_margin":.. },
