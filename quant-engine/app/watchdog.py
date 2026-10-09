@@ -181,16 +181,12 @@ def startup_catchup(window_hours: float = 6.0,
     门控：交易日 + 距计划时刻 window_hours 内 + 未在跑 + 探针判定未完成。
     `now` 可注入（默认当前时刻）——时间窗判定依赖"现在几点"，不注入就没法在任意钟点稳定测试。
     """
-    from sqlalchemy import select
-
+    from app import data_source
     from app.db import get_session
-    from app.models.tables import TradeCalendar
 
     db = get_session()
     try:
-        is_open = db.execute(
-            select(TradeCalendar.is_open).where(TradeCalendar.cal_date == date.today())
-        ).scalar()
+        is_open = data_source.is_open(date.today(), db=db)
     finally:
         db.close()
     if not is_open:

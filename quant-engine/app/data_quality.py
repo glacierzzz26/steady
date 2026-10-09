@@ -24,8 +24,9 @@ from datetime import date, timedelta
 
 from sqlalchemy import func, select
 
+from app import data_source
 from app.models.tables import (DailyPrice, DailyValuation, FactorValue,
-                               FinancialIndicator, StockBasic, TradeCalendar)
+                               FinancialIndicator, StockBasic)
 
 logger = logging.getLogger("data_quality")
 
@@ -160,11 +161,7 @@ def _check_missing_days(db, td: date) -> dict:
     if latest is None:
         return {"name": "missing_days", "level": "warn",
                 "message": "缺失交易日　无行情数据", "metrics": {}}
-    days = db.execute(
-        select(TradeCalendar.cal_date)
-        .where(TradeCalendar.is_open.is_(True), TradeCalendar.cal_date <= latest)
-        .order_by(TradeCalendar.cal_date.desc()).limit(MISSING_DAY_WINDOW)
-    ).scalars().all()
+    days = data_source.recent_open_days(latest, MISSING_DAY_WINDOW, db=db)
     missing = []
     for d in days:
         n = db.execute(

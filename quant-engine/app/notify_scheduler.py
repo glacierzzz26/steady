@@ -13,8 +13,9 @@ from datetime import date, datetime, timedelta
 
 from sqlalchemy import func, select, text
 
+from app import data_source
 from app.db import get_session
-from app.models.tables import DailyPrice, NotifyConfig, StrategySignal, StockBasic, TaskRun, TradeCalendar
+from app.models.tables import DailyPrice, NotifyConfig, StrategySignal, StockBasic, TaskRun
 from app.notify import FeishuNotifier, load_config
 from app.task_run import already_run, record_task
 
@@ -380,9 +381,7 @@ def _schedule_matches(db, ev: NotifyConfig, td: date) -> bool:
         if ev.event_key == "morning_brief":
             # 早报：早晨判定「今日是否开市」（日历 09:05 已同步）。
             # 下方「最近行情 == 今日」在早晨恒 False（行情 16:30 才落地），必须特判。
-            return bool(db.execute(
-                select(TradeCalendar.is_open).where(TradeCalendar.cal_date == td)
-            ).scalar())
+            return data_source.is_open(td, db=db)
         # 仅交易日触发：最近有行情数据的交易日 == 今天（周末/节假日不触发）
         latest = db.execute(
             select(func.max(DailyPrice.trade_date))

@@ -97,13 +97,18 @@
 
 ### 2.3 批量端点设计（对齐现有批量取数，防 N+1）
 
+> **实现更正（2026-10-09）**：下表的「按资源分路径」（`/v1/calendar` 等）是**设计草图**；
+> **实际实现为通用数据集端点** `GET /v1/datasets/{id}`（`{id}` = 数据集 id，如 `trade_calendar`），
+> query 传参、统一信封 `{code,message,data,meta}`。数据集 id 与参数以 §2.2 契约代码为准
+> （`datahub/app/datasets/`）。下表保留作**消费面映射意图**（每行对应 steady 哪处批量取数）。
+
 | 端点（HTTP，v1） | 说明 | 对应 steady 现有函数 |
 |---|---|---|
 | `GET /v1/stocks` | 池/列表（批量） | `factor_service.pool_codes` / backend `stock_repo.GetList` |
 | `GET /v1/prices?codes=...&start=&end=&fields=` | 多码区间行情 | `load_factor_inputs`、`replay.preload`、`_adj_series` |
 | `GET /v1/valuations?codes=&asof=` | 多码估值（as-of） | `load_factor_inputs` 估值段 |
 | `GET /v1/financials?codes=&as_of=` | 多码财务（防未来函数） | `load_factor_inputs` 财务段 |
-| `GET /v1/calendar?start=&end=` | 交易日历 | `replay.preload` |
+| `GET /v1/datasets/trade_calendar?start=&end=&is_open=` | 交易日历（实现 id `trade_calendar`） | `replay.preload`、`engine._get_trading_dates`、`morning_brief`、`data_quality` |
 | `GET /v1/latest-trade-date` | 最新交易日 | `tasks.latest_trade_date` |
 | `GET /v1/hotspot?date=` | 热点 | `morning_brief` |
 
@@ -149,14 +154,28 @@ datahub/                        （独立 git 仓库 / 独立 CI / 独立版本�
 ## 5. steady 侧改造（消费面）
 
 ### 5.1 quant-engine：新增 `app/data_source.py`（唯一切换点）
-现状：12 文件裸查 SQL、20+ 处，无集中入口。改法——抽一个数据访问模块，提供批量读函数，替换所有内联 `select`：
+现状：多处裸查 SQL、无集中入口。改法——抽一个数据访问模块，提供批量读函数，替换内联 `select`：
 
 ```
-load_prices(codes, start, end, fields) -> DataFrame/list
-load_valuations(codes, asof) / load_financials(codes, as_of)
-pool_codes(universe) / cal_dates(start,end) / latest_trade_date() / market_hotspot(date)
+load_prices(codes, start, end, fields) -> list[dict]              # 未实现（后续增量）
+cal_dates(start, end, db=None) -> list[date]                      # ✅ 已实现（calendar）
+is_open(d, db=None) -> bool                                        # ✅ 已实现（calendar）
+recent_open_days(end, limit, db=None) -> list[date]               # ✅ 已实现（calendar）
+latest_trade_date() / pool_codes(universe) / market_hotspot(date) # 未实现
 ```
-调用方仅 `get_session()` 用于**写**计算结果（`app/db.py` 保留）；原始数据读取改由该模块走 datahub HTTP 客户端（复用 `sources/net.py` 的超时范式）。替换点：`factor_service.py`、`factor_trial.py`、`factor_research.py`、`backtest/replay.py`、`backtest/engine.py`、`performance.py`、`data_quality.py`、`morning_brief.py`、`notify_scheduler.py`、`watchdog.py`、`cli.py`、`tasks.py`。**`multi_factor.py` 无需改**（只读计算结果）。
+
+**读闸门（零行为变更形态）** `DATAHUB_READ_DATASETS`（逗号白名单，**值 = dataset id**，如
+`trade_calendar`；默认空 = 全读本地）：
+- **闸门关**（默认）→ `data_source` 走**本地库**，SQL 与切换前**逐字一致**（保返回类型/语义）；
+- **闸门开** → 走 `datahub_client`（**唯一出网点**：Bearer 鉴权 + 短 TTL 缓存 + 超时/重试）调
+  `GET /v1/datasets/{id}`，本地库不查。
+- **失败模式 = 失败即抛**（不静默回退本地）：datahub 是权威、本地是待退役副本，静默回退会掩盖故障。
+  应急开 `DATAHUB_FALLBACK_LOCAL=1` 可回退本地（记 WARNING）。
+
+**首个增量（2026-10-09）只落 calendar**，替换点：`morning_brief._is_open`、
+`notify_scheduler._schedule_matches`、`watchdog.startup_catchup`、`backtest/engine._get_trading_dates`、
+`backtest/replay.preload`、`data_quality._check_missing_days`；其余数据集随各自接管次序后续增补。
+调用方仍用 `get_session()` 做**写**计算结果（`app/db.py` 保留）；`multi_factor.py` 无需改（只读计算结果）。
 
 ### 5.2 backend：抽「原始数据消费层」
 现状：纯只读，集中于 repository，但有 3 处旁路（`service/market.go`、`service/morning_brief.go`、`handler/health.go`）+ 2 个混合端点（`/stocks`、`/signals`）。改法：
