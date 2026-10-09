@@ -5,7 +5,7 @@
 > [`../design/数据接入层-datahub-phase3.md`](../design/数据接入层-datahub-phase3.md)。
 > 承接 [`datahub-phase2-地基搬栈.md`](datahub-phase2-地基搬栈.md)（采集已切 datahub）。
 
-**状态**：🚧 进行中（代码 + 测试已完成；**datahub 全史补录 + 生产部署翻闸待办**）。
+**状态**：🚧 进行中（代码 + 测试已完成；**前置放行门已过**；生产部署翻闸待办）。
 
 ## 目标
 
@@ -49,10 +49,18 @@ quant-engine（分支 `feature/datahub-read-switch`）：
 部署接线：`deploy/.env.example` 增 `DATAHUB_*`（并修正「仅数据库凭据」措辞——`DATAHUB_TOKEN` 是
 第二处密钥）；两 compose 已 `env_file: .env`，无需改。
 
-## 待办（放行门）
+## 放行门（✅ 已过，2026-10-09 生产）
 
-1. **datahub 全史补录**：走 AkShare 全史源补 `datahub.trade_calendar` 至 ⊇ steady（1990→≥2027）。
-2. **全区间对账**：`reconcile_calendar.py` 放大到全量，逐位零偏差。
+1. ✅ **datahub 全史补录**：以 env 覆盖强制走 AkShare 全史源
+   （`docker exec -e BAOSTOCK_SOURCES=daily,index,valuation,finance <collector> python -m app.cli sync-calendar`
+   → `baostock_enabled("calendar")` 为 False → `ak.tool_trade_date_hist_sina()`，幂等 upsert）。
+   **结果**：`datahub.trade_calendar` 545 → **8797 行**（1990-12-19 → 2026-12-31）；`≤today` 行数
+   8738 = steady 8738（**逐位一致**）。
+2. ✅ **全区间对账零偏差**：`reconcile_calendar.py --all`（PR glacierzzz26/datahub#10，脚本经 stdin
+   投入容器运行）→ `datahub=8738 steady=8738 锚点=2026-10-09`，**accepted 8738 / 其余 0，退出码 0**。
+
+## 待办
+
 3. **生产部署**：steady 发布 → `.env` 加 `DATAHUB_*`（白名单先留空）→ 验零行为 → 置
    `DATAHUB_READ_DATASETS=trade_calendar` → `--force-recreate quant-engine` → 验读 datahub。
 4. 观察一个完整交易日周期。
@@ -60,6 +68,7 @@ quant-engine（分支 `feature/datahub-read-switch`）：
 ## 验证（已做）
 
 - ✅ `pytest tests/` **181 passed**（含新增 20）。
+- ✅ **放行门**：datahub 全史补录 + 全区间对账零偏差（见上）。
 - ⬜ 生产端到端（待部署）。
 
 ## 遗留

@@ -62,15 +62,17 @@ DATAHUB_FALLBACK_LOCAL=0        # 故障回退本地（默认 0=失败即抛）
 `data_source` 三函数语义（保返回类型）：`cal_dates` 升序 `list[date]`；`is_open` 无记录=False；
 `recent_open_days` `≤end` 最近 N 个**降序** `list[date]`（datahub 无服务端 limit → 放宽窗口翻倍拉取）。
 
-### 前置：datahub 日历覆盖必须 ⊇ steady
+### 前置：datahub 日历覆盖必须 ⊇ steady（✅ 已过，2026-10-09 生产）
 
-实测两侧覆盖悬殊：steady `trade_calendar` 8958 行（1990-12-19 → 2027-08-26），datahub 仅
+实测两侧覆盖曾悬殊：steady `trade_calendar` 8958 行（1990-12-19 → 2027-08-26），datahub 仅
 545 行（2024-10-09 → 2026-12-31，受 BaoStock `trade_cal_rows` 默认 ±2 年窗口所限）。**若直接切，
 回测（R4/R5 任意区间）会静默截断网格 → 结果错**。故切读前须：
 1. **补齐全史**：走 datahub AkShare 路径 `ak.tool_trade_date_hist_sina()`（新浪源返回全部交易日）
    一次性 upsert 进 `datahub.trade_calendar`（幂等，PK=`cal_date`）。
-2. **全区间对账**：`datahub/scripts/reconcile_calendar.py` 放大窗口到全量，1990→2027 逐位比对，
-   **零偏差**为放行门（老日期若有漂移须归因后知情接受或修数）。
+2. **全区间对账**：`datahub/scripts/reconcile_calendar.py --all`，1990→2027 逐位比对，**零偏差**为放行门。
+
+**✅ 结果（2026-10-09）**：datahub 补至 **8797 行**（1990-12-19 → 2026-12-31）；`--all` 对账
+`datahub=8738 steady=8738 锚点=2026-10-09`，**accepted 8738 / 其余 0，退出码 0**。
 
 ---
 
