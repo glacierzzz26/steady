@@ -8,3 +8,4 @@
 | 2.3a 因子检验（G9 FactorLab） | 2026-08-24 ~ 08-25 | [2.3a-因子检验.md](2.3a-因子检验.md) |
 | 策略振荡修复（含 backtest 对照） | 2026-08-28 ~ 08-29 | [策略振荡修复.md](策略振荡修复.md)（前置验证 [策略振荡-backtest对照.md](策略振荡-backtest对照.md)） |
 | datahub Phase 2 地基+搬栈+calendar 切换 | 2026-10-09 | [datahub-phase2-地基搬栈.md](datahub-phase2-地基搬栈.md) |
+| datahub Phase 3 读取切换（calendar 增量） | 2026-10-09 ~ | [datahub-phase3-读取切换.md](datahub-phase3-读取切换.md) |

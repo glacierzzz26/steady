@@ -58,6 +58,8 @@ steady（PR #32，`dev`）：
 
 - `fd45acd` 停采闸门 `COLLECTOR_DISABLED_JOBS`——`tasks.py` 用 `_add_job` 包裹全部 `add_job` +
   `register_catchups` 跳过；`config.job_disabled`；`tests/test_disabled_jobs_gate.py`。默认空=零变更。
+- 发布 `steady-20261009-1a43274`（dev→master，PR #34）落地停采闸门代码；生产 `.env` 加
+  `COLLECTOR_DISABLED_JOBS=job_sync_calendar` → `--force-recreate collector`，calendar 切唯一采集方。
 
 运维（生产，2026-10-09）：
 
@@ -75,17 +77,19 @@ steady（PR #32，`dev`）：
 - ✅ **部署零行为**：采集闸门先关时 `scheduler.get_jobs()==[]`、不发外部请求；API `/v1/healthz` 200。
 - ✅ **raw 出口**：`trade_calendar` 经 HTTP `/v1/datasets/trade_calendar` 与 MCP tool 双出口可取。
 - ✅ **工程门禁**：datahub `ruff` 干净 / `pytest` **322 passed, 2 skipped**；steady 停采用例绿。
-- ⚠️ **步 3（唯一采集方）未生效**：steady 停采需 `COLLECTOR_DISABLED_JOBS=job_sync_calendar`
-  随**下一次 steady 发布**落地（代码已并入 dev `48d3c8a`）。**生效前 datahub 已产出 calendar、
-  但 steady 仍并行采**（两侧写**各自独立库**，无数据冲突；仅涉同一上游源的轻微争抢）。
+- ⚠️ **步 4（观察一完整交易日周期）进行中**：切唯一采集方已生效（见下），仍需观察采集新鲜度/
+  覆盖与 steady 侧 `factor_value` 恒 800。
 
 ## 遗留
 
-- **切唯一采集方**：下次 steady 发布后在生产 `.env` 加 `COLLECTOR_DISABLED_JOBS=job_sync_calendar`
-  → `--force-recreate`；验证 `job_sync_calendar` 不在 steady `scheduler.get_jobs()`、日志见跳过行。
+- ~~**切唯一采集方**~~ **已完成（2026-10-09）**：steady 发布 `steady-20261009-1a43274`（PR #34，
+  dev→master）落地停采闸门代码 → 生产 `.env` 加 `COLLECTOR_DISABLED_JOBS=job_sync_calendar`
+  → `--force-recreate collector`。验证：collector 日志「停采闸门：跳过注册 job_sync_calendar」
+  （补跑探针亦跳过）；`scheduler` 注册列表无该 job（其余 8 个 job 正常）。
   **回退顺序（敏感）**：① 先删 steady 的 `COLLECTOR_DISABLED_JOBS` 重启（恢复采集）→ ② 再删
-  datahub 的 `calendar` 白名单重启（先恢复 steady 保证无覆盖空窗）。
-- **PR #9 待人工合并**（datahub）：对账 `--end` 锚定 + PG 网络修复（含 README/COMPOSE 文档同步）。
+  datahub 的 `calendar` 白名单重启（先恢复 steady 保证无覆盖空窗）。回滚锚点：生产
+  `~/steady-20261009-1a43274/.env.pre-stopgate-20261009`。
+- **PR #9 已合并**（datahub）：对账 `--end` 锚定 + PG 网络修复（含 README/COMPOSE 文档同步）。
 - **后续数据集**：`stock_basic → index → valuation → finance → daily`（`daily` 最高风险放最后，
   涉 `guard_factor`/全史 adj_factor 重写，须逐位对账）。
 - **⚠ 告警断链（已知缺口）**：搬来的 watchdog 把 failed 写 **datahub** 库 `task_run`，而
