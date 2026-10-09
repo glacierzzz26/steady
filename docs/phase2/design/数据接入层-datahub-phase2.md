@@ -72,6 +72,14 @@ hotspot(Phase1 已有) → calendar → stock_basic → index → valuation → 
 **闸门**：datahub 侧 `DATAHUB_COLLECT_DATASETS` 白名单；steady 侧新增**停采闸门**（env 控制 collector 跳过指定任务）。
 **双份防护（硬约束）**：同一数据集在**同一时刻只能有一个采集方**。
 
+**本阶段进度（2026-10-09）**：
+- **calendar 已切**（步 1–2 完成）：datahub 采集落库 → 与 steady 逐位对账**零偏差**
+  （锚定 `--end` 窗口 60/60 `accepted`；脚本 `datahub/scripts/reconcile_calendar.py`）。
+  步 3（停 steady 该采集器）待**下一次 steady 发布**生效
+  `COLLECTOR_DISABLED_JOBS=job_sync_calendar`（停采代码已并入 dev，默认空=零行为变更）；
+  生效前 datahub 已产出 calendar，生效后 datahub 为**唯一采集方**。
+- 其余数据集 `stock_basic → index → valuation → finance → daily` 待续（`daily` 最高风险放最后）。
+
 ---
 
 ## 5. 对账机制（避免"并行双采"踩上游限流）
@@ -116,8 +124,11 @@ hotspot(Phase1 已有) → calendar → stock_basic → index → valuation → 
 
 ## 8. 部署
 
-- datahub **自带 postgres**（独立部署 → 独立 DB）+ 数据卷。
-- 初始 schema 迁移（§1）。
+- datahub 复用**生产 PG 实例另建独立库 `datahub`**（决策 **D1**，2026-10-09；非自带 postgres）。
+  datahub 双服务**加入 PG 所在 docker 网络**按容器名 `quant-postgres` 连
+  （不用 `host.docker.internal`——生产 PG 仅监听 `127.0.0.1:5432`，经 host-gateway 连被拒）；
+  连接池调小（与 steady 共享 `max_connections`）。
+- 初始 schema 迁移（§1）：`scripts/init-db.sh` 建库 + `scripts/migrate.sh` 迁移台账。
 - **备份**：原始数据是命根子 → 备份策略（沿用仓库 02:30 备份范式，异地更佳）。
 
 ---
@@ -146,9 +157,14 @@ hotspot(Phase1 已有) → calendar → stock_basic → index → valuation → 
 
 ## 11. 未决
 
-1. **datahub DB 选型**：自带 postgres vs 复用现有实例（独立部署倾向自带）。
-2. **采集台账 schema**：复用 steady `task_run` 结构 vs 另立。
-3. **对账窗口长度**：历史回填深度（60 交易日？）与源可回溯上限。
+1. ~~**datahub DB 选型**：自带 postgres vs 复用现有实例（独立部署倾向自带）。~~
+   **已定（2026-10-09，D1）**：**复用生产 PG 实例另建独立库 `datahub`**（不自带 postgres）；
+   两服务加入 PG docker 网络按容器名连（见 §8）。
+2. ~~**采集台账 schema**：复用 steady `task_run` 结构 vs 另立。~~
+   **已定（2026-10-09）**：**复用 steady `task_run` 结构**（列/类型逐字对齐），落 datahub 库。
+3. ~~**对账窗口长度**：历史回填深度（60 交易日？）与源可回溯上限。~~
+   **已定（2026-10-09）**：**日历取全量**（源一次给长约 2 年+未来 1 年，无需分批）；
+   **其余数据集 60 交易日**逐位比对（锚定同一 `--end` 上界，防两侧窗口错位）。
 4. ~~**停采闸门形态**：steady 侧 env 白名单/黑名单还是 per-task 开关。~~
    **已定（2026-10-09）**：黑名单 `COLLECTOR_DISABLED_JOBS`（逗号，值=job 函数名），
    默认空 ⇒ 零行为变更；命中则不注册任务、不接补跑探针（见 §7）。
