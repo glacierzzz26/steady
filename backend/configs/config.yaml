@@ -30,6 +30,19 @@ account:
   stamp_tax_rate: 0.0005     # 印花税 万5（仅卖出）
   slippage: 0.001            # 滑点 0.1%
 
+# datahub 读取层（Phase 3 读切换）。默认 read_datasets 空 = 全读本地 = 零行为变更；
+# 翻闸由 .env 的 DATAHUB_READ_DATASETS 覆盖（与 quant-engine 共享同一份 env）。
+datahub:
+  base_url: "http://datahub:8100"
+  token: ""
+  read_datasets: []          # 值 = dataset id（如 stock_basic）；空 = 全读本地
+  connect_timeout: "5s"
+  read_timeout: "10s"
+  retries: 1
+  retry_delay: "500ms"
+  cache_ttl: "60s"           # 进程内只读缓存（0s = 关）
+  fallback_local: false      # 故障回退本地（默认 false = 失败即抛）
+
 strategy:
   multi_factor:
     enabled: true
