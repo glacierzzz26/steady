@@ -25,9 +25,12 @@ logger = logging.getLogger(__name__)
 QUARTER_MONTH_DAY = ((3, 31), (6, 30), (9, 30), (12, 31))
 
 
-def quarter_ends(n: int) -> list[str]:
-    """最近 n 个已结束的报告期（YYYYMMDD），从最新往前"""
-    today = date.today()
+def quarter_ends(n: int, today: date | None = None) -> list[str]:
+    """最近 n 个已结束的报告期（YYYYMMDD），从最新往前
+
+    today 可注入（默认今天）——测试传入固定日期，避免断言随真实日历漂移失效。
+    """
+    today = today or date.today()
     y, q = today.year, (today.month - 1) // 3  # 当前季度序号 0..3
     end_month = QUARTER_MONTH_DAY[q][0]
     if today.month <= end_month:  # 当前季度尚未结束，从上一季度起算
