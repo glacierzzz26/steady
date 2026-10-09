@@ -5,9 +5,10 @@ from typing import List, Optional
 import pandas as pd
 from sqlalchemy import select
 
+from app import data_source
 from app.backtest.broker import Broker
 from app.backtest.portfolio import Portfolio
-from app.models.tables import DailyPrice, TradeCalendar
+from app.models.tables import DailyPrice
 from app.strategies.base import Signal, Strategy
 
 logger = logging.getLogger(__name__)
@@ -50,15 +51,9 @@ class BacktestEngine:
         self.risk_actions = 0  # 止损强制卖出笔数（与 Go RiskActions 同口径）
 
     def _get_trading_dates(self) -> List[str]:
-        """从 trade_calendar 取 [start, end] 区间的交易日"""
-        rows = self.db.execute(
-            select(TradeCalendar.cal_date)
-            .where(TradeCalendar.cal_date >= self.start_date,
-                   TradeCalendar.cal_date <= self.end_date,
-                   TradeCalendar.is_open.is_(True))
-            .order_by(TradeCalendar.cal_date)
-        ).scalars().all()
-        return [d.isoformat() for d in rows]
+        """取 [start, end] 区间的交易日（calendar 读经 data_source 分派，默认本地）"""
+        return [d.isoformat() for d in data_source.cal_dates(
+            self.start_date, self.end_date, db=self.db)]
 
     def _get_price(self, code: str, date: str) -> Optional[float]:
         """当日真实收盘价（不复权）；优先用策略预加载数据，回退查库"""

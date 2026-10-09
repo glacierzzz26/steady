@@ -15,6 +15,8 @@
 
 五个服务，单机 docker-compose 部署（不上 k8s）。服务之间不互相调 HTTP，**PostgreSQL 是唯一通信中枢**；只有 nginx 暴露 `:80`，其余容器全绑定 `127.0.0.1`（API 无鉴权，靠"内网 + 单入口"兜底）。
 
+> **注（datahub Phase 3，进行中）**：自建数据接入层 **datahub**（独立仓库/独立部署，见 [`docs/phase2/design/数据接入层-datahub.md`](docs/phase2/design/数据接入层-datahub.md)）逐步接管原始采集后，quant-engine 的**原始数据读取**改为按需调 datahub HTTP API（`app/data_source.py` 唯一切换点，env 闸门 `DATAHUB_READ_DATASETS` 默认空=仍读本地=零行为变更）。这是「服务间不互相调 HTTP」的**受控例外**：单向（steady → datahub）、只读原始数据、本地只留计算结果。**首个增量 = calendar**（前置：datahub 日历须先补齐全史并对账零偏差）。
+
 ```
   A股数据源 (BaoStock 主源 + AkShare 兜底)
         │

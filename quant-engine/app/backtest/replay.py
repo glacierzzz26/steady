@@ -25,12 +25,13 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import select
 
+from app import data_source
 from app.factor_service import FACTOR_DIRECTION, normalize_cross_section, \
     score_cross_section
 from app.factors.financial import latest_by_announce
 from app.factors.trend import macd_signal, ma_trend
 from app.models.tables import (DailyPrice, DailyValuation, FinancialIndicator,
-                               StockBasic, TradeCalendar)
+                               StockBasic)
 from app.strategies.base import Signal
 from app.strategies.multi_factor import ALL_FACTORS, rotation_action
 
@@ -100,13 +101,7 @@ class ReplayStrategy:
                 select(StockBasic.code, StockBasic.industry).where(
                     StockBasic.code.in_(self.pool)))
             if ind}
-        grid_rows = self.db.execute(
-            select(TradeCalendar.cal_date).where(
-                TradeCalendar.cal_date >= start,
-                TradeCalendar.cal_date <= end,
-                TradeCalendar.is_open.is_(True))
-            .order_by(TradeCalendar.cal_date)).scalars().all()
-        self.grid = [d for d in grid_rows]
+        self.grid = data_source.cal_dates(start, end, db=self.db)
         self._date_pos = {d: i for i, d in enumerate(self.grid)}
         if not self.pool or not self.grid:
             raise RuntimeError("股票池或交易日为空，无法回测")

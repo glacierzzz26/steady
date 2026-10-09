@@ -25,6 +25,7 @@ from datetime import date
 
 from sqlalchemy import func, select, text
 
+from app import data_source
 from app.db import get_session, upsert
 from app.models.tables import (
     AccountNav,
@@ -35,7 +36,6 @@ from app.models.tables import (
     StockBasic,
     StrategySignal,
     TaskRun,
-    TradeCalendar,
 )
 from app.task_run import record_task
 
@@ -57,10 +57,8 @@ def _latest_trade_date(db) -> date | None:
 
 
 def _is_open(db, d: date) -> bool:
-    """今日是否开市：交易日历（collector 09:05 已同步）"""
-    return bool(db.execute(
-        select(TradeCalendar.is_open).where(TradeCalendar.cal_date == d)
-    ).scalar())
+    """今日是否开市：交易日历（calendar 读经 data_source 分派，默认读本地库）"""
+    return data_source.is_open(d, db=db)
 
 
 def _pct_str(v) -> str:
