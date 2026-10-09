@@ -77,6 +77,27 @@ DATAHUB_FALLBACK_LOCAL=0        # 故障回退本地（默认 0=失败即抛）
 
 ---
 
+## 2b. 第二个增量：stock_basic 读切换（qe 侧，2026-10-09）
+
+首个**非日历**数据集：`stock_basic` 有本地表、steady 仍在采、**backend 也读** —— 验证读切换在
+「有真实数据 + 多消费方」上的完整通路。**闸门默认关 = 逐字回退本地**。
+
+- **datahub 侧**：注册 raw 数据集 `stock_basic`（`db` provider 读自有库；params 对齐消费面：
+  `codes/market/universe/scope` 逗号 IN、`industry`、`keyword`、`sort/order`、`limit/offset`；
+  列照 steady 冻结）。见 datahub 仓 PR。
+- **qe 侧**：`app/data_source.py` 增 `pool_codes` / `names_by_codes` / `industries_by_codes` /
+  `a_share_listed_codes` / `a_share_listed_count` / `pool_code_dates` / `a_share_code_dates`。切读点：
+  `factor_service.pool_codes`、`tasks.market_ready`、`data_quality._coverage_pool` + 分母真值 +
+  `_check_financial` 分母、`morning_brief._positions_section`（拆 outerjoin）、
+  `notify_scheduler._code_names`、`backtest/replay.preload`（池 + industry）。
+- **过滤口径**：datahub `stock_basic` 无 `status`/`list_date` 服务端过滤 → 本侧拉小表后 Python 过滤
+  （NULL 一律排除，对齐本地 SQL `status='L' AND list_date<=td`）。若后续需要，可给 datahub 数据集加
+  `status`/`list_date` 参数（本轮不加，避免过度设计）。
+- **backend 侧**：读切换设计见 §6（由 backend 基建 PR 增补；同一闸门、同一 `.env`）；
+  **停采须待 qe + backend 都切读**。
+
+---
+
 ## 3. 失败模式（决策）
 
 **失败即抛（不静默回退本地）**：datahub 权威、本地是待退役副本；静默回退会掩盖故障。调用方已有

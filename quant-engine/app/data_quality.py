@@ -26,7 +26,7 @@ from sqlalchemy import func, select
 
 from app import data_source
 from app.models.tables import (DailyPrice, DailyValuation, FactorValue,
-                               FinancialIndicator, StockBasic)
+                               FinancialIndicator)
 
 logger = logging.getLogger("data_quality")
 
@@ -84,16 +84,8 @@ def _coverage_pool(db, td: date) -> list[str]:
       不过滤会让停牌/退市/未上市股永久进 missing_codes，自愈每日空跑、红卡不消。
     """
     if _collect_scope() != "a_share":
-        return db.execute(
-            select(StockBasic.code).where(StockBasic.universe.in_(("hs300", "zz500")))
-        ).scalars().all()
-    return db.execute(
-        select(StockBasic.code).where(
-            StockBasic.data_scope == "a_share",
-            StockBasic.status == "L",
-            StockBasic.list_date <= td,
-        )
-    ).scalars().all()
+        return data_source.pool_codes(db)
+    return data_source.a_share_listed_codes(db, td)
 
 
 def _check_coverage(db, td: date) -> dict:
@@ -139,12 +131,7 @@ def _check_coverage(db, td: date) -> dict:
                "missing_all": missing_all,
                "suspect": suspect}
     if _collect_scope() == "a_share":
-        truth = db.execute(
-            select(func.count()).select_from(StockBasic)
-            .where(StockBasic.market.in_(("SH", "SZ")),
-                   StockBasic.status == "L",
-                   StockBasic.list_date <= td)
-        ).scalar() or 0
+        truth = data_source.a_share_listed_count(db, td)
         drift = abs(len(pool) - truth) / truth if truth else 0.0
         metrics["expect_pool"] = truth
         metrics["drift_pct"] = round(drift * 100, 2)
@@ -291,17 +278,9 @@ def _check_financial(db, td: date) -> dict:
     # 财务已是全市场入库（finance.py 只按 stock_basic 存在性过滤），故 a_share
     # 下分母同样翻全量；默认 pool 分支与旧实现逐字等价（策略域）。
     if _collect_scope() == "a_share":
-        pool = db.execute(
-            select(StockBasic.code, StockBasic.list_date)
-            .where(StockBasic.data_scope == "a_share",
-                   StockBasic.status == "L",
-                   StockBasic.list_date <= p_latest)
-        ).all()
+        pool = data_source.a_share_code_dates(db, p_latest)
     else:
-        pool = db.execute(
-            select(StockBasic.code, StockBasic.list_date)
-            .where(StockBasic.universe.in_(("hs300", "zz500")))
-        ).all()
+        pool = data_source.pool_code_dates(db)
     if not pool:
         return {"name": "financial", "level": "warn",
                 "message": "财务　股票池为空", "metrics": {}}

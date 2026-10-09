@@ -85,6 +85,25 @@ quant-engine（分支 `feature/datahub-read-switch`）：
 - ✅ **放行门**：datahub 全史补录 + 全区间对账零偏差（见上）。
 - ⬜ 生产端到端（待部署）。
 
+## stock_basic 读切换（qe 侧，Increment 1 步骤②，2026-10-09）
+
+首个「**非日历**」数据集（有本地表、steady 仍在采、backend 也读）——验证读切换在有真实
+数据面的完整通路。**闸门默认关**：不改 `.env` 则逐字回退本地。
+
+- `app/data_source.py` 增：`pool_codes`（策略池，`universe∈hs300/zz500`，升序）、`names_by_codes`、
+  `industries_by_codes`、`a_share_listed_codes`（coverage 分母，`status='L'×list_date<=td`）、
+  `a_share_listed_count`（分母漂移守卫真值）、`pool_code_dates`/`a_share_code_dates`（financial 覆盖分母）。
+- 切读点：`factor_service.pool_codes`（连带 factor_trial/factor_research/performance）、
+  `tasks.market_ready`、`data_quality._coverage_pool` + 分母真值 + `_check_financial` 分母、
+  `morning_brief._positions_section`（把 `outerjoin StockBasic` 拆为「本地持仓 + `names_by_codes`」）、
+  `notify_scheduler._code_names`、`backtest/replay.preload`（池 + industry）。
+- **语义**：datahub `stock_basic` 无 `status`/`list_date` 服务端过滤 → 本侧拉小表（~5.5k 行）后
+  在 Python 过滤（NULL 一律排除，对齐本地 SQL `status='L' AND list_date<=td`）；
+  各读点移除不再使用的 `StockBasic` import。
+- 测试：`tests/test_data_source.py` 增 stock_basic 本地/远端用例（池/名称/行业/coverage 分母/失败即抛/回退）；
+  **全量 `pytest` 195 passed**。
+- 放行门：datahub 首灌 `stock_basic` + 与 steady 逐位对账零偏差（**待生产执行**，见 datahub PR）。
+
 ## 遗留
 
 - 后续数据集 `stock_basic → index → valuation → finance → daily` 逐个增补到 `data_source.py` 并翻闸。

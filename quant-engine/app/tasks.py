@@ -11,8 +11,9 @@ from datetime import date
 from apscheduler.schedulers.blocking import BlockingScheduler
 from sqlalchemy import func, select
 
+from app import data_source
 from app.db import get_session, upsert
-from app.models.tables import DailyPrice, StockBasic, StrategySignal
+from app.models.tables import DailyPrice, StrategySignal
 from app.notify_scheduler import tick as notify_tick
 from app.task_run import already_run, record_task
 from app.watchdog import (guarded, healthz_status, register_catchup,
@@ -77,9 +78,7 @@ def latest_trade_date(db) -> date | None:
 def market_ready(db, td: date) -> bool:
     """行情就绪检查：当日股票池有 bar 的比例 >= 90%，不足则跳过
     （16:30 行情同步刚完成，正常应全覆盖；比例低说明同步失败或回填未完成）"""
-    pool = db.execute(
-        select(StockBasic.code).where(StockBasic.universe.in_(("hs300", "zz500")))
-    ).scalars().all()
+    pool = data_source.pool_codes(db)
     if not pool:
         return False
     with_bar = db.execute(
