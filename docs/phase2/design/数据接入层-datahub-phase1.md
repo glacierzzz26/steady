@@ -1,6 +1,6 @@
 # 数据接入层 datahub — Phase 1 实施蓝图
 
-> **状态**：✅ 已实现（2026-10-09）｜**实现仓库**：[glacierzzz26/datahub](https://github.com/glacierzzz26/datahub)（PR #1 骨架 / #2 收尾）｜**上位文档**：[`数据接入层-datahub.md`](数据接入层-datahub.md)（架构总设计）｜**类型**：Phase 1 可落地蓝图
+> **状态**：✅ 已实现并**部署生产**（2026-10-09）｜**实现仓库**：[glacierzzz26/datahub](https://github.com/glacierzzz26/datahub)（PR #1 骨架 / #2 收尾 / #3 MCP Host 修复）｜**生产构建**：`datahub:v0.0.0-d94e6cb`（独立栈，绑 `127.0.0.1:8100`）｜**上位文档**：[`数据接入层-datahub.md`](数据接入层-datahub.md)（架构总设计）｜**类型**：Phase 1 可落地蓝图
 > **一句话**：把 Phase 1 做到「**一个独立服务，对外经 MCP + HTTP 提供热点/行业数据（实时抓 + 缓存），带 token 鉴权**」，**steady 零改动、无自有 DB**（落库推迟到 Phase 2）。
 
 ---
@@ -188,6 +188,15 @@ DATAHUB_RATE_LIMIT=0.2
 - **独立 CI**：lint + `pytest` + `docker build`；**独立版本**（tag）。
 - **与 steady 的关系**：本阶段零耦合（steady 不改）。拓扑待定（D3）——Phase 1 先在本机/同宿主跑通，部署位置后续再定。
 
+### 9.1 生产部署记录（2026-10-09）
+
+- 落位：生产主机 `quant@192.168.0.201`，目录 `~/datahub-20261009-d94e6cb`（源码经 rsync，**镜像本地构建后 LAN 传输**——生产拉 GitHub 极慢，故不依赖生产出网构建）。
+- 镜像 `datahub:v0.0.0-d94e6cb`（`APP_VERSION=v0.0.0` + `GIT_SHORT=d94e6cb` 烘入容器），从 `dev`@`d94e6cb` 构建（未发版 → 版本恒 `v0.0.0`）。
+- compose 项目名 `datahub`，与既有 steady 栈（`steady-20260821-c8d0651`）并存互不影响；绑定 `127.0.0.1:8100`（**拓扑 D3 未定时的内网安全值**，暂不跨机暴露）；`restart: unless-stopped`。
+- `.env`（`chmod 600`）：强 token + **双闸门翻闸**（白名单 `hotspot.indices,sectors_gain,sectors_flow,hot_stocks,industry.catalog` 共 5 个已知可用数据集）。
+- 冒烟实测全绿：healthz 200；无/错 token 401；未翻闸 503 + 零外部请求；翻闸后 HTTP 取真实热点/行业（indices 6 行、catalog 90 行同花顺）；容器内 MCP 客户端 `tools/list`（7 tools）+ `call_tool` 通。
+- **`industry.members` 暂留白名单外**：仅东财源（`stock_board_industry_cons_em`），目标环境东财 board 不可达 → 会 503（已知实现受限）；待确认源可达再翻。
+
 ---
 
 ## 10. 测试
@@ -229,6 +238,7 @@ DATAHUB_RATE_LIMIT=0.2
 1. ~~**MCP SDK 版本**~~ → **已决**：锁 `mcp==1.30.0`（`<2`；mcp 2.x 把 `FastMCP` 改名 `MCPServer`），容器内 `import mcp` 已验证。
 2. ~~**行业成分 `industry.members` 首源未定**~~ → **已决**：`industry.catalog` 首源取**同花顺**（`stock_board_industry_name_ths` + `summary_ths` 按名合并涨跌幅），东财兜底；`industry.members` akshare **仅有东财** `stock_board_industry_cons_em` 一个成分接口，无同花顺替代——**东财不可达时返回 503（实现受限，非代码缺陷）**，翻闸前须确认该源在本环境可达。
 3. **持久化**：Phase 1 **已决无 DB**（按需取当前值）；热点/行业历史留痕随 Phase 2 建库一并解决。
-4. **上游限流**：Phase 1 与 collector 的 `hotspot` cron（08:45）**并行抓同一批源**——用 TTL≈300s + 信号量错峰，翻闸前观察上游是否报 429/封禁。
-5. **拓扑**（D3）：跨机部署时的鉴权/网络面（LAN 明文 token）。
+4. **上游限流**：Phase 1 与 collector 的 `hotspot` cron（08:45）**并行抓同一批源**——用 TTL≈300s + 信号量错峰。**已于生产翻闸（2026-10-09）**，需观察一个交易日窗口，看上游是否报 429/封禁（`docker compose -p datahub logs | grep -iE '429|403|封禁'`）。
+5. **拓扑**（D3）：跨机部署时的鉴权/网络面（LAN 明文 token）。生产暂绑 `127.0.0.1`（不跨机）。
 6. **东财 board 接口在目标环境稳定不可达**（实测 `RemoteDisconnected`）——已按 §13.2 调整首源；`hotspot.indices` 走东财→新浪降级，`sectors_*` 走同花顺。
+7. **MCP Host 白名单须带 `:*`**（部署踩坑，已修 PR #3）：MCP SDK 的 DNS-rebinding 只做**精确匹配**或 `host:*` 通配；出厂默认若不带 `:*`，真实客户端 Host 头**含端口**（`http://127.0.0.1:8100/mcp`）会一律 **421**。单测因 `TestClient` 的 Host `testserver` 无端口而漏网。默认已改 `localhost,localhost:*,127.0.0.1,127.0.0.1:*`。**跨机/反代部署时按拓扑追加 Host。**
