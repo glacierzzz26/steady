@@ -30,8 +30,7 @@ from app.factor_service import FACTOR_DIRECTION, normalize_cross_section, \
     score_cross_section
 from app.factors.financial import latest_by_announce
 from app.factors.trend import macd_signal, ma_trend
-from app.models.tables import (DailyPrice, DailyValuation, FinancialIndicator,
-                               StockBasic)
+from app.models.tables import DailyPrice, DailyValuation, FinancialIndicator
 from app.strategies.base import Signal
 from app.strategies.multi_factor import ALL_FACTORS, rotation_action
 
@@ -92,15 +91,9 @@ class ReplayStrategy:
             return
         start = date.fromisoformat(start) if isinstance(start, str) else start
         end = date.fromisoformat(end) if isinstance(end, str) else end
-        self.pool = sorted(self.db.execute(
-            select(StockBasic.code).where(
-                StockBasic.universe.in_(("hs300", "zz500")))).scalars().all())
+        self.pool = data_source.pool_codes(self.db)
         # 行业映射（行业集中度风控用）：pool 内按 code 取 industry，缺失行业码不计
-        self.industry = {
-            code: ind for code, ind in self.db.execute(
-                select(StockBasic.code, StockBasic.industry).where(
-                    StockBasic.code.in_(self.pool)))
-            if ind}
+        self.industry = data_source.industries_by_codes(self.db, self.pool)
         self.grid = data_source.cal_dates(start, end, db=self.db)
         self._date_pos = {d: i for i, d in enumerate(self.grid)}
         if not self.pool or not self.grid:

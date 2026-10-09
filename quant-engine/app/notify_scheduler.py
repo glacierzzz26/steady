@@ -15,7 +15,7 @@ from sqlalchemy import func, select, text
 
 from app import data_source
 from app.db import get_session
-from app.models.tables import DailyPrice, NotifyConfig, StrategySignal, StockBasic, TaskRun
+from app.models.tables import DailyPrice, NotifyConfig, StrategySignal, TaskRun
 from app.notify import FeishuNotifier, load_config
 from app.task_run import already_run, record_task
 
@@ -50,9 +50,7 @@ def _fmt_pct(x) -> str:
 def _code_names(db, codes) -> dict:
     if not codes:
         return {}
-    return {r.code: r.name for r in db.execute(
-        select(StockBasic.code, StockBasic.name).where(StockBasic.code.in_(codes))
-    ).all() if r.name}
+    return data_source.names_by_codes(db, codes)
 
 
 def _source_detail(db, task_name: str, td: date):
