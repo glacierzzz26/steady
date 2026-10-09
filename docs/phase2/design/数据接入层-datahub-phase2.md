@@ -101,6 +101,14 @@ hotspot(Phase1 已有) → calendar → stock_basic → index → valuation → 
 ## 7. steady 侧本阶段改动（最小）
 
 - **只加"停采闸门"**：给 collector 加 env 控制的「跳过某采集任务」，供 §4 步 3 使用。
+  已落地形态（黑名单，默认空 ⇒ 行为零变化）：
+  ```
+  COLLECTOR_DISABLED_JOBS=              # 逗号黑名单，值=job 函数名（如 job_sync_calendar）
+  ```
+  命中即：①**不注册**到 scheduler（`tasks._add_job`）；②**不注册补跑探针**
+  （`register_catchups`）——防 `watchdog.startup_catchup` 把已停 job 复活。
+  选黑名单而非白名单：白名单默认会停掉未列出的全部 job（落码即改生产行为），
+  黑名单是唯一能保证「落码即零变更」的形态。
 - **不改读取**（Phase 3）。
 - collector 代码**保留**（灰度回退用）；`import akshare` 等直调仍在，但对应任务已停跑。
 
@@ -141,4 +149,6 @@ hotspot(Phase1 已有) → calendar → stock_basic → index → valuation → 
 1. **datahub DB 选型**：自带 postgres vs 复用现有实例（独立部署倾向自带）。
 2. **采集台账 schema**：复用 steady `task_run` 结构 vs 另立。
 3. **对账窗口长度**：历史回填深度（60 交易日？）与源可回溯上限。
-4. **停采闸门形态**：steady 侧 env 白名单/黑名单还是 per-task 开关。
+4. ~~**停采闸门形态**：steady 侧 env 白名单/黑名单还是 per-task 开关。~~
+   **已定（2026-10-09）**：黑名单 `COLLECTOR_DISABLED_JOBS`（逗号，值=job 函数名），
+   默认空 ⇒ 零行为变更；命中则不注册任务、不接补跑探针（见 §7）。

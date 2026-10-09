@@ -160,6 +160,19 @@ def collect_scope() -> str:
     return COLLECT_SCOPE if COLLECT_SCOPE in ("pool", "a_share") else "pool"
 
 
+# ---------- 停采闸门（datahub Phase 2 灰度切换）----------
+# 逗号**黑名单**：列出的 job（按 job 函数名，如 job_sync_calendar）不注册、不补跑。
+# 默认空 → 行为零变化。形态为黑名单是**唯一能保证「落码即零变更」**的形态——
+# 若用白名单（enable-list）则未列出的 job 全部停采，落码即改生产行为，禁用。
+# 用途：把某数据集的采集权切给 datahub 后，停掉 steady 侧对应 job（灰度切唯一采集方）。
+COLLECTOR_DISABLED_JOBS = _list("COLLECTOR_DISABLED_JOBS", "")
+
+
+def job_disabled(job_name: str) -> bool:
+    """该 job 是否被停采闸门禁用（默认空 → 全 False）"""
+    return job_name in COLLECTOR_DISABLED_JOBS
+
+
 # 快照首日扩池时全部无历史 → 全部 deferred → 逐只补把收益归零。上限内的
 # deferred 交夜间回填处理，超上限才告警（Issue #13 R5）。
 TENCENT_DEFER_MAX = _int("TENCENT_DEFER_MAX", 300)
