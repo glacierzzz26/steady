@@ -73,11 +73,12 @@ hotspot(Phase1 已有) → calendar → stock_basic → index → valuation → 
 **双份防护（硬约束）**：同一数据集在**同一时刻只能有一个采集方**。
 
 **本阶段进度（2026-10-09）**：
-- **calendar 已切**（步 1–2 完成）：datahub 采集落库 → 与 steady 逐位对账**零偏差**
+- **calendar 已切**（步 1–3 完成）：datahub 采集落库 → 与 steady 逐位对账**零偏差**
   （锚定 `--end` 窗口 60/60 `accepted`；脚本 `datahub/scripts/reconcile_calendar.py`）。
-  步 3（停 steady 该采集器）待**下一次 steady 发布**生效
-  `COLLECTOR_DISABLED_JOBS=job_sync_calendar`（停采代码已并入 dev，默认空=零行为变更）；
-  生效前 datahub 已产出 calendar，生效后 datahub 为**唯一采集方**。
+  步 3（停 steady 该采集器）**已生效**：steady 发布 `steady-20261009-1a43274`（PR #34）落地
+  停采闸门代码 + 生产 `.env` 加 `COLLECTOR_DISABLED_JOBS=job_sync_calendar` 重启 collector
+  （日志「停采闸门：跳过注册 job_sync_calendar」，补跑探针亦跳过）。**datahub 为 calendar 唯一采集方**。
+  步 4（观察一个完整交易日周期）进行中。
 - 其余数据集 `stock_basic → index → valuation → finance → daily` 待续（`daily` 最高风险放最后）。
 
 ---
