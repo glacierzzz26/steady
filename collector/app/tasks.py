@@ -10,7 +10,8 @@ from datetime import date, timedelta
 from apscheduler.schedulers.blocking import BlockingScheduler
 from sqlalchemy import func, select
 
-from app.config import DAILY_FALLBACK_DAYS, DAILY_SYNC_INTERVAL
+from app.config import (DAILY_FALLBACK_DAYS, DAILY_SYNC_INTERVAL,
+                        job_disabled)
 from app.models.tables import DailyPrice
 from app.watchdog import (guarded, healthz_status, register_catchup,
                           spawn_startup_catchup, start_watchdog)
@@ -361,12 +362,32 @@ def register_catchups() -> None:
     ⚠️ 必须定义在 `__main__` 块**之前**：`__main__` 里会直接调用它，而模块体是
     顺序执行的——定义在后面会 NameError（已实测：容器启动即崩，见 Issue #14）。
     """
-    register_catchup("job_sync_daily_price", _probe_daily)
-    register_catchup("job_sync_valuation", _probe_valuation)
-    register_catchup("job_sync_index", _probe_index)
-    for _j in ("job_sync_stock_list", "job_sync_calendar", "job_sync_finance",
-               "job_nightly_backfill"):
-        register_catchup(_j, _never_catchup)
+    _specs = {
+        "job_sync_daily_price": _probe_daily,
+        "job_sync_valuation": _probe_valuation,
+        "job_sync_index": _probe_index,
+        "job_sync_stock_list": _never_catchup,
+        "job_sync_calendar": _never_catchup,
+        "job_sync_finance": _never_catchup,
+        "job_nightly_backfill": _never_catchup,
+    }
+    for name, probe in _specs.items():
+        # 停采闸门：被禁用的 job 不注册补跑探针——防 startup_catchup 把已停 job 复活。
+        if job_disabled(name):
+            logger.warning("停采闸门：跳过补跑注册 %s（COLLECTOR_DISABLED_JOBS）", name)
+            continue
+        register_catchup(name, probe)
+
+
+def _add_job(scheduler, job, **trigger_kw) -> None:
+    """按停采闸门决定是否注册 job：命中黑名单则跳过（默认空 → 全部注册）。
+
+    job 名取函数名（如 `job_sync_calendar`）。停采闸门见 app/config.py。
+    """
+    if job_disabled(job.__name__):
+        logger.warning("停采闸门：跳过注册 %s（COLLECTOR_DISABLED_JOBS）", job.__name__)
+        return
+    scheduler.add_job(job, **trigger_kw)
 
 
 if __name__ == "__main__":
@@ -385,15 +406,24 @@ if __name__ == "__main__":
     # 重入**，堆积的触发折叠成一次（Issue #13 R16）。原实现无此约束 → interval 5min
     # 的自愈若跑超 5min 会叠起第二个实例，两个同时逐只补数、同时写库。
     _job_kw = {"max_instances": 1, "coalesce": True}
-    scheduler.add_job(job_sync_hotspot, "cron", hour=8, minute=45, **_job_kw)
-    scheduler.add_job(job_sync_stock_list, "cron", hour=9, minute=0, **_job_kw)
-    scheduler.add_job(job_sync_calendar, "cron", hour=9, minute=5, **_job_kw)
-    scheduler.add_job(job_sync_index, "cron", hour=18, minute=15, **_job_kw)
-    scheduler.add_job(job_sync_daily_price, "cron", hour=18, minute=10, **_job_kw)
-    scheduler.add_job(job_sync_valuation, "cron", hour=18, minute=15, **_job_kw)
-    scheduler.add_job(job_sync_finance, "cron", hour=18, minute=0, **_job_kw)
-    scheduler.add_job(job_nightly_backfill, "cron", hour=18, minute=5, **_job_kw)
-    scheduler.add_job(job_consume_remediation, "interval", minutes=5, **_job_kw)
+    _add_job(scheduler, job_sync_hotspot,
+             trigger="cron", hour=8, minute=45, **_job_kw)
+    _add_job(scheduler, job_sync_stock_list,
+             trigger="cron", hour=9, minute=0, **_job_kw)
+    _add_job(scheduler, job_sync_calendar,
+             trigger="cron", hour=9, minute=5, **_job_kw)
+    _add_job(scheduler, job_sync_index,
+             trigger="cron", hour=18, minute=15, **_job_kw)
+    _add_job(scheduler, job_sync_daily_price,
+             trigger="cron", hour=18, minute=10, **_job_kw)
+    _add_job(scheduler, job_sync_valuation,
+             trigger="cron", hour=18, minute=15, **_job_kw)
+    _add_job(scheduler, job_sync_finance,
+             trigger="cron", hour=18, minute=0, **_job_kw)
+    _add_job(scheduler, job_nightly_backfill,
+             trigger="cron", hour=18, minute=5, **_job_kw)
+    _add_job(scheduler, job_consume_remediation,
+             trigger="interval", minutes=5, **_job_kw)
 
     _start_healthz("collector", 9200, status_provider=healthz_status)
 
