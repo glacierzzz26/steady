@@ -31,10 +31,16 @@ def make_zcfz():
 
 
 def test_quarter_ends():
-    # 当前 2026-08：最近 4 期应为 20260630/20260331/20251231/20250930
-    periods = quarter_ends(4)
+    # 注入固定 today（不为真实日历背书）：2026-08 时最近 4 期
+    periods = quarter_ends(4, today=date(2026, 8, 6))
     assert periods == ["20260630", "20260331", "20251231", "20250930"]
-    assert len(quarter_ends(20)) == 20
+    assert len(quarter_ends(20, today=date(2026, 8, 6))) == 20
+
+
+def test_quarter_ends_advances_after_quarter_close():
+    """季度结束后（10 月）最新一期应推进到 0930（回归：断言曾写死随日历漂移）"""
+    assert quarter_ends(1, today=date(2026, 10, 8)) == ["20260930"]
+
 
 
 def test_build_rows_mapping():
@@ -80,7 +86,7 @@ def test_announce_takes_latest():
 
 def test_quarter_ends_in_progress_quarter():
     """8 月时当前季度（9 月底）未结束，应从 20260630 起算"""
-    periods = quarter_ends(1)
+    periods = quarter_ends(1, today=date(2026, 8, 15))
     assert periods == ["20260630"]
 
 
