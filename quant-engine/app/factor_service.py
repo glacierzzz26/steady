@@ -14,12 +14,13 @@ from datetime import date, timedelta
 import pandas as pd
 from sqlalchemy import select
 
+from app import data_source
 from app.db import upsert
 from app.factors.financial import debt_by_announce, roe_by_announce
 from app.factors.trend import macd_signal, ma_trend, winsorize
 from app.factors.value import pb_value, pe_value
 from app.models.tables import (DailyPrice, DailyValuation,
-                               FinancialIndicator, FactorValue, StockBasic)
+                               FinancialIndicator, FactorValue)
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +39,8 @@ VALUATION_ASOF_DAYS = 30  # 估值 as-of 回看窗口（停牌日兜底）
 
 
 def pool_codes(db) -> list[str]:
-    """股票池（沪深300 + 中证500）"""
-    return sorted(db.execute(
-        select(StockBasic.code).where(StockBasic.universe.in_(("hs300", "zz500")))
-    ).scalars().all())
+    """股票池（沪深300 + 中证500）代码，升序（Phase 3：按闸门走 datahub）。"""
+    return data_source.pool_codes(db)
 
 
 def load_factor_inputs(db, codes: list[str], trade_date: date) -> dict[str, dict]:

@@ -5,7 +5,20 @@
 > [`../design/数据接入层-datahub-phase3.md`](../design/数据接入层-datahub-phase3.md)。
 > 承接 [`datahub-phase2-地基搬栈.md`](datahub-phase2-地基搬栈.md)（采集已切 datahub）。
 
-**状态**：✅ calendar 读切换**已生产落地**（2026-10-09，发布 `steady-20261009-87e7dc7`）。
+**状态**：🚧 进行中（calendar 读切换**已生产落地** 2026-10-09，发布 `steady-20261009-87e7dc7`；**backend Go 侧读取切换已纳入范围**，剩余数据集 `stock_basic→index→valuation→finance→daily` 逐集全迁移）。
+
+## 剩余数据集逐集全迁移（2026-10-09 起）
+
+**范围**：把 `stock_basic / daily_price / daily_valuation / financial_indicator / index` 逐个从「steady 采 + steady 读」迁到「datahub 采 + steady 经 HTTP 读」。
+**关键约束**：每个数据集的读消费方有两处（quant-engine + **backend Go**）；**停 steady 采集**是该数据集最后一步，须二者都已切读（否则 backend 服务陈旧数据）。
+**每数据集范式**：① datahub 注册 raw 数据集 + 采集放闸 + 首灌 + **对账零偏差** → ② quant-engine `data_source.py` 增函数 + 改读点 + 翻闸 → ③ backend `internal/datasource` 增 accessor + 改 repo + 翻闸 → ④ 停 steady 采集（`COLLECTOR_DISABLED_JOBS`） → ⑤ 文档/归档。顺序 `stock_basic → index → valuation → finance → daily`（daily 最后，风险最高）。
+
+**Increment 0（backend 基建，✅ 代码落地 2026-10-09，零行为变更）**：
+- `internal/config`：`DatahubConfig` + `ReadEnabled`（`DATAHUB_*` env，与 quant-engine 同源）+ `getEnvList/getEnvBool/ParseDur`。
+- `internal/datahub`（唯一出网点）：`FetchRaw`（Bearer/信封/瞬时重试/TTL 缓存/`Reset`）+ `Date` 适配器 + typed errors + 包级泛型 `Fetch[T]`。
+- `internal/datasource`（唯一切换点）：`Source`（`Enabled/FallbackLocal/Reset`）+ stock_basic/calendar/daily/valuation/financial accessor 与 wire DTO。
+- 测试：`client_test.go`（httptest）+ `config_test.go` + `source_test.go`；`go test ./...` 全绿。
+- **默认 `read_datasets: []` + token 空 ⇒ 恒 disabled ⇒ 部署零行为变更**。repo 方法切换 + 接线随各数据集增量推进（Tier1/2/3 分级见设计 §6）。
 
 ## 目标
 
@@ -93,6 +106,25 @@ quant-engine（分支 `feature/datahub-read-switch`）：
 - **镜像未烘焙 `APP_VERSION`/`GIT_SHORT`**：`docker exec quant-engine sh -c "echo \$APP_VERSION \$GIT_SHORT"`
   为空；run compose 与 Dockerfile 均未设置。与全局发布纪律（「镜像内烘焙版本号 + 短 hash」）不符，
   建议后续单独修复。
+
+## stock_basic 读切换（qe 侧，Increment 1 步骤②，2026-10-09）
+
+首个「**非日历**」数据集（有本地表、steady 仍在采、backend 也读）——验证读切换在有真实
+数据面的完整通路。**闸门默认关**：不改 `.env` 则逐字回退本地。
+
+- `app/data_source.py` 增：`pool_codes`（策略池，`universe∈hs300/zz500`，升序）、`names_by_codes`、
+  `industries_by_codes`、`a_share_listed_codes`（coverage 分母，`status='L'×list_date<=td`）、
+  `a_share_listed_count`（分母漂移守卫真值）、`pool_code_dates`/`a_share_code_dates`（financial 覆盖分母）。
+- 切读点：`factor_service.pool_codes`（连带 factor_trial/factor_research/performance）、
+  `tasks.market_ready`、`data_quality._coverage_pool` + 分母真值 + `_check_financial` 分母、
+  `morning_brief._positions_section`（把 `outerjoin StockBasic` 拆为「本地持仓 + `names_by_codes`」）、
+  `notify_scheduler._code_names`、`backtest/replay.preload`（池 + industry）。
+- **语义**：datahub `stock_basic` 无 `status`/`list_date` 服务端过滤 → 本侧拉小表（~5.5k 行）后
+  在 Python 过滤（NULL 一律排除，对齐本地 SQL `status='L' AND list_date<=td`）；
+  各读点移除不再使用的 `StockBasic` import。
+- 测试：`tests/test_data_source.py` 增 stock_basic 本地/远端用例（池/名称/行业/coverage 分母/失败即抛/回退）；
+  **全量 `pytest` 195 passed**。
+- 放行门：datahub 首灌 `stock_basic` + 与 steady 逐位对账零偏差（**待生产执行**，见 datahub PR）。
 
 ## 遗留
 
