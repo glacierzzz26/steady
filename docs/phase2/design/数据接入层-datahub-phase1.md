@@ -1,6 +1,6 @@
 # 数据接入层 datahub — Phase 1 实施蓝图
 
-> **状态**：📋 设计（2026-10-08）｜**上位文档**：[`数据接入层-datahub.md`](数据接入层-datahub.md)（架构总设计）｜**类型**：Phase 1 可落地蓝图
+> **状态**：✅ 已实现（2026-10-09）｜**实现仓库**：[glacierzzz26/datahub](https://github.com/glacierzzz26/datahub)（PR #1 骨架 / #2 收尾）｜**上位文档**：[`数据接入层-datahub.md`](数据接入层-datahub.md)（架构总设计）｜**类型**：Phase 1 可落地蓝图
 > **一句话**：把 Phase 1 做到「**一个独立服务，对外经 MCP + HTTP 提供热点/行业数据（实时抓 + 缓存），带 token 鉴权**」，**steady 零改动、无自有 DB**（落库推迟到 Phase 2）。
 
 ---
@@ -48,7 +48,7 @@ datahub/                              # 独立 git 仓库
 │   │   ├── registry.py                # PROVIDERS + dataset_source_chain()
 │   │   └── ext/
 │   │       ├── akshare_hotspot.py     # 搬自 collector/app/collectors/hotspot.py 取数函数
-│   │       └── akshare_industry.py    # 行业目录/成分（首源待定，见 §9）
+│   │       └── akshare_industry.py    # 行业目录/成分（目录首源同花顺；成分仅东财，见 §13）
 │   ├── cache.py                       # TTL + 单飞(single-flight)
 │   ├── ratelimit.py                   # 信号量 + 最小间隔 + 黑名单冷却
 │   ├── http_api.py                    # /v1/... 路由（真实契约）
@@ -105,18 +105,19 @@ class DatasetSpec:
 
 **`DATASET_REGISTRY` 由 `spec` 机械推导**出：HTTP 的 query 参数与响应列、MCP tool 的 inputSchema 与返回字段、契约测试断言。**出口层零业务逻辑**——这是"MCP 薄门面"的落地保证。
 
-### Phase 1 数据集清单（初稿，列名待与源码逐字核对后冻结）
+### Phase 1 数据集清单（**已冻结** 2026-10-09，照 provider 实际输出逐字核对）
 
-| id | params | 列（示意） | ttl |
+| id | params | 列（冻结） | ttl |
 |---|---|---|---|
-| `hotspot.indices` | — | key,name,last,chg_pct,ts | 300s |
-| `hotspot.sectors_gain` | `top` | name,chg_pct,leader,ts | 300s |
-| `hotspot.sectors_flow` | `top` | name,net_flow(元),ts | 300s |
-| `hotspot.hot_stocks` | `top` | code,name,rank,ts | 300s |
-| `industry.catalog` | — | name,code,chg_pct,ts | 86400s |
-| `industry.members` | `industry`(必) | code,name,ts | 86400s |
+| `hotspot.indices` | — | name,code,close,change_pct | 300s |
+| `hotspot.sectors_gain` | `top` | name,change_pct,leader | 300s |
+| `hotspot.sectors_flow` | `top` | name,net_inflow | 300s |
+| `hotspot.hot_stocks` | `top` | rank,code,name,change_pct,board_days,industry | 300s |
+| `industry.catalog` | — | name,code,change_pct | 86400s |
+| `industry.members` | `industry`(必) | code,name | 86400s |
 
-> 列名/单位须照 `collector/app/collectors/hotspot.py` 的实际输出**逐字冻结**（映射时核对 `_pick` 的列名容错），不凭记忆。
+> 列名/单位**已照 `providers/ext/akshare_hotspot.py` 与 `akshare_industry.py` 的实际输出逐字冻结**（映射时核对 `_pick` 的列名容错），不凭记忆。契约 v1 自此只增不改。
+> **空结果即失败**：数据集整体取空（全源失败）→ provider 抛错，服务层转 stale（有旧值）或 503，**绝不静默返回空数组**（§5 / §11）。
 
 ---
 
@@ -203,18 +204,20 @@ DATAHUB_RATE_LIMIT=0.2
 
 ## 11. 验收清单（Phase 1 done 判定）
 
-- [ ] 独立仓库建立、CI 绿、可独立构建镜像与启动。
-- [ ] `curl -H "Authorization: Bearer $T" /v1/datasets` 列全；无 token → 401。
-- [ ] MCP 客户端 `tools/list` 列全、能取到热点数据。
-- [ ] 未翻闸（`DATAHUB_EXT_ENABLED` 空）时**零外部请求**、返回 503（部署零行为变更）。
-- [ ] 上游全失败 → 返回 stale/结构化错误，**不返回空数组**。
-- [ ] steady **未改动**（本阶段解耦）。
+- [x] 独立仓库建立、CI 绿、可独立构建镜像与启动。（repo 公开；CI `lint-test`+`docker-build` 均绿）
+- [x] `curl -H "Authorization: Bearer $T" /v1/datasets` 列全；无 token → 401。（`test_auth` 7 例）
+- [x] MCP 客户端 `tools/list` 列全；tool `inputSchema` 由 params 生成。（`test_mcp_tools`）真实热点数据取数受**双闸门**控制，翻闸后验证（本环境 `hotspot.indices` 源实测可通）。
+- [x] 未翻闸（`DATAHUB_EXT_ENABLED` 空）时**零外部请求**、返回 503（部署零行为变更）。（`test_gate_off_no_external_call` 断言 `called==0`）
+- [x] 上游全失败 → 返回 stale/结构化错误，**不返回空数组**。（`test_stale_fallback_when_upstream_fails` + `test_hot_stocks_all_sources_fail_raises`）
+- [x] steady **未改动**（本阶段解耦）。
+- [x] 工程门禁：`ruff check .` 干净、`pytest` **42 passed**。
 
 ---
 
 ## 12. 接缝与后续
 
-- **契约 v1 冻结**：本阶段固化的 dataset 契约即 v1；Phase 2/3 只增不改（改列必升版本）。
+- **实现登记**：Phase 1 代码在独立仓库 [glacierzzz26/datahub](https://github.com/glacierzzz26/datahub)（PR #1 骨架 → `dev`；PR #2 收尾）。默认分支 `dev`，`main` 已加保护规则（禁直推，PR 必过 `lint-test`+`docker-build`）。
+- **契约 v1 冻结**：本阶段固化的 dataset 契约即 v1（见 §3）；Phase 2/3 只增不改（改列必升版本）。
 - **Phase 2**：datahub 建自有库 + 接管核心采集（行情/估值/财务/日历），采集器 move 进来（含 `guard_factor` 等校验），逐数据集对账切换。
 - **Phase 3**：steady 侧 `data_source.py` / backend 消费层改按需调 datahub；collector 退役；**删除 §4 里"暂复制"的本地取数函数**。
 - **待删登记**：Phase 1 从 collector 复制来的取数函数，必须在 Phase 3 收尾时从 steady 删除（避免长期双份）。
@@ -223,8 +226,9 @@ DATAHUB_RATE_LIMIT=0.2
 
 ## 13. 未决 / 风险
 
-1. **MCP SDK 版本**：实现期锁定并容器内验证。
-2. **行业成分 `industry.members` 首源未定**：同花顺/东财 board 接口择一，需实测可用性。
+1. ~~**MCP SDK 版本**~~ → **已决**：锁 `mcp==1.30.0`（`<2`；mcp 2.x 把 `FastMCP` 改名 `MCPServer`），容器内 `import mcp` 已验证。
+2. ~~**行业成分 `industry.members` 首源未定**~~ → **已决**：`industry.catalog` 首源取**同花顺**（`stock_board_industry_name_ths` + `summary_ths` 按名合并涨跌幅），东财兜底；`industry.members` akshare **仅有东财** `stock_board_industry_cons_em` 一个成分接口，无同花顺替代——**东财不可达时返回 503（实现受限，非代码缺陷）**，翻闸前须确认该源在本环境可达。
 3. **持久化**：Phase 1 **已决无 DB**（按需取当前值）；热点/行业历史留痕随 Phase 2 建库一并解决。
 4. **上游限流**：Phase 1 与 collector 的 `hotspot` cron（08:45）**并行抓同一批源**——用 TTL≈300s + 信号量错峰，翻闸前观察上游是否报 429/封禁。
 5. **拓扑**（D3）：跨机部署时的鉴权/网络面（LAN 明文 token）。
+6. **东财 board 接口在目标环境稳定不可达**（实测 `RemoteDisconnected`）——已按 §13.2 调整首源；`hotspot.indices` 走东财→新浪降级，`sectors_*` 走同花顺。
