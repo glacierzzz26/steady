@@ -9,13 +9,14 @@
 
 **目标**
 - quant-engine 原始数据读取从「裸查本地表」改为集中入口 `app/data_source.py`，按闸门走 datahub HTTP。
+- **backend（Go）同步切读**：读取从 `internal/repository/*` 裸查本地表改为经 `internal/datasource` 走 datahub HTTP（见 §6）。
 - **逐数据集灰度**：先 calendar，再 stock_basic/index/valuation/finance/daily。
-- 闸门 `DATAHUB_READ_DATASETS`（逗号白名单）默认空 → 部署**零行为变更**，一键回退。
+- 闸门 `DATAHUB_READ_DATASETS`（逗号白名单）默认空 → 部署**零行为变更**，一键回退。**两消费方（quant-engine + backend）共用同一份 env**。
 
 **非目标（延后）**
-- backend（Go）读切换、collector 读切换（随 collector 退役）。
+- collector 读切换（随 collector 退役）。
 - 删本地原始表、删 collector 代码。
-- calendar 之外的其它数据集（各自接管次序到位后再逐个切）。
+- **停 steady 采集**是每个数据集的**最后一步**，且须 quant-engine 与 backend **都已切读**（否则 backend 服务陈旧数据；calendar 因预载到未来冻结无害，故先例不可照搬到数据表）。
 
 ---
 
@@ -103,3 +104,21 @@ DATAHUB_FALLBACK_LOCAL=0        # 故障回退本地（默认 0=失败即抛）
 | **token/可达性** | 401 或网络不通 | 翻闸前 curl 核对；**每次发布复验** datahub 在 steady 网络内 |
 | **datahub SPOF** | 读路径新增一跳 | datahub 自备 restart/healthcheck；缓存降抖动；一键回退 |
 | **新依赖 requests** | quant-engine 首次引入 | 与 collector 一致；镜像小幅增大 |
+
+---
+
+## 6. backend（Go）读切换设计
+
+backend 也读同一批本地表（`internal/repository/*.go`），是「停采」的前置。设计对齐 quant-engine，按 Go 习惯落地：
+
+- **`internal/config`**：新增 `DatahubConfig`（`datahub:` 段 + `DATAHUB_*` env 覆盖，与 quant-engine 同 env 名）+ `ReadEnabled(dataset)`（判定 = base_url 非空 × token 非空 × dataset ∈ 白名单）。**启动时读一次**（翻闸/回退本就「改 .env + 重启」）。默认 `read_datasets: []`、token 空 ⇒ 恒 disabled = 零行为变更。
+- **`internal/datahub`（唯一出网点）**：`Client.FetchRaw(ctx,id,params) → json.RawMessage`——Bearer、信封 `{code,message,data,meta}` 解析、**重试仅瞬时**（超时/连接错/500-504，429/其余 4xx 快速失败）、**TTL 缓存**、`Reset()`；错误类型 `HTTPError/TimeoutError/ParseError`；`Date` 适配器（解 `"2026-10-09"`）。泛型解码用**包级** `Fetch[T]`（Go 无泛型方法）解进**专用 wire DTO**（snake_case tag）——**不**解进 `model.*`（其 `time.Time` 解不动纯日期）、**不**用 `map[string]any`。
+- **`internal/datasource`（唯一切换点）**：`Source`（`Enabled/FallbackLocal/Reset` + 每数据集 accessor）；**不持有 gorm**——闸门关的本地 SQL 由 repository 保留。
+- **repository 接线**：repo 加 `ds *datasource.Source`，构造函数**变参可选** `NewXRepository(db, ds ...*datasource.Source)`（保现有调用点零改动）；被切方法加 prologue（闸门开走 ds，失败且未开 fallback → 抛；否则走原 gorm 体，逐字不变）。`api.SetupRouter` 增 `ds` 首参，`cmd/server/main.go` 构造注入；**tx-scoped 构造一律不传**（= nil = 纯本地，保事务内一致）。
+- **Tier 分级**（难易/风险）：
+  - **Tier1** 简单单点/批量（`GetByCode/GetNames/GetIndustries/GetRange/GetLatest...`）→ 直接切。
+  - **Tier2** 窗口/聚合（`GetPoolMarket` 的 `LAG`、`GetPoolValuation/GetPoolFinancial/GetSignalPe/GetIndexQuotes` 的 `ROW_NUMBER`、`GetSignalChg20` 的 21 根窗）→ datahub 批量取**有界窗口** + Go 归约，或 datahub 加 `asof/as_of` 参数。
+  - **Tier3** tx 内 + trading 逐码循环（`GetPrevClose/GetByDate` 在每码循环里）→ **先保本地**（传 nil），待「批量原语」重构后再切。
+  - 计算表（`factor_value/strategy_signal/strategy/factor_definition`）**不切**。
+
+**现状（2026-10-09）**：Increment 0（基建：config + `internal/datahub` + `internal/datasource` + 测试）已落地，**默认全关、零行为变更**；各数据集的 accessor 与 repo 方法切换随对应数据集增量推进。
