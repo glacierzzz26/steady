@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"quant-system/backend/internal/config"
@@ -72,6 +73,50 @@ func TestStockBasicByCodes_Empty(t *testing.T) {
 	}
 	if len(*paths) != 0 {
 		t.Fatal("empty codes must not call HTTP")
+	}
+}
+
+func TestStockBasicList(t *testing.T) {
+	s, paths := newTestSource(t, nil)
+	rows, err := s.StockBasicList(context.Background(), StockBasicFilter{
+		Industry: "银行", Keyword: "平安", Market: "SZ", Universe: "hs300",
+		Scope: "a_share", Sort: "list_date", Order: "desc",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Code != "000001" {
+		t.Fatalf("bad rows: %+v", rows)
+	}
+	if len(*paths) != 1 {
+		t.Fatalf("expected 1 HTTP call, got %d", len(*paths))
+	}
+	q := (*paths)[0]
+	for _, want := range []string{
+		"industry=", "keyword=", "market=SZ", "universe=hs300",
+		"scope=a_share", "sort=list_date", "order=desc",
+	} {
+		if !strings.Contains(q, want) {
+			t.Fatalf("query %q missing %q", q, want)
+		}
+	}
+	// 分页由调用方做：accessor 绝不能下发 limit/offset（否则 total 失真）
+	if strings.Contains(q, "limit=") || strings.Contains(q, "offset=") {
+		t.Fatalf("accessor must not send limit/offset: %q", q)
+	}
+	if strings.Contains(q, "codes=") {
+		t.Fatalf("empty Codes must not send codes param: %q", q)
+	}
+}
+
+func TestStockBasicList_CodesCSV(t *testing.T) {
+	s, paths := newTestSource(t, nil)
+	if _, err := s.StockBasicList(context.Background(),
+		StockBasicFilter{Codes: []string{"000001", "600000"}}); err != nil {
+		t.Fatal(err)
+	}
+	if q := (*paths)[0]; !strings.Contains(q, "codes=000001%2C600000") {
+		t.Fatalf("codes CSV not joined: %q", q)
 	}
 }
 

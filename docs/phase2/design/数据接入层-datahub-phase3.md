@@ -142,4 +142,4 @@ backend 也读同一批本地表（`internal/repository/*.go`），是「停采�
   - **Tier3** tx 内 + trading 逐码循环（`GetPrevClose/GetByDate` 在每码循环里）→ **先保本地**（传 nil），待「批量原语」重构后再切。
   - 计算表（`factor_value/strategy_signal/strategy/factor_definition`）**不切**。
 
-**现状（2026-10-09）**：Increment 0（基建：config + `internal/datahub` + `internal/datasource` + 测试）已落地，**默认全关、零行为变更**；各数据集的 accessor 与 repo 方法切换随对应数据集增量推进。
+**现状（2026-10-09）**：Increment 0（基建：config + `internal/datahub` + `internal/datasource` + 测试）已落地，**默认全关、零行为变更**。**`stock_basic` repo 接线已落地（Tier1）**：`StockRepository` 五读点（`GetList`/`GetByCode`/`Exists`/`GetNames`/`GetIndustries`）加 prologue，`internal/datasource` 增 `StockBasicList`（列表）与既有 `StockBasicByCode(s)`；`SetupRouter`/`NewTradingService` 注入 `ds`；`go test ./...` 全绿。其余数据集（`index/valuation/finance/daily`）的 accessor 与 repo 方法切换随各自增量推进。

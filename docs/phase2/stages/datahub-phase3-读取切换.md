@@ -126,7 +126,31 @@ quant-engine（分支 `feature/datahub-read-switch`）：
   **全量 `pytest` 195 passed**。
 - 放行门：datahub 首灌 `stock_basic` + 与 steady 逐位对账零偏差（**待生产执行**，见 datahub PR）。
 
+## stock_basic 读切换（backend Go 侧，Increment 1 步骤③，2026-10-09）
+
+承接 qe 侧（步骤②）与 backend 基建（Increment 0）。把 `StockRepository` 的全部 stock_basic
+读点从「裸查本地表」切到「闸门开走 datahub、闸门关逐字本地」。**闸门默认关 = 部署零行为变更**。
+
+- `internal/datasource`（唯一切换点）增列表 accessor：`StockBasicFilter`（`Codes/Industry/Keyword/
+  Market/Universe/Scope/Sort/Order`，不含分页）+ `StockBasicList`——服务端过滤+排序（对齐 datahub
+  dataset 参数），**不下发 limit/offset**（分页/总数由调用方做，否则 total 失真）。
+- `internal/repository/stock_repo.go`：`StockRepository` 加 `ds *datasource.Source`；构造函数
+  **变参可选** `NewStockRepository(db, ds ...*datasource.Source)`（现有 `NewStockRepository(tx)`
+  tx-scoped 调用点零改动 ⇒ nil ⇒ 纯本地，保事务内一致）。五个读点加 prologue：`GetList`
+  （映射 `StockBasicFilter` → Go 侧 `total=len()` + `(page-1)*pageSize` 切片，排序 NULLS LAST
+  与本地 `stockSortClause` 一致）、`GetByCode`/`Exists`（`StockBasicByCode`，命中即 true）、
+  `GetNames`/`GetIndustries`（`StockBasicByCodes`）。**失败即抛**（默认；`fallback_local=1` 记
+  WARNING 后落本地）。
+- 接线：`cmd/server/main.go` 构造 `datasource.New(cfg.Datahub)` → `SetupRouter(db, ds, …)` +
+  `NewTradingService(db, cfg.Account, ds)`（`SetupRouter` 首参新增 `ds`）。
+- 测试：`internal/datasource/source_test.go` 增 `StockBasicList`（参数透传/不下发 limit/offset）；
+  新增 `internal/repository/stock_repo_ds_test.go`（httptest 假 datahub，`db=nil` ⇒ 走 ds 时不触库），
+  覆盖 `GetList`（分页切片/total/越界页/参数透传）、`GetByCode`（命中/未命中）、`Exists`、`GetNames`、
+  及「datahub 500 ⇒ 失败即抛」。**全量 `go test ./...` 全绿**（api 集成测试无 `TEST_DB_DSN` 自动 skip）。
+- 放行门（同 qe 侧）：datahub `stock_basic` 首灌 + 逐位对账零偏差，**待生产执行**。
+
 ## 遗留
 
-- backend（Go）读切换、collector 读切换（随 collector 退役）。
+- backend（Go）读切换 `stock_basic` 已落地（步骤③）；`index/valuation/finance/daily` 待续。
+- collector 读切换（随 collector 退役）。
 - 过渡期告警断链（datahub 写自有库 `task_run` → steady `notify_scheduler` 不读，暂看 datahub-collector `/healthz`）仍待解。
