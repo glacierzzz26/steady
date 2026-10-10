@@ -5,12 +5,13 @@ import (
 	"gorm.io/gorm"
 
 	"quant-system/backend/internal/api/handler"
+	"quant-system/backend/internal/datasource"
 	"quant-system/backend/internal/repository"
 	"quant-system/backend/internal/service"
 )
 
-// SetupRouter 注册全部路由
-func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
+// SetupRouter 注册全部路由。ds = datahub 读取源（可为 nil：测试/未配置时恒走本地）。
+func SetupRouter(db *gorm.DB, ds *datasource.Source, tradingSvc *service.TradingService,
 	navSvc *service.NavService, initialCash float64,
 	taskRunSvc *service.TaskRunService, notifySvc *service.NotifyService,
 	executeSvc *service.ExecuteService,
@@ -19,7 +20,7 @@ func SetupRouter(db *gorm.DB, tradingSvc *service.TradingService,
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
 
-	stockRepo := repository.NewStockRepository(db)
+	stockRepo := repository.NewStockRepository(db, ds)
 	dailyRepo := repository.NewDailyRepository(db)
 	financialRepo := repository.NewFinancialRepository(db)
 	accountRepo := repository.NewAccountRepository(db)

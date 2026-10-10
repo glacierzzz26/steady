@@ -1,18 +1,47 @@
 package repository
 
 import (
+	"context"
+	"log"
+
 	"gorm.io/gorm"
 
+	"quant-system/backend/internal/datasource"
 	"quant-system/backend/internal/model"
 )
 
-// StockRepository 股票数据访问层
+// StockRepository 股票数据访问层。
+//
+// ds（datahub 读取源）为可选：nil ⇒ 恒走本地 gorm（含全部 tx-scoped 构造）。
+// 非 nil 且闸门开（DATAHUB_READ_DATASETS 含 stock_basic）⇒ 读点走 datahub HTTP。
 type StockRepository struct {
 	db *gorm.DB
+	ds *datasource.Source
 }
 
-func NewStockRepository(db *gorm.DB) *StockRepository {
-	return &StockRepository{db: db}
+// NewStockRepository 构造。ds 变参可选：现有 `NewStockRepository(db)` / tx-scoped
+// `NewStockRepository(tx)` 调用点零改动（不传 ⇒ nil ⇒ 纯本地，保事务内一致）。
+func NewStockRepository(db *gorm.DB, ds ...*datasource.Source) *StockRepository {
+	r := &StockRepository{db: db}
+	if len(ds) > 0 {
+		r.ds = ds[0]
+	}
+	return r
+}
+
+// useDS stock_basic 是否走 datahub（闸门判定）。
+func (r *StockRepository) useDS() bool {
+	return r.ds != nil && r.ds.Enabled(datasource.DsStockBasic)
+}
+
+// dsFallback 读失败时的处置：开 fallback ⇒ 记 WARNING 并回退本地（返回 true）；
+// 否则失败即抛（返回 false，不静默给陈旧值）。
+func (r *StockRepository) dsFallback(err error) bool {
+	if r.ds.FallbackLocal() {
+		log.Printf("WARN datahub stock_basic 读失败，回退本地: %v", err)
+		return true
+	}
+	return false
 }
 
 // StockListQuery 股票列表查询条件
@@ -30,6 +59,15 @@ type StockListQuery struct {
 
 // GetList 分页查询股票列表，支持行业/关键词/市场/股票池过滤与白名单排序
 func (r *StockRepository) GetList(q StockListQuery) ([]model.StockBasic, int64, error) {
+	if r.useDS() {
+		stocks, total, err := r.getListFromHub(q)
+		if err == nil {
+			return stocks, total, nil
+		}
+		if !r.dsFallback(err) {
+			return nil, 0, err
+		}
+	}
 	var stocks []model.StockBasic
 	var total int64
 
@@ -65,8 +103,42 @@ func (r *StockRepository) GetList(q StockListQuery) ([]model.StockBasic, int64, 
 	return stocks, total, err
 }
 
+// getListFromHub 经 datahub 取列表：服务端过滤 + 排序，本侧做分页/总数
+// （datahub 不返回 total；排序 NULLS LAST 与 stockSortClause 一致 ⇒ 切片精确复现本地分页）。
+func (r *StockRepository) getListFromHub(q StockListQuery) ([]model.StockBasic, int64, error) {
+	all, err := r.ds.StockBasicList(context.Background(), datasource.StockBasicFilter{
+		Industry: q.Industry, Keyword: q.Keyword, Market: q.Market,
+		Universe: q.Universe, Scope: q.Scope, Sort: q.Sort, Order: q.Order,
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	total := int64(len(all))
+	start := (q.Page - 1) * q.PageSize
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(all) {
+		return []model.StockBasic{}, total, nil
+	}
+	end := start + q.PageSize
+	if end > len(all) {
+		end = len(all)
+	}
+	return all[start:end], total, nil
+}
+
 // GetByCode 按代码查询股票，未找到返回 (nil, nil)
 func (r *StockRepository) GetByCode(code string) (*model.StockBasic, error) {
+	if r.useDS() {
+		stock, err := r.ds.StockBasicByCode(context.Background(), code)
+		if err == nil {
+			return stock, nil
+		}
+		if !r.dsFallback(err) {
+			return nil, err
+		}
+	}
 	var stock model.StockBasic
 	err := r.db.Where("code = ?", code).First(&stock).Error
 	if err == gorm.ErrRecordNotFound {
@@ -80,6 +152,15 @@ func (r *StockRepository) GetByCode(code string) (*model.StockBasic, error) {
 
 // Exists 股票是否存在
 func (r *StockRepository) Exists(code string) (bool, error) {
+	if r.useDS() {
+		stock, err := r.ds.StockBasicByCode(context.Background(), code)
+		if err == nil {
+			return stock != nil, nil
+		}
+		if !r.dsFallback(err) {
+			return false, err
+		}
+	}
 	var count int64
 	if err := r.db.Model(&model.StockBasic{}).Where("code = ?", code).Count(&count).Error; err != nil {
 		return false, err
@@ -198,6 +279,18 @@ func (r *StockRepository) GetNames(codes []string) (map[string]string, error) {
 	if len(codes) == 0 {
 		return out, nil
 	}
+	if r.useDS() {
+		rows, err := r.ds.StockBasicByCodes(context.Background(), codes)
+		if err == nil {
+			for _, s := range rows {
+				out[s.Code] = s.Name
+			}
+			return out, nil
+		}
+		if !r.dsFallback(err) {
+			return nil, err
+		}
+	}
 	type row struct {
 		Code string
 		Name string
@@ -221,6 +314,18 @@ func (r *StockRepository) GetIndustries(codes []string) (map[string]string, erro
 	out := make(map[string]string, len(codes))
 	if len(codes) == 0 {
 		return out, nil
+	}
+	if r.useDS() {
+		rows, err := r.ds.StockBasicByCodes(context.Background(), codes)
+		if err == nil {
+			for _, s := range rows {
+				out[s.Code] = s.Industry
+			}
+			return out, nil
+		}
+		if !r.dsFallback(err) {
+			return nil, err
+		}
 	}
 	type row struct {
 		Code     string

@@ -80,6 +80,58 @@ func (s *Source) StockBasicByCode(ctx context.Context, code string) (*model.Stoc
 	return &rows[0], nil
 }
 
+// StockBasicFilter 列表过滤条件（对齐 datahub dataset `stock_basic` 参数；不含分页）。
+// 空字段 = 该维不过滤。Codes 逗号 IN；Keyword 代码/名称模糊（大小写不敏感）。
+type StockBasicFilter struct {
+	Codes    []string
+	Industry string
+	Keyword  string
+	Market   string
+	Universe string
+	Scope    string
+	Sort     string // datahub 白名单：code/name/list_date/market/industry（非法→code）
+	Order    string // asc/desc（默认 asc）
+}
+
+// StockBasicList 按条件取股票列表（服务端过滤 + 排序，**不含分页**）。
+// 分页/总数由调用方在结果上做（datahub 不返回 total）：见 repository.GetList。
+func (s *Source) StockBasicList(ctx context.Context, f StockBasicFilter) ([]model.StockBasic, error) {
+	p := map[string]string{}
+	if len(f.Codes) > 0 {
+		p["codes"] = strings.Join(f.Codes, ",")
+	}
+	if f.Industry != "" {
+		p["industry"] = f.Industry
+	}
+	if f.Keyword != "" {
+		p["keyword"] = f.Keyword
+	}
+	if f.Market != "" {
+		p["market"] = f.Market
+	}
+	if f.Universe != "" {
+		p["universe"] = f.Universe
+	}
+	if f.Scope != "" {
+		p["scope"] = f.Scope
+	}
+	if f.Sort != "" {
+		p["sort"] = f.Sort
+	}
+	if f.Order != "" {
+		p["order"] = f.Order
+	}
+	rows, err := datahub.Fetch[stockBasicRow](s.c, ctx, DsStockBasic, p)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.StockBasic, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, toStockBasic(r))
+	}
+	return out, nil
+}
+
 // ---- trade_calendar ----
 
 // OpenDates [start, end] 区间内的交易日（升序）。

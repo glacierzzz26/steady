@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"quant-system/backend/internal/config"
+	"quant-system/backend/internal/datasource"
 	"quant-system/backend/internal/model"
 	"quant-system/backend/internal/repository"
 )
@@ -137,7 +138,7 @@ type TradingService struct {
 	stockRepo    *repository.StockRepository
 }
 
-func NewTradingService(db *gorm.DB, account config.AccountConfig) *TradingService {
+func NewTradingService(db *gorm.DB, account config.AccountConfig, ds ...*datasource.Source) *TradingService {
 	return &TradingService{
 		db:           db,
 		broker:       NewBroker(account),
@@ -149,7 +150,8 @@ func NewTradingService(db *gorm.DB, account config.AccountConfig) *TradingServic
 		navRepo:      repository.NewAccountNavRepository(db),
 		dailyRepo:    repository.NewDailyRepository(db),
 		signalRepo:   repository.NewSignalRepository(db),
-		stockRepo:    repository.NewStockRepository(db),
+		// ds 可选：非 tx 的 stockRepo 读点可切 datahub；tx-scoped 构造（见 industryOverLimit）不带 ds。
+		stockRepo: repository.NewStockRepository(db, ds...),
 	}
 }
 
