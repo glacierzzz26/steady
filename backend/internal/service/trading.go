@@ -148,8 +148,8 @@ func NewTradingService(db *gorm.DB, account config.AccountConfig, ds ...*datasou
 		orderRepo:    repository.NewOrderRepository(db),
 		tradeRepo:    repository.NewTradeRepository(db),
 		navRepo:      repository.NewAccountNavRepository(db),
-		dailyRepo:    repository.NewDailyRepository(db),
-		signalRepo:   repository.NewSignalRepository(db),
+		dailyRepo:    repository.NewDailyRepository(db, ds...),
+		signalRepo:   repository.NewSignalRepository(db, ds...),
 		// ds 可选：非 tx 的 stockRepo 读点可切 datahub；tx-scoped 构造（见 industryOverLimit）不带 ds。
 		stockRepo: repository.NewStockRepository(db, ds...),
 	}

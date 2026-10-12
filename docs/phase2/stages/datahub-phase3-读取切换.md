@@ -6,7 +6,7 @@
 > 承接 [`datahub-phase2-地基搬栈.md`](datahub-phase2-地基搬栈.md)（采集已切 datahub）。
 > **生产操作手册**（底种 + 对账 + 翻闸 + 停采，只写不执行）：[`datahub-phase3-生产切换runbook.md`](datahub-phase3-生产切换runbook.md)。
 
-**状态**：🚧 进行中（calendar 读切换**已生产落地** 2026-10-09，发布 `steady-20261009-87e7dc7`；**backend Go 侧读取切换已纳入范围**，剩余数据集 `stock_basic→index→valuation→finance→daily` 逐集全迁移）。
+**状态**：🚧 进行中（calendar 读切换**已生产落地** 2026-10-09，发布 `steady-20261009-87e7dc7`；**backend Go 侧读取切换已纳入范围**；`stock_basic`、`daily_valuation`、`financial_indicator`、`daily_price`（含 index）读切换**代码全部落地**（qe+backend，闸门默认关），四集首灌+对账+停采待生产执行）。
 
 ## 剩余数据集逐集全迁移（2026-10-09 起）
 
@@ -150,8 +150,143 @@ quant-engine（分支 `feature/datahub-read-switch`）：
   及「datahub 500 ⇒ 失败即抛」。**全量 `go test ./...` 全绿**（api 集成测试无 `TEST_DB_DSN` 自动 skip）。
 - 放行门（同 qe 侧）：datahub `stock_basic` 首灌 + 逐位对账零偏差，**待生产执行**。
 
+## daily_valuation 读切换（qe + backend，2026-10-12）
+
+首个「qe + backend 双消费方**同批**切」的数据集（calendar/stock_basic 均为逐消费方增量）。
+**闸门默认关 = 逐字回退本地**。
+
+**datahub 侧**：注册 raw 数据集 `daily_valuation`（`db` provider 读自有库；列
+`code,trade_date,close,total_mv,float_mv,pe_ttm,pe_static,pb`；params `codes` 逗号 IN /
+`start`/`end` 区间 / `asof`(≤) / `last`(每码最近 N 行，服务端 `ROW_NUMBER`) / `fields` 投影）。
+见 datahub 仓 PR。
+
+**qe 侧**（`quant-engine`）：
+- `app/data_source.py` 增：`valuation_rows(db, codes, start, end, fields)`（闸门关本地 SQL 逐字、
+  闸门开走 `daily_valuation`；远端按 `fields` 投影为**有序元组**，调用方 `for code,td,pe,pb` 几乎不改）、
+  `valuation_latest(db)`（走 `latest_trade_date{table:daily_valuation,exclude_index:false}`）、
+  `dup_keys(db, table)`（走 `dup_keys{table}`）。
+- 切读点：`factor_service.load_factor_inputs`（估值段）、`factor_trial.load_range_inputs`（估值段）、
+  `data_quality._check_valuation`（`valuation_latest`）+ `_check_duplicates`（daily_valuation 走 `dup_keys`，
+  其余三表仍本地 `_dup_count`）、`backtest/replay.preload`（估值 as-of 段）；各移除不再使用的
+  `DailyValuation` import。
+- 测试：`tests/test_data_source.py` 增 valuation 用例（rows 投影/空码短路/latest 命中与空/`dup_keys`/
+  失败即抛/回退）；**全量 `pytest` 205 passed**。
+
+**backend（Go）侧**：
+- `internal/datasource` 增 accessor `ValuationLast(ctx, codes, n, asof)`（`daily_valuation` params
+  `codes`/`last`/`asof`；服务端每码最近 N 行、升序返回）——把 Tier2 聚合变**有界批量**，一次往返无 N+1。
+- `DailyRepository` 加 `ds *datasource.Source` + 变参构造 `NewDailyRepository(db, ds...)`：
+  `GetLatestValuation` prologue → `ValuationLast([]string{code},1,nil)`（无行 → nil）。
+- `SignalRepository` 加 `ds` + 变参构造：`GetSignalPe` prologue → `ValuationLast(codes,1,&date)`
+  （每码 `trade_date ≤ 信号日` 最新一行），`pe_ttm≠0` 过滤（对齐原 SQL `pe_ttm IS NOT NULL`）。
+- `StockRepository.GetPoolValuation` prologue → `ValuationLast(codes,1,nil)`，`pe/pb` 全空滤除
+  （对齐原 SQL `pe_ttm IS NOT NULL OR pb IS NOT NULL`）。
+- 接线：`SetupRouter`（`dailyRepo`/`signalRepo`）与 `cmd/server/main.go`（`dailyRepo`）注入 `ds`；
+  `NewTradingService` 的**非 tx** `dailyRepo`/`signalRepo` 注入 `ds...`；**tx-scoped**
+  （`trading.go` `ExecuteDay` 内 new 的 repo）一律不传 = nil（保事务内一致）。
+- **NULL 语义**：datahub 估值列 NULL 经 wire DTO 归 0（`model.DailyValuation` 为 float64），
+  故以「≠0」充当「非空」判定——PE/PB 真实数据恒不恰为 0，无信息损失。
+- 测试：新增 `internal/repository/valuation_ds_test.go`（httptest 假 datahub，`db=nil` ⇒ 走 ds 不触库）：
+  `GetLatestValuation`（取最新/参数透传 `last=1`/未命中 nil）、`GetSignalPe`（`last=1`+`asof`/null PE 滤除）、
+  `GetPoolValuation`（pe 空 pb 有值保留、全空滤除）、「datahub 500 ⇒ 失败即抛」。
+  **`go test ./...` 全绿**（`internal/api/handler` 的 `TestHTTPProbe/连接被拒_down` 为**既有偶发**
+  ——干净树 `count=1` 复现，与本次改动无关）。
+- 放行门（datahub 首灌 `daily_valuation` + 逐位对账零偏差）与停采 **待生产执行**。
+
+## financial_indicator 读切换（qe + backend，2026-10-12）
+
+第二个「qe + backend 同批切」的数据集（范式同 daily_valuation）。**闸门默认关 = 逐字回退本地**。
+
+**datahub 侧**：注册 raw 数据集 `financial_indicator`（`db` provider 读自有库；列
+`code,report_date,announce_date,pe,pb,roe,profit_growth,revenue_growth,debt_ratio,gross_margin`；
+params `codes` 逗号 IN / `as_of`(announce_date ≤) / `last`(每码最近 N 期，服务端
+`ROW_NUMBER OVER (PARTITION BY code ORDER BY announce_date DESC, report_date DESC)`) / `fields` 投影）。
+见 datahub 仓 PR。**注**：`announce_date` 为 `NOT NULL`（schema），故无 NULLS FIRST 风险，原
+「`announce_date IS NOT NULL` 前置过滤」为无操作，datahub 侧不需要 `announce_not_null` 参数。
+
+**qe 侧**（`quant-engine`）：
+- `app/data_source.py` 增：`financial_rows(db, codes, as_of, fields)`（闸门关本地 SQL 逐字、闸门开走
+  `financial_indicator`；远端按 `fields` 投影为**有序元组**，调用方 `for code,rd,ad,roe,debt` 几乎不改）、
+  `pool_latest_announce(db, codes)`（走 `financial_indicator {last:1,fields:code,announce_date}`；
+  闸门关 = `GROUP BY code MAX(announce_date)`）。
+- 切读点：`factor_service.load_factor_inputs`（财务段）、`factor_trial.load_range_inputs`（财务段）、
+  `backtest/replay.preload`（财务 as-of 段）、`data_quality._check_financial`（`pool_latest_announce`）；
+  各移除不再使用的 `FinancialIndicator` import（`data_quality._check_duplicates` 仍本地 `_dup_count`，
+  故该文件保留 `FinancialIndicator` import）。
+- 测试：`tests/test_data_source.py` 增财务用例（rows 投影/空码短路/`as_of` 透传/latest announce 命中与空/
+  失败即抛/回退）；**全量 `pytest` 212 passed**。
+
+**backend（Go）侧**：
+- `internal/datasource` 增 accessor `FinancialLast(ctx, codes, asOf, n)`（`financial_indicator` params
+  `codes`/`as_of`/`last`；服务端每码最近 N 期、按 `report_date ASC` 返回）——Tier2 聚合变**有界批量**。
+- `FinancialRepository` 加 `ds *datasource.Source` + 变参构造 `NewFinancialRepository(db, ds...)`：
+  `GetByCode` prologue → `FinancialByCodes([]string{code})`（datahub 升序 → Go 侧按 `report_date DESC`
+  排序 + `limit` 截断，复现本地 `ORDER BY report_date DESC LIMIT n`）、`GetLatestByAnnounce` prologue →
+  `FinancialLast([]string{code},nil,1)`（`last=1` → 每码恰一行即最新；无行 → nil）。
+- `StockRepository.GetPoolFinancial` prologue → `FinancialLast(codes,nil,1)`，`roe==0` 滤除
+  （datahub NULL 经 wire DTO 归 0，对齐原 SQL `rn=1 AND roe IS NOT NULL`）。
+- 接线：`SetupRouter` 注入 `financialRepo` 的 `ds`；`NewFinancialRepository` 变参保其余调用点零改动。
+- 测试：新增 `internal/repository/financial_ds_test.go`（httptest 假 datahub，`db=nil` ⇒ 走 ds 不触库）：
+  `GetByCode`（`report_date DESC` 排序 + limit + 不下发 `last`）、`GetLatestByAnnounce`（`last=1` 取最新
+  announce 一期 + 未命中 nil）、`GetPoolFinancial`（`last=1`/roe 空滤除）、「datahub 500 ⇒ 失败即抛」。
+  **`go test ./...` 全绿**。
+- 放行门（datahub 首灌 `financial_indicator` + 逐位对账零偏差）与停采 **待生产执行**。
+
+## daily_price 读切换（qe + backend，2026-10-12）
+
+第三个「qe + backend 同批切」的数据集，**读点最多、最高风险**（前复权因子/回测/指数条）。
+**闸门默认关 = 逐字回退本地**。index 不是独立数据集：指数行情物理存在 `daily_price`
+（code=`sh000300` 等），随本集一并切——qe 基准序列、backend 指数条都读它。
+
+**datahub 侧**：注册 raw 数据集 `daily_price`（`db` provider 读自有库；列
+`code,trade_date,open,high,low,close,volume,amount,adj_factor,turnover_rate`；
+params `codes` 逗号 IN / `start`/`end` 区间 / `date` 精确（覆盖 start/end）/ `asof`(trade_date ≤) /
+`last`(每码最近 N 行，服务端 `ROW_NUMBER OVER (PARTITION BY code ORDER BY trade_date DESC)`) /
+`fields` 投影 / `adj_not_null`）。配套两个小数据集：`latest_trade_date`（params
+`table`/`exclude_index`，列 `trade_date`）与（可选）`dup_keys`。见 datahub 仓 PR。
+
+**qe 侧**（`quant-engine`）：
+- `app/data_source.py` 增：`latest_trade_date(db)`（走 `latest_trade_date{exclude_index:true}`，
+  闸门关 = 本地 `max(trade_date) where code NOT LIKE 'sh%'`）、`price_rows(db, codes, start, end, fields)`
+  （区间 + `fields` 投影为**有序元组**）、`price_day(db, codes, d, fields)`（精确日；`codes` 空 = 全市场）、
+  `price_latest(db, code, fields)`（`last=1`）、`market_ready(db, td)`（走 `market_ready{date}`）。
+- 切读点：`factor_service.load_factor_inputs`（行情段）、`factor_trial.load_range_inputs`（行情段）、
+  `factor_research.precompute_factor_stat`（前向收益行情段）、`performance.{_adj_series,_bench_series,`\
+  `compute_attribution}`、`backtest/replay.preload`、`tasks.{latest_trade_date,market_ready}`、
+  `morning_brief._latest_trade_date`、`notify_scheduler._schedule_matches`、`cli._default_trade_date`、
+  `data_quality.{_market_latest,_check_coverage(with_bar),_check_benchmark,_check_duplicates(daily_price)}`。
+  各移除不再使用的 `DailyPrice` import；**`data_quality.py` 保留 `DailyPrice` import**（其
+  `_check_missing_days`、`_check_price_anomalies`、`_check_coverage` 的「上一交易日」推导仍走本地）。
+- **有意保留本地**（datahub 无对应原语，标注 TODO）：`_check_missing_days`、`_check_price_anomalies`、
+  `_check_coverage` 的 `prev` 推导（均需「上一开市日 / `max(trade_date < X)`」，datahub 无此谓词）；
+  `backtest/engine.{_get_price,_get_fill_price,_get_prev_close,_get_benchmark_nav}`（Tier3 逐 (code,date)
+  循环，本轮不接，Phase 4 停本地表前重构）。
+- 测试：`tests/test_data_source.py` 增行情用例（rows 投影 / 空码短路 / `price_day` 有码与全码 /
+  `price_latest` / `latest_trade_date` 本地 vs `exclude_index=true` / `market_ready` 覆盖 / `dup_keys` /
+  失败即抛 / 回退）；**全量 `pytest` 227 passed**。
+
+**backend（Go）侧**：
+- `internal/datasource` 增 accessor：`DailyLatest(ctx, codes, n, asof)`（`daily_price` params
+  `codes`/`last`/`asof`；服务端每码最近 n 行，返回按 `(code,trade_date ASC)` 升序）、
+  `LatestFactor(ctx, code)`（`adj_not_null=true`+`last=1`）、`LatestTradeDate(ctx, excludeIndex)`（走
+  `latest_trade_date`，Go 侧传 `exclude_index=false` 不过滤指数行——对齐本地 `ORDER BY trade_date DESC`）。
+- Tier1 直接切：`DailyRepository.{GetRange→DailyRange, GetLatest→DailyLatest(n=1),`
+  `GetLatestTradeDate→LatestTradeDate(false), GetLatestFactor→LatestFactor}`。
+- Tier2「`last` 有界窗 + Go 归约」：`GetIndexQuotes`→`DailyLatest(n=2)`（指数条末两行）；
+  `GetPoolMarket`→`DailyLatest(n=2)`（末两行现算 chg，对齐原 `LAG(close)`）；
+  `GetSignalChg20`→`DailyLatest(n=21, asof=date)`（需满 21 行，`qfq=close×COALESCE(adj,1)`，
+  `adjOrOne` 复现 COALESCE）。均**一次往返**（无 N+1）。
+- 接线：`NewDailyRepository(db, ds...)`/`NewStockRepository(db, ds...)`/`NewSignalRepository(db, ds...)`
+  变参注入；**tx-scoped 构造传 nil**（保事务内一致）；`GetByDate`/`GetPrevClose`（Tier3 tx 内逐码循环）保持本地。
+- 测试：新增 `internal/repository/daily_ds_test.go`（httptest 假 datahub，`db=nil` ⇒ 走 ds 不触库，
+  覆盖 `date`/`start-end`/`asof`/`adj_not_null`/`last` 窗与升序输出）：`GetRange`、`GetLatest`（末行即最新 +
+  缺码 nil）、`GetLatestFactor`（空因子滤除）、`GetLatestTradeDate`（`exclude_index=false`）、
+  `GetIndexQuotes`（`last=2`）、`GetPoolMarket`（chg 末两行）、`GetSignalChg20`（21 行→2000.0；20 行→无）、
+  「datahub 500 ⇒ 失败即抛」。**`go test ./...` 全绿**。
+- 放行门（datahub 首灌 `daily_price`（含指数行）+ 逐位对账零偏差）与停采 **待生产执行**。
+
 ## 遗留
 
-- backend（Go）读切换 `stock_basic` 已落地（步骤③）；`index/valuation/finance/daily` 待续。
+- backend（Go）读切换 `stock_basic`、`daily_valuation`、`financial_indicator`、`daily_price`（含 index）**已全部落地**；四个数据集的 datahub 首灌 + 对账 + 停采待生产执行。
 - collector 读切换（随 collector 退役）。
 - 过渡期告警断链（datahub 写自有库 `task_run` → steady `notify_scheduler` 不读，暂看 datahub-collector `/healthz`）仍待解。

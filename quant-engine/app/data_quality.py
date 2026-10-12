@@ -25,8 +25,7 @@ from datetime import date, timedelta
 from sqlalchemy import func, select
 
 from app import data_source
-from app.models.tables import (DailyPrice, DailyValuation, FactorValue,
-                               FinancialIndicator)
+from app.models.tables import DailyPrice, FactorValue, FinancialIndicator
 
 logger = logging.getLogger("data_quality")
 
@@ -64,11 +63,8 @@ def _board_limit(code: str) -> float:
 
 
 def _market_latest(db) -> date | None:
-    """最新有行情的交易日（跳过指数伪股票 sh*）"""
-    return db.execute(
-        select(func.max(DailyPrice.trade_date))
-        .where(DailyPrice.code.not_like("sh%"))
-    ).scalar()
+    """最新有行情的交易日（跳过指数伪股票 sh*）—— Phase 3：按闸门走 datahub"""
+    return data_source.latest_trade_date(db)
 
 
 # ---------- 单项检查 ----------
@@ -93,10 +89,7 @@ def _check_coverage(db, td: date) -> dict:
     if not pool:
         return {"name": "coverage", "level": "warn",
                 "message": "行情覆盖　股票池为空", "metrics": {"pool": 0}}
-    with_bar = db.execute(
-        select(DailyPrice.code).distinct().where(
-            DailyPrice.trade_date == td, DailyPrice.code.in_(pool))
-    ).scalars().all()
+    with_bar = {c for (c,) in data_source.price_day(db, pool, td, ("code",))}
     ratio = len(with_bar) / len(pool)
     level = "ok" if ratio >= COVERAGE_MIN else "fail"
     msg = f"行情覆盖　{len(with_bar)}/{len(pool)} 股票有行情（{ratio * 100:.1f}%）"
@@ -174,21 +167,22 @@ def _dup_count(db, model, *cols) -> int:
 
 
 def _check_duplicates(db, td: date) -> dict:
-    tables = [
-        ("daily_price", DailyPrice, (DailyPrice.code, DailyPrice.trade_date)),
-        ("daily_valuation", DailyValuation,
-         (DailyValuation.code, DailyValuation.trade_date)),
-        ("financial_indicator", FinancialIndicator,
-         (FinancialIndicator.code, FinancialIndicator.report_date)),
-        ("factor_value", FactorValue,
-         (FactorValue.code, FactorValue.factor_name, FactorValue.trade_date)),
-    ]
-    broken = {name: _dup_count(db, model, *cols) for name, model, cols in tables}
+    names = ("daily_price", "daily_valuation", "financial_indicator", "factor_value")
+    broken = {
+        "daily_price": data_source.dup_keys(db, "daily_price"),
+        "daily_valuation": data_source.dup_keys(db, "daily_valuation"),
+        "financial_indicator": _dup_count(
+            db, FinancialIndicator, FinancialIndicator.code,
+            FinancialIndicator.report_date),
+        "factor_value": _dup_count(
+            db, FactorValue, FactorValue.code, FactorValue.factor_name,
+            FactorValue.trade_date),
+    }
     broken = {k: v for k, v in broken.items() if v}
     if not broken:
         return {"name": "duplicates", "level": "ok",
                 "message": "重复数据　4 张表均 0 条",
-                "metrics": {name: 0 for name, _, _ in tables}}
+                "metrics": {name: 0 for name in names}}
     msg = "重复数据　" + "　".join(f"{k} {v} 个键" for k, v in broken.items())
     return {"name": "duplicates", "level": "fail", "message": msg,
             "metrics": dict(broken)}
@@ -255,7 +249,7 @@ def _check_valuation(db, td: date) -> dict:
     if p_latest is None:
         return {"name": "valuation", "level": "warn",
                 "message": "估值　无行情数据", "metrics": {}}
-    v_latest = db.execute(select(func.max(DailyValuation.trade_date))).scalar()
+    v_latest = data_source.valuation_latest(db)
     if v_latest is None:
         return {"name": "valuation", "level": "fail",
                 "message": f"估值　从未同步（行情已到 {p_latest}）",
@@ -284,10 +278,7 @@ def _check_financial(db, td: date) -> dict:
     if not pool:
         return {"name": "financial", "level": "warn",
                 "message": "财务　股票池为空", "metrics": {}}
-    latest_ann = dict(db.execute(
-        select(FinancialIndicator.code, func.max(FinancialIndicator.announce_date))
-        .group_by(FinancialIndicator.code)
-    ).all())
+    latest_ann = data_source.pool_latest_announce(db)
     covered, stale = [], []
     for code, list_date in pool:
         if list_date and list_date > new_cutoff:
@@ -315,9 +306,8 @@ def _check_benchmark(db, td: date) -> dict:
     if p_latest is None:
         return {"name": "benchmark", "level": "warn",
                 "message": "指数基准　无行情数据", "metrics": {}}
-    i_latest = db.execute(
-        select(func.max(DailyPrice.trade_date)).where(DailyPrice.code == "sh000300")
-    ).scalar()
+    i_rows = data_source.price_latest(db, "sh000300", ("trade_date",))
+    i_latest = i_rows[0] if i_rows else None
     if i_latest is None:
         return {"name": "benchmark", "level": "fail",
                 "message": f"指数基准　沪深300 无数据（行情已到 {p_latest}）",

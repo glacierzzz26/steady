@@ -207,6 +207,33 @@ func (r *StockRepository) GetPoolMarket(codes []string) (map[string]*PoolMarket,
 	if len(codes) == 0 {
 		return out, nil
 	}
+	if r.ds != nil && r.ds.Enabled(datasource.DsDailyPrice) {
+		// last=2：每码最近两行（升序）；末行=最新、前一行=上一交易日。chg 由两行现算
+		// （对齐原 SQL `LAG(close) OVER (PARTITION BY code ORDER BY trade_date)` at rn=1）。
+		bars, err := r.ds.DailyLatest(context.Background(), codes, 2, nil)
+		if err == nil {
+			byCode := make(map[string][]model.DailyPrice, len(bars))
+			for _, rr := range bars {
+				byCode[rr.Code] = append(byCode[rr.Code], rr)
+			}
+			for code, bs := range byCode {
+				last := bs[len(bs)-1]
+				pm := &PoolMarket{Price: &last.Close, Amount: &last.Amount, TurnoverRate: last.TurnoverRate}
+				if len(bs) >= 2 {
+					prev := bs[len(bs)-2].Close
+					if prev > 0 {
+						chg := (last.Close/prev - 1) * 100
+						pm.Chg = &chg
+					}
+				}
+				out[code] = pm
+			}
+			return out, nil
+		}
+		if !r.dsFallback(err) {
+			return nil, err
+		}
+	}
 	type row struct {
 		Code         string
 		Price        float64
@@ -248,6 +275,30 @@ func (r *StockRepository) GetPoolValuation(codes []string) (map[string]*PoolValu
 	out := make(map[string]*PoolValuation, len(codes))
 	if len(codes) == 0 {
 		return out, nil
+	}
+	if r.ds != nil && r.ds.Enabled(datasource.DsDailyValuation) {
+		// last=1：每码最新一行；`pe_ttm IS NOT NULL OR pb IS NOT NULL` 过滤与原 SQL
+		// 同判（NULL → 模型 0 → 置 nil 指针，PE/PB 真实数据不恰为 0）。
+		rows, err := r.ds.ValuationLast(context.Background(), codes, 1, nil)
+		if err == nil {
+			for _, rr := range rows {
+				var pe, pb *float64
+				if rr.PeTtm != 0 {
+					pe = &rr.PeTtm
+				}
+				if rr.Pb != 0 {
+					pb = &rr.Pb
+				}
+				if pe == nil && pb == nil {
+					continue
+				}
+				out[rr.Code] = &PoolValuation{Pe: pe, Pb: pb}
+			}
+			return out, nil
+		}
+		if !r.dsFallback(err) {
+			return nil, err
+		}
 	}
 	type row struct {
 		Code string
@@ -355,6 +406,24 @@ func (r *StockRepository) GetPoolFinancial(codes []string) (map[string]*PoolFina
 	out := make(map[string]*PoolFinancial, len(codes))
 	if len(codes) == 0 {
 		return out, nil
+	}
+	if r.ds != nil && r.ds.Enabled(datasource.DsFinancialIndicator) {
+		// last=1：每码最新一期（announce_date DESC, report_date DESC）；roe 空 → 滤除，
+		// 对齐原 SQL `rn=1 AND roe IS NOT NULL`（announce_date NOT NULL，原前置过滤为空操作）。
+		rows, err := r.ds.FinancialLast(context.Background(), codes, nil, 1)
+		if err == nil {
+			for _, rr := range rows {
+				if rr.ROE == 0 {
+					continue
+				}
+				roe := rr.ROE
+				out[rr.Code] = &PoolFinancial{Roe: &roe}
+			}
+			return out, nil
+		}
+		if !r.dsFallback(err) {
+			return nil, err
+		}
 	}
 	type row struct {
 		Code string

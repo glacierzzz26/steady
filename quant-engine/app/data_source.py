@@ -1,6 +1,6 @@
 """quant-engine 数据读取的**唯一切换点**（Phase 3）。
 
-已落 `trade_calendar` + `stock_basic`。每个函数按闸门 `datahub_read_enabled(<dataset>)` 分派：
+已落 `trade_calendar` + `stock_basic` + `daily_price` + `daily_valuation` + `financial_indicator`。每个函数按闸门 `datahub_read_enabled(<dataset>)` 分派：
 
 - **闸门关**（默认）→ 读本地库，SQL 与切换前**逐字一致**（保返回类型/语义，含
   `bool(None) == False`、R6 的降序 + limit）→ **零行为变更**。
@@ -16,12 +16,18 @@ from sqlalchemy import func, select
 
 from app import config
 from app.datahub_client import DatahubError, get_client
-from app.models.tables import StockBasic, TradeCalendar
+from app.models.tables import DailyPrice, DailyValuation, FinancialIndicator, \
+    StockBasic, TradeCalendar
 
 logger = logging.getLogger(__name__)
 
 _CALENDAR = "trade_calendar"
 _STOCK = "stock_basic"
+_PRICE = "daily_price"
+_VALUATION = "daily_valuation"
+_FINANCIAL = "financial_indicator"
+_LATEST = "latest_trade_date"
+_MARKET_READY = "market_ready"
 # 近端查询（recent_open_days）datahub 路径的起始放宽窗口（日历日）；不足则翻倍
 _RECENT_WINDOW_DAYS = 45
 _RECENT_WINDOW_MAX = 730
@@ -236,3 +242,258 @@ def a_share_code_dates(db, end: date) -> list:
             StockBasic.status == "L",
             StockBasic.list_date <= end)
     ).all()
+
+
+# ---------- daily_price ----------
+#
+# datahub 侧 params：codes/start/end/date/asof/last/fields/adj_not_null。**远端返回「按 fields
+# 顺序的元组」**（trade_date 转 date），调用方 `for code, td, close, adj in rows` 几乎不改。
+# 派生小数据集 `latest_trade_date`（MAX）/ `market_ready`（池覆盖率）同按 daily_price 闸门分派。
+
+_PRICE_FIELDS = ("code", "trade_date", "close", "adj_factor")
+
+
+def latest_trade_date(db) -> date | None:
+    """最近一个已有行情数据的交易日（跳过指数伪股票 sh*）。
+
+    对齐本地 `max(trade_date) where code NOT LIKE 'sh%'`；datahub `latest_trade_date`
+    `exclude_index=true` 同口径。无行情 → None。
+    """
+    if config.datahub_read_enabled(_PRICE):
+        try:
+            rows = get_client().fetch(_LATEST, {"table": _PRICE, "exclude_index": "true"})
+            return _to_date(rows[0]["trade_date"]) if rows else None
+        except DatahubError:
+            _read_fallback(_PRICE, "latest_trade_date")
+    return db.execute(
+        select(func.max(DailyPrice.trade_date)).where(DailyPrice.code.not_like("sh%"))
+    ).scalar()
+
+
+def price_rows(db, codes, start=None, end=None, fields=_PRICE_FIELDS) -> list:
+    """行情行（`(code, trade_date, …)` 元组，列序同 `fields`；升序 code,trade_date）。
+
+    对齐本地 `select(*fields).where(code IN codes, start<=trade_date<=end)`。
+    `codes` 空 → []（对齐 `code IN ()` 恒空）。
+    """
+    if not codes:
+        return []
+    if config.datahub_read_enabled(_PRICE):
+        try:
+            params = {"codes": ",".join(codes)}
+            if start is not None:
+                params["start"] = _iso(start)
+            if end is not None:
+                params["end"] = _iso(end)
+            return _fetch_tuples(_PRICE, params, fields)
+        except DatahubError:
+            _read_fallback(_PRICE, "price_rows")
+    q = select(*[getattr(DailyPrice, f) for f in fields])
+    q = q.where(DailyPrice.code.in_(codes))
+    if start is not None:
+        q = q.where(DailyPrice.trade_date >= start)
+    if end is not None:
+        q = q.where(DailyPrice.trade_date <= end)
+    q = q.order_by(DailyPrice.code, DailyPrice.trade_date)
+    return db.execute(q).all()
+
+
+def price_day(db, codes, d, fields=_PRICE_FIELDS) -> list:
+    """某交易日的行情行（列序同 `fields`）；`codes` 空 = 不限码（当日全市场）。
+
+    对齐本地 `select(*fields).where(trade_date == d [, code IN codes])`。
+    """
+    if config.datahub_read_enabled(_PRICE):
+        try:
+            params = {"date": _iso(d)}
+            if codes:
+                params["codes"] = ",".join(codes)
+            return _fetch_tuples(_PRICE, params, fields)
+        except DatahubError:
+            _read_fallback(_PRICE, "price_day")
+    q = select(*[getattr(DailyPrice, f) for f in fields]).where(DailyPrice.trade_date == d)
+    if codes:
+        q = q.where(DailyPrice.code.in_(codes))
+    q = q.order_by(DailyPrice.code, DailyPrice.trade_date)
+    return db.execute(q).all()
+
+
+def price_latest(db, code, fields=_PRICE_FIELDS):
+    """该 code 最新一行行情（`(code, trade_date, …)` 元组，列序同 `fields`）；无 → None。"""
+    if config.datahub_read_enabled(_PRICE):
+        try:
+            rows = _fetch_tuples(_PRICE, {"codes": code, "last": "1"}, fields)
+            return rows[0] if rows else None
+        except DatahubError:
+            _read_fallback(_PRICE, "price_latest")
+    q = (select(*[getattr(DailyPrice, f) for f in fields])
+         .where(DailyPrice.code == code)
+         .order_by(DailyPrice.trade_date.desc()).limit(1))
+    return db.execute(q).first()
+
+
+def market_ready(db, td) -> bool:
+    """行情就绪：当日股票池（hs300+zz500）bar 覆盖率 ≥ 0.9。
+
+    datahub `market_ready{date}` 同口径（threshold 0.9 / universe hs300,zz500 为默认）。
+    """
+    if config.datahub_read_enabled(_PRICE):
+        try:
+            rows = get_client().fetch(_MARKET_READY, {"date": _iso(td)})
+            return bool(rows[0]["ready"]) if rows else False
+        except DatahubError:
+            _read_fallback(_PRICE, "market_ready")
+    pool = pool_codes(db)
+    if not pool:
+        return False
+    with_bar = db.execute(
+        select(DailyPrice.code).where(
+            DailyPrice.trade_date == td, DailyPrice.code.in_(pool))
+    ).scalars().all()
+    return len(with_bar) / len(pool) >= 0.9
+
+
+# ---------- daily_valuation ----------
+#
+# datahub 侧 params：codes/start/end/asof/last/fields。**远端返回「按 fields 顺序的元组」**
+# （trade_date 转 date），使调用方 `for code, td, pe, pb in rows` 几乎不改（仅换调用 + 删 import）。
+# codes 空 → 返回 []（对齐本地 `code IN ()` 恒空语义）。
+
+_VAL_FIELDS = ("code", "trade_date", "pe_ttm", "pb")
+
+
+def _read_fallback(dataset: str, method: str) -> None:
+    """闸门开但 datahub 读失败：未开 fallback → 抛（失败即抛）；开 → 记 WARNING 走本地。"""
+    if not config.datahub_fallback_local():
+        raise
+    logger.warning("datahub 读 %s(%s) 失败，回退本地（FALLBACK_LOCAL=1）", dataset, method)
+
+
+def _fetch_tuples(dataset: str, params: dict, fields,
+                  date_fields=("trade_date",)) -> list:
+    """拉 datahub 数据集 → 按 `fields` 顺序的元组（`date_fields` 列转 `date`）。"""
+    rows = get_client().fetch(dataset, {**params, "fields": ",".join(fields)})
+    dset = set(date_fields)
+    return [tuple(_to_date(r[f]) if f in dset else r[f] for f in fields)
+            for r in rows]
+
+
+def valuation_rows(db, codes, start=None, end=None, fields=_VAL_FIELDS) -> list:
+    """估值行（`(code, trade_date, …)` 元组，列序同 `fields`；升序 code,trade_date）。
+
+    对齐本地 `select(*fields).where(code IN codes, start<=trade_date<=end)`。
+    """
+    if not codes:
+        return []
+    if config.datahub_read_enabled(_VALUATION):
+        try:
+            params = {"codes": ",".join(codes)}
+            if start is not None:
+                params["start"] = _iso(start)
+            if end is not None:
+                params["end"] = _iso(end)
+            return _fetch_tuples(_VALUATION, params, fields)
+        except DatahubError:
+            _read_fallback(_VALUATION, "valuation_rows")
+    q = select(*[getattr(DailyValuation, f) for f in fields])
+    q = q.where(DailyValuation.code.in_(codes))
+    if start is not None:
+        q = q.where(DailyValuation.trade_date >= start)
+    if end is not None:
+        q = q.where(DailyValuation.trade_date <= end)
+    q = q.order_by(DailyValuation.code, DailyValuation.trade_date)
+    return db.execute(q).all()
+
+
+def valuation_latest(db) -> date | None:
+    """最新估值交易日（`date` 或 None；无过滤，对齐本地 `max(trade_date)`）。"""
+    if config.datahub_read_enabled(_VALUATION):
+        try:
+            rows = get_client().fetch(
+                _LATEST, {"table": _VALUATION, "exclude_index": "false"})
+            return _to_date(rows[0]["trade_date"]) if rows else None
+        except DatahubError:
+            _read_fallback(_VALUATION, "valuation_latest")
+    return db.execute(select(func.max(DailyValuation.trade_date))).scalar()
+
+
+def dup_keys(db, table: str) -> int:
+    """唯一键重复**组数**（`table ∈ daily_price/daily_valuation/financial_indicator`）。
+
+    datahub 侧有 UNIQUE 索引 → 恒 0；本地对无唯一约束库（sqlite 测试）同样可查。
+    """
+    if config.datahub_read_enabled(table):
+        try:
+            return len(get_client().fetch("dup_keys", {"table": table}))
+        except DatahubError:
+            _read_fallback(table, f"dup_keys({table})")
+    from app.models.tables import (DailyPrice, DailyValuation,
+                                   FinancialIndicator)
+    model, key_cols = {
+        "daily_price": (DailyPrice, ("code", "trade_date")),
+        "daily_valuation": (DailyValuation, ("code", "trade_date")),
+        "financial_indicator": (FinancialIndicator, ("code", "report_date")),
+    }[table]
+    cols = [getattr(model, c) for c in key_cols]
+    q = (select(*cols, func.count().label("c"))
+         .group_by(*cols).having(func.count() > 1))
+    return len(db.execute(q).all())
+
+
+# ---------- financial_indicator ----------
+#
+# datahub 侧 params：codes/as_of(announce_date ≤，防未来函数)/last/fields。
+# 远端返回「按 fields 顺序的元组」（report_date/announce_date 转 date）。announce_date 为
+# **NOT NULL**（schema），故「NULLS FIRST」顾虑不适用。字段序对齐各消费点原 select。
+
+_FIN_FIELDS = ("code", "report_date", "announce_date", "roe", "debt_ratio")
+
+
+def financial_rows(db, codes, as_of=None, fields=_FIN_FIELDS) -> list:
+    """财务行（`(code, report_date, announce_date, roe, debt_ratio)` 元组，列序同 `fields`）。
+
+    对齐本地 `select(*fields).where(code IN codes, announce_date <= as_of)`。
+    **消费方（factor_service/factor_trial/replay）均按 announce_date as-of 自行排序/取值，
+    不依赖返回行序** —— 故远端 (code, report_date) 序与本地 (code, announce_date) 序等价。
+    """
+    if not codes:
+        return []
+    if config.datahub_read_enabled(_FINANCIAL):
+        try:
+            params = {"codes": ",".join(codes)}
+            if as_of is not None:
+                params["as_of"] = _iso(as_of)
+            return _fetch_tuples(_FINANCIAL, params, fields,
+                                 date_fields=("report_date", "announce_date"))
+        except DatahubError:
+            _read_fallback(_FINANCIAL, "financial_rows")
+    q = select(*[getattr(FinancialIndicator, f) for f in fields])
+    q = q.where(FinancialIndicator.code.in_(codes))
+    if as_of is not None:
+        q = q.where(FinancialIndicator.announce_date <= as_of)
+    q = q.order_by(FinancialIndicator.code, FinancialIndicator.announce_date)
+    return db.execute(q).all()
+
+
+def pool_latest_announce(db, codes=None) -> dict:
+    """每 code 最新公告日 `{code: date}`（`_check_financial` 新鲜度用）。
+
+    对齐本地 `select(code, max(announce_date)).group_by(code)`（announce_date NOT NULL →
+    无空值分歧）。`codes` 非空时限定该集合（仅覆盖池内 code，语义等价：调用方按池 code 取值）。
+    """
+    if config.datahub_read_enabled(_FINANCIAL):
+        try:
+            params = {"last": "1", "fields": "code,announce_date"}
+            if codes:
+                params["codes"] = ",".join(codes)
+            rows = get_client().fetch(_FINANCIAL, params)
+            return {r["code"]: _to_date(r["announce_date"]) for r in rows
+                    if r.get("announce_date")}
+        except DatahubError:
+            _read_fallback(_FINANCIAL, "pool_latest_announce")
+    q = (select(FinancialIndicator.code,
+                func.max(FinancialIndicator.announce_date))
+         .group_by(FinancialIndicator.code))
+    if codes:
+        q = q.where(FinancialIndicator.code.in_(codes))
+    return dict(db.execute(q).all())

@@ -12,15 +12,13 @@ import logging
 from datetime import date, timedelta
 
 import pandas as pd
-from sqlalchemy import select
 
 from app import data_source
 from app.db import upsert
 from app.factors.financial import debt_by_announce, roe_by_announce
 from app.factors.trend import macd_signal, ma_trend, winsorize
 from app.factors.value import pb_value, pe_value
-from app.models.tables import (DailyPrice, DailyValuation,
-                               FinancialIndicator, FactorValue)
+from app.models.tables import FactorValue
 
 logger = logging.getLogger(__name__)
 
@@ -49,14 +47,10 @@ def load_factor_inputs(db, codes: list[str], trade_date: date) -> dict[str, dict
     val_start = trade_date - timedelta(days=VALUATION_ASOF_DAYS)
 
     # 1. 行情（前复权：close × adj_factor / 窗口最新 adj_factor）
-    price_rows = db.execute(
-        select(DailyPrice.code, DailyPrice.trade_date, DailyPrice.close,
-               DailyPrice.adj_factor)
-        .where(DailyPrice.code.in_(codes),
-               DailyPrice.trade_date >= price_start,
-               DailyPrice.trade_date <= trade_date)
-        .order_by(DailyPrice.code, DailyPrice.trade_date)
-    ).all()
+    #    Phase 3：按闸门走 datahub（默认读本地库，逐字等价）
+    price_rows = data_source.price_rows(
+        db, codes, price_start, trade_date,
+        ("code", "trade_date", "close", "adj_factor"))
     closes: dict[str, list] = {}
     anchors: dict[str, float] = {}
     for code, td, close, adj in price_rows:
@@ -66,14 +60,7 @@ def load_factor_inputs(db, codes: list[str], trade_date: date) -> dict[str, dict
         anchors[code] = float(adj)
 
     # 2. 估值（as-of 窗口内，停牌日取最近一日）
-    val_rows = db.execute(
-        select(DailyValuation.code, DailyValuation.trade_date,
-               DailyValuation.pe_ttm, DailyValuation.pb)
-        .where(DailyValuation.code.in_(codes),
-               DailyValuation.trade_date >= val_start,
-               DailyValuation.trade_date <= trade_date)
-        .order_by(DailyValuation.code, DailyValuation.trade_date)
-    ).all()
+    val_rows = data_source.valuation_rows(db, codes, val_start, trade_date)
     valuations: dict[str, list] = {}
     for code, td, pe, pb in val_rows:
         valuations.setdefault(code, []).append(
@@ -82,13 +69,7 @@ def load_factor_inputs(db, codes: list[str], trade_date: date) -> dict[str, dict
              "pb": float(pb) if pb is not None else None})
 
     # 3. 财务（公告日 <= 当日；回填后约 800×20 期，内存可承受）
-    fin_rows = db.execute(
-        select(FinancialIndicator.code, FinancialIndicator.report_date,
-               FinancialIndicator.announce_date, FinancialIndicator.roe,
-               FinancialIndicator.debt_ratio)
-        .where(FinancialIndicator.code.in_(codes),
-               FinancialIndicator.announce_date <= trade_date)
-    ).all()
+    fin_rows = data_source.financial_rows(db, codes, as_of=trade_date)
     financials: dict[str, list] = {}
     for code, rd, ad, roe, debt in fin_rows:
         financials.setdefault(code, []).append(

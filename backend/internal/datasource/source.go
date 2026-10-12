@@ -10,6 +10,7 @@ package datasource
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +26,8 @@ const (
 	DsDailyPrice         = "daily_price"
 	DsDailyValuation     = "daily_valuation"
 	DsFinancialIndicator = "financial_indicator"
+	DsLatestTradeDate    = "latest_trade_date"
+	DsMarketReady        = "market_ready"
 )
 
 // Source datahub 读取源：闸门判定 + HTTP 取数。并发安全（内含 Client）。
@@ -173,6 +176,64 @@ func (s *Source) DailyRange(ctx context.Context, codes []string, start, end *tim
 	return out, nil
 }
 
+// DailyLatest 多码「每 code 最近 n 行」行情（可选锚 asof = trade_date ≤ asof）。
+// datahub 侧 ROW_NUMBER(PARTITION BY code ORDER BY trade_date DESC) 窗口，**一次往返**；
+// 返回按 (code, trade_date ASC) 升序。
+//
+// n=1 ⇒ 每码最新一日（Tier1「最新一条」读点）；n=2 ⇒ top-2（指数条/涨跌幅 LAG）；
+// n=21 ⇒ 21 根窗（20 日涨幅）。**空结果合法**（该 code 无行则不出现）。
+func (s *Source) DailyLatest(ctx context.Context, codes []string, n int, asof *time.Time) ([]model.DailyPrice, error) {
+	if len(codes) == 0 {
+		return nil, nil
+	}
+	p := map[string]string{"codes": strings.Join(codes, ",")}
+	if n > 0 {
+		p["last"] = strconv.Itoa(n)
+	}
+	if asof != nil {
+		p["asof"] = asof.Format(dateLayout)
+	}
+	rows, err := datahub.Fetch[dailyPriceRow](s.c, ctx, DsDailyPrice, p)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.DailyPrice, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, toDailyPrice(r))
+	}
+	return out, nil
+}
+
+// LatestFactor 该股全量最新非空复权因子（`adj_not_null` + `last=1`）。
+// datahub 侧先滤 adj_factor IS NOT NULL 再取每码最新一行；无数据返回 (0, false, nil)。
+func (s *Source) LatestFactor(ctx context.Context, code string) (float64, bool, error) {
+	rows, err := datahub.Fetch[dailyPriceRow](s.c, ctx, DsDailyPrice, map[string]string{
+		"codes": code, "adj_not_null": "true", "last": "1"})
+	if err != nil {
+		return 0, false, err
+	}
+	if len(rows) == 0 {
+		return 0, false, nil
+	}
+	return f64(rows[0].AdjFactor), true, nil
+}
+
+// LatestTradeDate 全市场最新交易日（`latest_trade_date` 数据集 MAX(trade_date)）。
+// excludeIndex=true 排除 sh% 指数行（对齐 qe 口径 `code NOT LIKE 'sh%'`）；
+// false = 不过滤（对齐 backend GetLatestTradeDate，含指数行）。无数据返回 (nil, nil)。
+func (s *Source) LatestTradeDate(ctx context.Context, excludeIndex bool) (*time.Time, error) {
+	rows, err := datahub.Fetch[latestTradeDateRow](s.c, ctx, DsLatestTradeDate, map[string]string{
+		"table": DsDailyPrice, "exclude_index": strconv.FormatBool(excludeIndex)})
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	d := rows[0].TradeDate.Time
+	return &d, nil
+}
+
 // ---- daily_valuation ----
 
 // ValuationRange 多码区间估值。
@@ -198,6 +259,35 @@ func (s *Source) ValuationRange(ctx context.Context, codes []string, start, end 
 	return out, nil
 }
 
+// ValuationLast 多码「每 code 最近 n 行」估值（可选锚 asof = trade_date ≤ asof）。
+// datahub 侧用 ROW_NUMBER(PARTITION BY code ORDER BY trade_date DESC) 窗口，
+// **一次往返、无 N+1**；返回按 (code, trade_date ASC) 升序。
+//
+// n=1 ⇒ 每码取最新一日（对应 SQL「最新一条」读点）；n>1 ⇒ top-N 窗（供 Go 归约）。
+// 注意：模型 Pe/Pb 等为 float64，datahub 的 NULL 经 toValuation 归 0 —— 调用方
+// 以「≠0」充当「非空」判定（PE/PB 真实数据恒不恰为 0，无信息损失）。
+func (s *Source) ValuationLast(ctx context.Context, codes []string, n int, asof *time.Time) ([]model.DailyValuation, error) {
+	if len(codes) == 0 {
+		return nil, nil
+	}
+	p := map[string]string{"codes": strings.Join(codes, ",")}
+	if n > 0 {
+		p["last"] = strconv.Itoa(n)
+	}
+	if asof != nil {
+		p["asof"] = asof.Format(dateLayout)
+	}
+	rows, err := datahub.Fetch[valuationRow](s.c, ctx, DsDailyValuation, p)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.DailyValuation, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, toValuation(r))
+	}
+	return out, nil
+}
+
 // ---- financial_indicator ----
 
 // FinancialByCodes 多码财务（防未来函数由调用方按 announce_date 处理）。
@@ -207,6 +297,34 @@ func (s *Source) FinancialByCodes(ctx context.Context, codes []string) ([]model.
 	}
 	rows, err := datahub.Fetch[financialRow](s.c, ctx, DsFinancialIndicator,
 		map[string]string{"codes": strings.Join(codes, ",")})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.FinancialIndicator, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, toFinancial(r))
+	}
+	return out, nil
+}
+
+// FinancialLast 多码「每 code 最近 n 期」财务（可选锚 asOf = announce_date ≤ asOf）。
+// datahub 侧 ROW_NUMBER 按 (announce_date DESC, report_date DESC) 取最近 n 期；
+// n=1 ⇒ 每码最新一期。返回按 (code, report_date ASC) 升序。
+//
+// 注：announce_date 为 NOT NULL（schema），无 NULLS FIRST 风险；roe 等 NULL 经
+// toFinancial 归 0，调用方以「≠0」充当非空判定（对齐 SQL `IS NOT NULL`）。
+func (s *Source) FinancialLast(ctx context.Context, codes []string, asOf *time.Time, n int) ([]model.FinancialIndicator, error) {
+	if len(codes) == 0 {
+		return nil, nil
+	}
+	p := map[string]string{"codes": strings.Join(codes, ",")}
+	if asOf != nil {
+		p["as_of"] = asOf.Format(dateLayout)
+	}
+	if n > 0 {
+		p["last"] = strconv.Itoa(n)
+	}
+	rows, err := datahub.Fetch[financialRow](s.c, ctx, DsFinancialIndicator, p)
 	if err != nil {
 		return nil, err
 	}
