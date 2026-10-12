@@ -1,23 +1,51 @@
 package repository
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"log"
 	"sort"
 	"time"
 
 	"gorm.io/gorm"
 
+	"quant-system/backend/internal/datasource"
 	"quant-system/backend/internal/model"
 )
 
 // SignalRepository 策略与信号数据访问层（只读）
+//
+// ds（datahub 读取源）为可选：nil ⇒ 恒走本地 gorm（含全部 tx-scoped 构造）。
+// 非 nil 且 daily_valuation 闸门开 ⇒ GetSignalPe 走 datahub，其余读点仍本地。
 type SignalRepository struct {
 	db *gorm.DB
+	ds *datasource.Source
 }
 
-func NewSignalRepository(db *gorm.DB) *SignalRepository {
-	return &SignalRepository{db: db}
+// NewSignalRepository 构造。ds 变参可选：现有 `NewSignalRepository(db)` / tx-scoped
+// `NewSignalRepository(tx)` 调用点零改动（不传 ⇒ nil ⇒ 纯本地，保事务内一致）。
+func NewSignalRepository(db *gorm.DB, ds ...*datasource.Source) *SignalRepository {
+	r := &SignalRepository{db: db}
+	if len(ds) > 0 {
+		r.ds = ds[0]
+	}
+	return r
+}
+
+// useDS daily_valuation 是否走 datahub（闸门判定）。
+func (r *SignalRepository) useDS() bool {
+	return r.ds != nil && r.ds.Enabled(datasource.DsDailyValuation)
+}
+
+// dsFallback 读失败处置：开 fallback ⇒ 记 WARNING 并回退本地（返回 true）；
+// 否则失败即抛（返回 false，不静默给陈旧值）。
+func (r *SignalRepository) dsFallback(err error) bool {
+	if r.ds.FallbackLocal() {
+		log.Printf("WARN datahub daily_valuation 读失败，回退本地: %v", err)
+		return true
+	}
+	return false
 }
 
 // SignalItem 信号 + 股票名称（join stock_basic）+ G1 扩展字段
@@ -355,6 +383,24 @@ func rankRawScores(raw map[string]float64) map[string]int {
 func (r *SignalRepository) GetSignalPe(codes []string, date time.Time) (map[string]float64, error) {
 	if len(codes) == 0 {
 		return map[string]float64{}, nil
+	}
+	if r.useDS() {
+		// last=1 + asof：每码取 trade_date ≤ date 的最新一行（服务端 ROW_NUMBER），
+		// 与原 SQL「JOIN MAX(trade_date)」逐行等价。pe_ttm NULL → 模型 0 → 滤除，
+		// 与原 SQL `pe_ttm IS NOT NULL` 同判（PE 真实数据不恰为 0）。
+		rows, err := r.ds.ValuationLast(context.Background(), codes, 1, &date)
+		if err == nil {
+			out := make(map[string]float64, len(rows))
+			for _, rr := range rows {
+				if rr.PeTtm != 0 {
+					out[rr.Code] = rr.PeTtm
+				}
+			}
+			return out, nil
+		}
+		if !r.dsFallback(err) {
+			return nil, err
+		}
 	}
 	type row struct {
 		Code string

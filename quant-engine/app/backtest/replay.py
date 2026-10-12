@@ -30,7 +30,7 @@ from app.factor_service import FACTOR_DIRECTION, normalize_cross_section, \
     score_cross_section
 from app.factors.financial import latest_by_announce
 from app.factors.trend import macd_signal, ma_trend
-from app.models.tables import DailyPrice, DailyValuation, FinancialIndicator
+from app.models.tables import DailyPrice, FinancialIndicator
 from app.strategies.base import Signal
 from app.strategies.multi_factor import ALL_FACTORS, rotation_action
 
@@ -117,12 +117,7 @@ class ReplayStrategy:
             if op is not None:
                 opens.setdefault(code, []).append((td, float(op)))
             anchors[code] = float(adj)
-        val_rows = self.db.execute(
-            select(DailyValuation.code, DailyValuation.trade_date,
-                   DailyValuation.pe_ttm, DailyValuation.pb)
-            .where(DailyValuation.code.in_(self.pool),
-                   DailyValuation.trade_date <= end)
-            .order_by(DailyValuation.code, DailyValuation.trade_date)).all()
+        val_rows = data_source.valuation_rows(self.db, self.pool, None, end)
         valuations: dict[str, list] = {}
         for code, td, pe, pb in val_rows:
             valuations.setdefault(code, []).append(

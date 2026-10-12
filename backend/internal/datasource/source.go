@@ -10,6 +10,7 @@ package datasource
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
@@ -186,6 +187,35 @@ func (s *Source) ValuationRange(ctx context.Context, codes []string, start, end 
 	}
 	if end != nil {
 		p["end"] = end.Format(dateLayout)
+	}
+	rows, err := datahub.Fetch[valuationRow](s.c, ctx, DsDailyValuation, p)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.DailyValuation, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, toValuation(r))
+	}
+	return out, nil
+}
+
+// ValuationLast 多码「每 code 最近 n 行」估值（可选锚 asof = trade_date ≤ asof）。
+// datahub 侧用 ROW_NUMBER(PARTITION BY code ORDER BY trade_date DESC) 窗口，
+// **一次往返、无 N+1**；返回按 (code, trade_date ASC) 升序。
+//
+// n=1 ⇒ 每码取最新一日（对应 SQL「最新一条」读点）；n>1 ⇒ top-N 窗（供 Go 归约）。
+// 注意：模型 Pe/Pb 等为 float64，datahub 的 NULL 经 toValuation 归 0 —— 调用方
+// 以「≠0」充当「非空」判定（PE/PB 真实数据恒不恰为 0，无信息损失）。
+func (s *Source) ValuationLast(ctx context.Context, codes []string, n int, asof *time.Time) ([]model.DailyValuation, error) {
+	if len(codes) == 0 {
+		return nil, nil
+	}
+	p := map[string]string{"codes": strings.Join(codes, ",")}
+	if n > 0 {
+		p["last"] = strconv.Itoa(n)
+	}
+	if asof != nil {
+		p["asof"] = asof.Format(dateLayout)
 	}
 	rows, err := datahub.Fetch[valuationRow](s.c, ctx, DsDailyValuation, p)
 	if err != nil {

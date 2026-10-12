@@ -1,20 +1,49 @@
 package repository
 
 import (
+	"context"
+	"log"
 	"time"
 
 	"gorm.io/gorm"
 
+	"quant-system/backend/internal/datasource"
 	"quant-system/backend/internal/model"
 )
 
 // DailyRepository 日行情数据访问层（只读）
+//
+// ds（datahub 读取源）为可选：nil ⇒ 恒走本地 gorm（含全部 tx-scoped 构造）。
+// 非 nil 且对应数据集闸门开 ⇒ 命中读点走 datahub HTTP，其余读点仍本地。
 type DailyRepository struct {
 	db *gorm.DB
+	ds *datasource.Source
 }
 
-func NewDailyRepository(db *gorm.DB) *DailyRepository {
-	return &DailyRepository{db: db}
+// NewDailyRepository 构造。ds 变参可选：现有 `NewDailyRepository(db)` / tx-scoped
+// `NewDailyRepository(tx)` 调用点零改动（不传 ⇒ nil ⇒ 纯本地，保事务内一致）。
+func NewDailyRepository(db *gorm.DB, ds ...*datasource.Source) *DailyRepository {
+	r := &DailyRepository{db: db}
+	if len(ds) > 0 {
+		r.ds = ds[0]
+	}
+	return r
+}
+
+// useDS 指定数据集是否走 datahub（闸门判定）。daily_price / daily_valuation 分属
+// 不同白名单项，故按数据集判定。
+func (r *DailyRepository) useDS(dataset string) bool {
+	return r.ds != nil && r.ds.Enabled(dataset)
+}
+
+// dsFallback 读失败处置：开 fallback ⇒ 记 WARNING 并回退本地（返回 true）；
+// 否则失败即抛（返回 false，不静默给陈旧值）。
+func (r *DailyRepository) dsFallback(dataset string, err error) bool {
+	if r.ds.FallbackLocal() {
+		log.Printf("WARN datahub %s 读失败，回退本地: %v", dataset, err)
+		return true
+	}
+	return false
 }
 
 // GetRange 区间行情，start/end 为 nil 时不过滤，按 trade_date 升序
@@ -46,6 +75,19 @@ func (r *DailyRepository) GetLatest(code string) (*model.DailyPrice, error) {
 
 // GetLatestValuation 最近一日估值（详情页日度 PE/PB），无数据返回 (nil, nil)
 func (r *DailyRepository) GetLatestValuation(code string) (*model.DailyValuation, error) {
+	if r.useDS(datasource.DsDailyValuation) {
+		rows, err := r.ds.ValuationLast(context.Background(), []string{code}, 1, nil)
+		if err == nil {
+			if len(rows) == 0 {
+				return nil, nil
+			}
+			v := rows[len(rows)-1] // last=1 → 每码恰一行（升序末行即最新）
+			return &v, nil
+		}
+		if !r.dsFallback(datasource.DsDailyValuation, err) {
+			return nil, err
+		}
+	}
 	var v model.DailyValuation
 	err := r.db.Where("code = ?", code).Order("trade_date DESC").First(&v).Error
 	if err == gorm.ErrRecordNotFound {

@@ -98,6 +98,25 @@ DATAHUB_FALLBACK_LOCAL=0        # 故障回退本地（默认 0=失败即抛）
 
 ---
 
+## 2c. 第三个增量：daily_valuation 读切换（qe + backend，2026-10-12）
+
+首个「qe + backend **同批**切」的数据集（前两者逐消费方增量）。**闸门默认关 = 逐字回退本地**。
+
+- **datahub 侧**：注册 raw 数据集 `daily_valuation`（`db` provider 读自有库；列
+  `code,trade_date,close,total_mv,float_mv,pe_ttm,pe_static,pb`；params `codes`/`start`/`end`/
+  `asof`(≤)/`last`(每码最近 N 行，服务端 `ROW_NUMBER`)/`fields`）。见 datahub 仓 PR。
+- **qe 侧**：`data_source.py` 增 `valuation_rows`（闸门开走 `daily_valuation`，按 `fields` 投影为
+  有序元组）、`valuation_latest`（`latest_trade_date{table:daily_valuation,exclude_index:false}`）、
+  `dup_keys(db, table)`；切 `factor_service.load_factor_inputs`、`factor_trial.load_range_inputs`、
+  `data_quality._check_valuation` + `_check_duplicates`、`backtest/replay.preload` 的估值读点。
+- **backend 侧**：`internal/datasource` 增 `ValuationLast(codes,n,asof)`（`last` 有界窗）；
+  `DailyRepository.GetLatestValuation` / `SignalRepository.GetSignalPe` / `StockRepository.GetPoolValuation`
+  加 prologue（`last=1` + `asof`/null 过滤，Go 侧归约）；`NewDailyRepository`/`NewSignalRepository`
+  改变参可选，`SetupRouter`/`main.go`/`NewTradingService` 注入（tx-scoped 不传）。
+- 详见阶段文档 [`../stages/datahub-phase3-读取切换.md`](../stages/datahub-phase3-读取切换.md)「daily_valuation 读切换」节。
+
+---
+
 ## 3. 失败模式（决策）
 
 **失败即抛（不静默回退本地）**：datahub 权威、本地是待退役副本；静默回退会掩盖故障。调用方已有
@@ -142,4 +161,4 @@ backend 也读同一批本地表（`internal/repository/*.go`），是「停采�
   - **Tier3** tx 内 + trading 逐码循环（`GetPrevClose/GetByDate` 在每码循环里）→ **先保本地**（传 nil），待「批量原语」重构后再切。
   - 计算表（`factor_value/strategy_signal/strategy/factor_definition`）**不切**。
 
-**现状（2026-10-09）**：Increment 0（基建：config + `internal/datahub` + `internal/datasource` + 测试）已落地，**默认全关、零行为变更**。**`stock_basic` repo 接线已落地（Tier1）**：`StockRepository` 五读点（`GetList`/`GetByCode`/`Exists`/`GetNames`/`GetIndustries`）加 prologue，`internal/datasource` 增 `StockBasicList`（列表）与既有 `StockBasicByCode(s)`；`SetupRouter`/`NewTradingService` 注入 `ds`；`go test ./...` 全绿。其余数据集（`index/valuation/finance/daily`）的 accessor 与 repo 方法切换随各自增量推进。
+**现状（2026-10-12）**：Increment 0（基建：config + `internal/datahub` + `internal/datasource` + 测试）已落地，**默认全关、零行为变更**。**`stock_basic` repo 接线已落地（Tier1）**：`StockRepository` 五读点（`GetList`/`GetByCode`/`Exists`/`GetNames`/`GetIndustries`）加 prologue，`internal/datasource` 增 `StockBasicList`（列表）与既有 `StockBasicByCode(s)`；`SetupRouter`/`NewTradingService` 注入 `ds`；`go test ./...` 全绿。**`daily_valuation` repo 接线已落地（Tier1/2）**：`internal/datasource` 增 `ValuationLast(codes,n,asof)`（`last` 有界窗）；`DailyRepository.GetLatestValuation`、`SignalRepository.GetSignalPe`（`asof`+`last=1`）、`StockRepository.GetPoolValuation`（`last=1`+null 过滤）加 prologue；`NewDailyRepository`/`NewSignalRepository` 改变参可选，`SetupRouter`/`main.go`/`NewTradingService` 注入（tx-scoped 不传）。其余数据集（`index/finance/daily`）的 accessor 与 repo 方法切换随各自增量推进。

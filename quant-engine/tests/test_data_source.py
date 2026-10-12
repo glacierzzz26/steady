@@ -11,11 +11,18 @@ from sqlalchemy.pool import StaticPool
 
 from app import config, data_source
 from app.datahub_client import DatahubError
-from app.models.tables import Base, StockBasic, TradeCalendar
+from app.models.tables import Base, DailyValuation, StockBasic, TradeCalendar
 
 OPEN = [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5),
         date(2026, 8, 6), date(2026, 8, 7)]
 CLOSED = date(2026, 8, 8)
+
+# daily_valuation 种子（本地建表 + 远端 fake 共用）：(code, trade_date, pe_ttm, pb)
+VAL = [
+    ("000001", date(2026, 8, 3), 5.0, 0.80),
+    ("000001", date(2026, 8, 4), 5.1, 0.81),
+    ("600519", date(2026, 8, 3), 30.0, 8.00),
+]
 
 # stock_basic 种子（同时用于本地建表 + 远端 fake）
 STOCKS = [
@@ -45,6 +52,8 @@ def db():
             code=s["code"], name=s["name"], market=s["market"], industry=s["industry"],
             list_date=date.fromisoformat(s["list_date"]) if s["list_date"] else None,
             status=s["status"], universe=s["universe"], data_scope=s["data_scope"]))
+    for i, (c, d, pe, pb) in enumerate(VAL):
+        session.add(DailyValuation(id=i + 1, code=c, trade_date=d, pe_ttm=pe, pb=pb))
     session.commit()
     return session
 
@@ -277,3 +286,119 @@ def test_stock_fallback_local_on_error(gate_on_stock, monkeypatch, db):
         "app.data_source.get_client",
         lambda: FakeStockClient(fail=DatahubError("down")))
     assert data_source.pool_codes(db) == ["000001", "600000", "600519"]
+
+
+# ---------- daily_valuation ----------
+
+class FakeValuationClient:
+    """按 codes/start/end 过滤固定估值行，按 fields 投影；latest_trade_date 返回固定值。"""
+
+    def __init__(self, rows=None, latest=None, fail=None):
+        self.rows = [dict(code=c, trade_date=d, pe_ttm=pe, pb=pb)
+                     for c, d, pe, pb in (rows if rows is not None else VAL)]
+        self.latest = latest
+        self.fail = fail
+        self.calls = []
+
+    def fetch(self, dataset_id, params=None):
+        self.calls.append((dataset_id, dict(params or {})))
+        if self.fail is not None:
+            raise self.fail
+        p = params or {}
+        if dataset_id == "latest_trade_date":
+            return [{"trade_date": self.latest.isoformat()}] if self.latest else []
+        if dataset_id == "dup_keys":
+            return []
+        want = [x.strip() for x in str(p.get("codes", "")).split(",") if x.strip()]
+        start = date.fromisoformat(p["start"]) if p.get("start") else None
+        end = date.fromisoformat(p["end"]) if p.get("end") else None
+        fields = [c.strip() for c in str(p.get("fields", "")).split(",") if c.strip()]
+        out = []
+        for r in self.rows:
+            td = r["trade_date"]
+            if want and r["code"] not in want:
+                continue
+            if (start and td < start) or (end and td > end):
+                continue
+            full = {"code": r["code"], "trade_date": td.isoformat(),
+                    "pe_ttm": r["pe_ttm"], "pb": r["pb"]}
+            out.append({k: full[k] for k in fields})
+        return out
+
+
+@pytest.fixture
+def gate_on_val(monkeypatch):
+    monkeypatch.setenv("DATAHUB_READ_DATASETS", "daily_valuation")
+    monkeypatch.setenv("DATAHUB_BASE_URL", "http://dh:8100")
+    monkeypatch.setenv("DATAHUB_TOKEN", "tok")
+
+
+def test_valuation_rows_local(db):
+    rows = data_source.valuation_rows(
+        db, ["000001"], date(2026, 8, 3), date(2026, 8, 4))
+    assert [(c, td) for c, td, _, _ in rows] == [
+        ("000001", date(2026, 8, 3)), ("000001", date(2026, 8, 4))]
+    assert float(rows[0][2]) == 5.0 and float(rows[0][3]) == 0.80
+
+
+def test_valuation_rows_remote(gate_on_val, monkeypatch):
+    fake = FakeValuationClient()
+    monkeypatch.setattr("app.data_source.get_client", lambda: fake)
+    rows = data_source.valuation_rows(
+        _BoomDB(), ["000001"], date(2026, 8, 3), date(2026, 8, 4))
+    assert rows == [("000001", date(2026, 8, 3), 5.0, 0.80),
+                    ("000001", date(2026, 8, 4), 5.1, 0.81)]
+    assert fake.calls[0][0] == "daily_valuation"
+    assert fake.calls[0][1]["fields"] == "code,trade_date,pe_ttm,pb"
+
+
+def test_valuation_rows_empty_codes_short_circuits(db, gate_on_val, monkeypatch):
+    monkeypatch.setattr("app.data_source.get_client",
+                        lambda: FakeValuationClient(fail=AssertionError("不应调用")))
+    assert data_source.valuation_rows(db, [], date(2026, 8, 3), date(2026, 8, 4)) == []
+
+
+def test_valuation_latest_local(db):
+    assert data_source.valuation_latest(db) == date(2026, 8, 4)
+
+
+def test_valuation_latest_remote(gate_on_val, monkeypatch):
+    monkeypatch.setattr("app.data_source.get_client",
+                        lambda: FakeValuationClient(latest=date(2026, 8, 4)))
+    assert data_source.valuation_latest(_BoomDB()) == date(2026, 8, 4)
+
+
+def test_valuation_latest_remote_empty(gate_on_val, monkeypatch):
+    monkeypatch.setattr("app.data_source.get_client", lambda: FakeValuationClient())
+    assert data_source.valuation_latest(_BoomDB()) is None
+
+
+def test_dup_keys_local_counts_groups(db):
+    assert data_source.dup_keys(db, "daily_valuation") == 0
+    db.add(DailyValuation(id=99, code="000001", trade_date=date(2026, 8, 3),
+                          pe_ttm=1.0, pb=1.0))
+    db.commit()
+    assert data_source.dup_keys(db, "daily_valuation") == 1
+
+
+def test_dup_keys_remote(gate_on_val, monkeypatch):
+    monkeypatch.setattr("app.data_source.get_client", lambda: FakeValuationClient())
+    assert data_source.dup_keys(_BoomDB(), "daily_valuation") == 0
+
+
+def test_valuation_fail_loud_without_fallback(gate_on_val, monkeypatch):
+    monkeypatch.setattr(
+        "app.data_source.get_client",
+        lambda: FakeValuationClient(fail=DatahubError("down")))
+    with pytest.raises(DatahubError):
+        data_source.valuation_rows(_BoomDB(), ["000001"],
+                                   date(2026, 8, 3), date(2026, 8, 4))
+
+
+def test_valuation_fallback_local_on_error(gate_on_val, monkeypatch, db):
+    monkeypatch.setenv("DATAHUB_FALLBACK_LOCAL", "1")
+    monkeypatch.setattr(
+        "app.data_source.get_client",
+        lambda: FakeValuationClient(fail=DatahubError("down")))
+    assert len(data_source.valuation_rows(db, ["000001"],
+                                          date(2026, 8, 3), date(2026, 8, 4))) == 2
