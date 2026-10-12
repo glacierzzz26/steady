@@ -380,6 +380,24 @@ func (r *StockRepository) GetPoolFinancial(codes []string) (map[string]*PoolFina
 	if len(codes) == 0 {
 		return out, nil
 	}
+	if r.ds != nil && r.ds.Enabled(datasource.DsFinancialIndicator) {
+		// last=1：每码最新一期（announce_date DESC, report_date DESC）；roe 空 → 滤除，
+		// 对齐原 SQL `rn=1 AND roe IS NOT NULL`（announce_date NOT NULL，原前置过滤为空操作）。
+		rows, err := r.ds.FinancialLast(context.Background(), codes, nil, 1)
+		if err == nil {
+			for _, rr := range rows {
+				if rr.ROE == 0 {
+					continue
+				}
+				roe := rr.ROE
+				out[rr.Code] = &PoolFinancial{Roe: &roe}
+			}
+			return out, nil
+		}
+		if !r.dsFallback(err) {
+			return nil, err
+		}
+	}
 	type row struct {
 		Code string
 		Roe  *float64

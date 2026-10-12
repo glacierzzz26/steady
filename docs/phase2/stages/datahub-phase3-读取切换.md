@@ -192,8 +192,47 @@ quant-engine（分支 `feature/datahub-read-switch`）：
   ——干净树 `count=1` 复现，与本次改动无关）。
 - 放行门（datahub 首灌 `daily_valuation` + 逐位对账零偏差）与停采 **待生产执行**。
 
+## financial_indicator 读切换（qe + backend，2026-10-12）
+
+第二个「qe + backend 同批切」的数据集（范式同 daily_valuation）。**闸门默认关 = 逐字回退本地**。
+
+**datahub 侧**：注册 raw 数据集 `financial_indicator`（`db` provider 读自有库；列
+`code,report_date,announce_date,pe,pb,roe,profit_growth,revenue_growth,debt_ratio,gross_margin`；
+params `codes` 逗号 IN / `as_of`(announce_date ≤) / `last`(每码最近 N 期，服务端
+`ROW_NUMBER OVER (PARTITION BY code ORDER BY announce_date DESC, report_date DESC)`) / `fields` 投影）。
+见 datahub 仓 PR。**注**：`announce_date` 为 `NOT NULL`（schema），故无 NULLS FIRST 风险，原
+「`announce_date IS NOT NULL` 前置过滤」为无操作，datahub 侧不需要 `announce_not_null` 参数。
+
+**qe 侧**（`quant-engine`）：
+- `app/data_source.py` 增：`financial_rows(db, codes, as_of, fields)`（闸门关本地 SQL 逐字、闸门开走
+  `financial_indicator`；远端按 `fields` 投影为**有序元组**，调用方 `for code,rd,ad,roe,debt` 几乎不改）、
+  `pool_latest_announce(db, codes)`（走 `financial_indicator {last:1,fields:code,announce_date}`；
+  闸门关 = `GROUP BY code MAX(announce_date)`）。
+- 切读点：`factor_service.load_factor_inputs`（财务段）、`factor_trial.load_range_inputs`（财务段）、
+  `backtest/replay.preload`（财务 as-of 段）、`data_quality._check_financial`（`pool_latest_announce`）；
+  各移除不再使用的 `FinancialIndicator` import（`data_quality._check_duplicates` 仍本地 `_dup_count`，
+  故该文件保留 `FinancialIndicator` import）。
+- 测试：`tests/test_data_source.py` 增财务用例（rows 投影/空码短路/`as_of` 透传/latest announce 命中与空/
+  失败即抛/回退）；**全量 `pytest` 212 passed**。
+
+**backend（Go）侧**：
+- `internal/datasource` 增 accessor `FinancialLast(ctx, codes, asOf, n)`（`financial_indicator` params
+  `codes`/`as_of`/`last`；服务端每码最近 N 期、按 `report_date ASC` 返回）——Tier2 聚合变**有界批量**。
+- `FinancialRepository` 加 `ds *datasource.Source` + 变参构造 `NewFinancialRepository(db, ds...)`：
+  `GetByCode` prologue → `FinancialByCodes([]string{code})`（datahub 升序 → Go 侧按 `report_date DESC`
+  排序 + `limit` 截断，复现本地 `ORDER BY report_date DESC LIMIT n`）、`GetLatestByAnnounce` prologue →
+  `FinancialLast([]string{code},nil,1)`（`last=1` → 每码恰一行即最新；无行 → nil）。
+- `StockRepository.GetPoolFinancial` prologue → `FinancialLast(codes,nil,1)`，`roe==0` 滤除
+  （datahub NULL 经 wire DTO 归 0，对齐原 SQL `rn=1 AND roe IS NOT NULL`）。
+- 接线：`SetupRouter` 注入 `financialRepo` 的 `ds`；`NewFinancialRepository` 变参保其余调用点零改动。
+- 测试：新增 `internal/repository/financial_ds_test.go`（httptest 假 datahub，`db=nil` ⇒ 走 ds 不触库）：
+  `GetByCode`（`report_date DESC` 排序 + limit + 不下发 `last`）、`GetLatestByAnnounce`（`last=1` 取最新
+  announce 一期 + 未命中 nil）、`GetPoolFinancial`（`last=1`/roe 空滤除）、「datahub 500 ⇒ 失败即抛」。
+  **`go test ./...` 全绿**。
+- 放行门（datahub 首灌 `financial_indicator` + 逐位对账零偏差）与停采 **待生产执行**。
+
 ## 遗留
 
-- backend（Go）读切换 `stock_basic` 与 `daily_valuation` 已落地；`index/finance/daily` 待续。
+- backend（Go）读切换 `stock_basic`、`daily_valuation`、`financial_indicator` 已落地；`daily_price`（含 index）待续。
 - collector 读切换（随 collector 退役）。
 - 过渡期告警断链（datahub 写自有库 `task_run` → steady `notify_scheduler` 不读，暂看 datahub-collector `/healthz`）仍待解。

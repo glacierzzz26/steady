@@ -22,7 +22,7 @@ func SetupRouter(db *gorm.DB, ds *datasource.Source, tradingSvc *service.Trading
 
 	stockRepo := repository.NewStockRepository(db, ds)
 	dailyRepo := repository.NewDailyRepository(db, ds)
-	financialRepo := repository.NewFinancialRepository(db)
+	financialRepo := repository.NewFinancialRepository(db, ds)
 	accountRepo := repository.NewAccountRepository(db)
 	orderRepo := repository.NewOrderRepository(db)
 	signalRepo := repository.NewSignalRepository(db, ds)

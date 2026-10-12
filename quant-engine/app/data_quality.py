@@ -285,10 +285,7 @@ def _check_financial(db, td: date) -> dict:
     if not pool:
         return {"name": "financial", "level": "warn",
                 "message": "财务　股票池为空", "metrics": {}}
-    latest_ann = dict(db.execute(
-        select(FinancialIndicator.code, func.max(FinancialIndicator.announce_date))
-        .group_by(FinancialIndicator.code)
-    ).all())
+    latest_ann = data_source.pool_latest_announce(db)
     covered, stale = [], []
     for code, list_date in pool:
         if list_date and list_date > new_cutoff:

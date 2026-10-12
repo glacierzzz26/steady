@@ -19,7 +19,7 @@ from app.db import upsert
 from app.factors.financial import debt_by_announce, roe_by_announce
 from app.factors.trend import macd_signal, ma_trend, winsorize
 from app.factors.value import pb_value, pe_value
-from app.models.tables import DailyPrice, FinancialIndicator, FactorValue
+from app.models.tables import DailyPrice, FactorValue
 
 logger = logging.getLogger(__name__)
 
@@ -74,13 +74,7 @@ def load_factor_inputs(db, codes: list[str], trade_date: date) -> dict[str, dict
              "pb": float(pb) if pb is not None else None})
 
     # 3. 财务（公告日 <= 当日；回填后约 800×20 期，内存可承受）
-    fin_rows = db.execute(
-        select(FinancialIndicator.code, FinancialIndicator.report_date,
-               FinancialIndicator.announce_date, FinancialIndicator.roe,
-               FinancialIndicator.debt_ratio)
-        .where(FinancialIndicator.code.in_(codes),
-               FinancialIndicator.announce_date <= trade_date)
-    ).all()
+    fin_rows = data_source.financial_rows(db, codes, as_of=trade_date)
     financials: dict[str, list] = {}
     for code, rd, ad, roe, debt in fin_rows:
         financials.setdefault(code, []).append(
