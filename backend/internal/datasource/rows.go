@@ -38,6 +38,11 @@ type dailyPriceRow struct {
 	TurnoverRate *float64     `json:"turnover_rate"`
 }
 
+// latestTradeDateRow：`latest_trade_date` 数据集单列（MAX(trade_date)）。
+type latestTradeDateRow struct {
+	TradeDate datahub.Date `json:"trade_date"`
+}
+
 type valuationRow struct {
 	Code      string       `json:"code"`
 	TradeDate datahub.Date `json:"trade_date"`

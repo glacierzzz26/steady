@@ -135,6 +135,37 @@ DATAHUB_FALLBACK_LOCAL=0        # 故障回退本地（默认 0=失败即抛）
 
 ---
 
+## 2e. 第五个增量：daily_price 读切换（qe + backend，2026-10-12）
+
+第三个「qe + backend **同批**切」的数据集，**读点最多、最高风险**（前复权因子/回测/指数条）。
+**闸门默认关 = 逐字回退本地**。**index 不建独立数据集**：指数行情物理存在 `daily_price`
+（code=`sh000300` 等），随本集一并切——qe 基准序列（`performance._bench_series`）、backend 指数条
+（`DailyRepository.GetIndexQuotes`）都读它。§2.2 曾设想的 `index_quotes` 派生集**不做**。
+
+- **datahub 侧**：注册 raw 数据集 `daily_price`（`db` provider 读自有库；列
+  `code,trade_date,open,high,low,close,volume,amount,adj_factor,turnover_rate`；params
+  `codes`/`start`/`end`/`date`(精确，覆盖 start/end)/`asof`(trade_date ≤)/`last`(每码最近 N 行，
+  服务端 `ROW_NUMBER OVER (PARTITION BY code ORDER BY trade_date DESC)`)/`fields`/`adj_not_null`）；
+  配套小数据集 `latest_trade_date`（params `table`/`exclude_index`，列 `trade_date`）。见 datahub 仓 PR。
+- **qe 侧**：`data_source.py` 增 `latest_trade_date(db)`（`exclude_index:true`，对齐本地
+  `code NOT LIKE 'sh%'`）、`price_rows(db, codes, start, end, fields)`、`price_day(db, codes, d, fields)`、
+  `price_latest(db, code, fields)`、`market_ready(db, td)`；切 `factor_service`/`factor_trial`/
+  `factor_research` 的行情读点、`performance.{_adj_series,_bench_series,compute_attribution}`、
+  `backtest/replay.preload`、`tasks`/`morning_brief`/`notify_scheduler`/`cli` 的最新交易日、
+  `data_quality.{_market_latest,_check_coverage(with_bar),_check_benchmark,_check_duplicates}`。
+  **有意保留本地**：`data_quality._check_missing_days`、`_check_price_anomalies`、`_check_coverage`
+  的上一交易日（prev）推导（需「上一开市日」谓词，datahub 无对应原语）、`backtest/engine` 逐 (code,date)
+  循环（Tier3）。
+- **backend 侧**：`internal/datasource` 增 `DailyLatest(codes,n,asof)`（`last` 有界窗）、
+  `LatestFactor(code)`、`LatestTradeDate(excludeIndex)`；Tier1 切
+  `DailyRepository.{GetRange,GetLatest,GetLatestTradeDate,GetLatestFactor}`；Tier2「有界窗 + Go 归约」切
+  `GetIndexQuotes`(n=2)、`GetPoolMarket`(n=2)、`GetSignalChg20`(n=21,asof)；`NewDailyRepository`/
+  `NewStockRepository`/`NewSignalRepository` 改变参可选，`SetupRouter`/`main.go`/`trading.go` 注入
+  （tx-scoped 不传）；`GetByDate`/`GetPrevClose` 保持本地。
+- 详见阶段文档 [`../stages/datahub-phase3-读取切换.md`](../stages/datahub-phase3-读取切换.md)「daily_price 读切换」节。
+
+---
+
 ## 3. 失败模式（决策）
 
 **失败即抛（不静默回退本地）**：datahub 权威、本地是待退役副本；静默回退会掩盖故障。调用方已有
@@ -179,4 +210,4 @@ backend 也读同一批本地表（`internal/repository/*.go`），是「停采�
   - **Tier3** tx 内 + trading 逐码循环（`GetPrevClose/GetByDate` 在每码循环里）→ **先保本地**（传 nil），待「批量原语」重构后再切。
   - 计算表（`factor_value/strategy_signal/strategy/factor_definition`）**不切**。
 
-**现状（2026-10-12）**：Increment 0（基建：config + `internal/datahub` + `internal/datasource` + 测试）已落地，**默认全关、零行为变更**。**`stock_basic` repo 接线已落地（Tier1）**：`StockRepository` 五读点（`GetList`/`GetByCode`/`Exists`/`GetNames`/`GetIndustries`）加 prologue，`internal/datasource` 增 `StockBasicList`（列表）与既有 `StockBasicByCode(s)`；`SetupRouter`/`NewTradingService` 注入 `ds`；`go test ./...` 全绿。**`daily_valuation` repo 接线已落地（Tier1/2）**：`internal/datasource` 增 `ValuationLast(codes,n,asof)`（`last` 有界窗）；`DailyRepository.GetLatestValuation`、`SignalRepository.GetSignalPe`（`asof`+`last=1`）、`StockRepository.GetPoolValuation`（`last=1`+null 过滤）加 prologue；`NewDailyRepository`/`NewSignalRepository` 改变参可选，`SetupRouter`/`main.go`/`NewTradingService` 注入（tx-scoped 不传）。**`financial_indicator` repo 接线已落地（Tier1/2）**：`internal/datasource` 增 `FinancialLast(codes,asOf,n)`；`FinancialRepository.GetByCode`（`report_date DESC` 排序/limit）、`GetLatestByAnnounce`（`last=1`）、`StockRepository.GetPoolFinancial`（`last=1`+roe 空过滤）加 prologue；`NewFinancialRepository` 改变参可选，`SetupRouter` 注入。其余数据集（`daily_price`，含 index）的 accessor 与 repo 方法切换随各自增量推进。
+**现状（2026-10-12）**：Increment 0（基建：config + `internal/datahub` + `internal/datasource` + 测试）已落地，**默认全关、零行为变更**。**`stock_basic` repo 接线已落地（Tier1）**：`StockRepository` 五读点（`GetList`/`GetByCode`/`Exists`/`GetNames`/`GetIndustries`）加 prologue，`internal/datasource` 增 `StockBasicList`（列表）与既有 `StockBasicByCode(s)`；`SetupRouter`/`NewTradingService` 注入 `ds`；`go test ./...` 全绿。**`daily_valuation` repo 接线已落地（Tier1/2）**：`internal/datasource` 增 `ValuationLast(codes,n,asof)`（`last` 有界窗）；`DailyRepository.GetLatestValuation`、`SignalRepository.GetSignalPe`（`asof`+`last=1`）、`StockRepository.GetPoolValuation`（`last=1`+null 过滤）加 prologue；`NewDailyRepository`/`NewSignalRepository` 改变参可选，`SetupRouter`/`main.go`/`NewTradingService` 注入（tx-scoped 不传）。**`financial_indicator` repo 接线已落地（Tier1/2）**：`internal/datasource` 增 `FinancialLast(codes,asOf,n)`；`FinancialRepository.GetByCode`（`report_date DESC` 排序/limit）、`GetLatestByAnnounce`（`last=1`）、`StockRepository.GetPoolFinancial`（`last=1`+roe 空过滤）加 prologue；`NewFinancialRepository` 改变参可选，`SetupRouter` 注入。**`daily_price` repo 接线已落地（Tier1/2，含 index）**：`internal/datasource` 增 `DailyLatest(codes,n,asof)`（`last` 有界窗）/`LatestFactor`/`LatestTradeDate`；`DailyRepository.{GetRange,GetLatest,GetLatestTradeDate,GetLatestFactor}`（Tier1）、`GetIndexQuotes`(n=2)、`StockRepository.GetPoolMarket`(n=2)、`SignalRepository.GetSignalChg20`(n=21,asof)（Tier2「有界窗+Go 归约」）加 prologue；`NewDailyRepository`/`NewStockRepository`/`NewSignalRepository` 改变参可选，`SetupRouter`/`main.go`/`NewTradingService` 注入（tx-scoped 不传）；`GetByDate`/`GetPrevClose`（Tier3）保持本地。**qe + backend 四集（stock_basic/daily_valuation/financial_indicator/daily_price）读切换代码已全部落地，默认全关、零行为变更**；四集 datahub 首灌 + 对账 + 停采集待生产执行。

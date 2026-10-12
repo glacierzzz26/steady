@@ -433,6 +433,34 @@ func (r *SignalRepository) GetSignalChg20(codes []string, date time.Time) (map[s
 	if len(codes) == 0 {
 		return map[string]float64{}, nil
 	}
+	if r.ds != nil && r.ds.Enabled(datasource.DsDailyPrice) {
+		// asof=date + last=21：每码 trade_date ≤ date 的最近 21 行（升序）。需满 21 行方可
+		// 计算（对齐原 SQL JOIN rn=21：不足 21 行的 code 无行）。qfq = close × COALESCE(adj,1)。
+		bars, err := r.ds.DailyLatest(context.Background(), codes, 21, &date)
+		if err == nil {
+			byCode := make(map[string][]model.DailyPrice, len(bars))
+			for _, rr := range bars {
+				byCode[rr.Code] = append(byCode[rr.Code], rr)
+			}
+			out := make(map[string]float64, len(byCode))
+			for code, bs := range byCode {
+				if len(bs) < 21 {
+					continue
+				}
+				cur := bs[len(bs)-1]
+				past := bs[len(bs)-21]
+				cq := cur.Close * adjOrOne(cur.AdjFactor)
+				pq := past.Close * adjOrOne(past.AdjFactor)
+				if pq > 0 {
+					out[code] = (cq/pq - 1) * 100
+				}
+			}
+			return out, nil
+		}
+		if !r.dsFallback(err) {
+			return nil, err
+		}
+	}
 	type row struct {
 		Code  string
 		Chg20 float64

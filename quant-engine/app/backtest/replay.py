@@ -23,14 +23,12 @@ from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import select
 
 from app import data_source
 from app.factor_service import FACTOR_DIRECTION, normalize_cross_section, \
     score_cross_section
 from app.factors.financial import latest_by_announce
 from app.factors.trend import macd_signal, ma_trend
-from app.models.tables import DailyPrice
 from app.strategies.base import Signal
 from app.strategies.multi_factor import ALL_FACTORS, rotation_action
 
@@ -100,13 +98,9 @@ class ReplayStrategy:
             raise RuntimeError("股票池或交易日为空，无法回测")
 
         price_start = start - timedelta(days=PRICE_WARMUP_DAYS)
-        price_rows = self.db.execute(
-            select(DailyPrice.code, DailyPrice.trade_date, DailyPrice.close,
-                   DailyPrice.adj_factor, DailyPrice.open)
-            .where(DailyPrice.code.in_(self.pool),
-                   DailyPrice.trade_date >= price_start,
-                   DailyPrice.trade_date <= end)
-            .order_by(DailyPrice.code, DailyPrice.trade_date)).all()
+        price_rows = data_source.price_rows(
+            self.db, self.pool, price_start, end,
+            ("code", "trade_date", "close", "adj_factor", "open"))
         closes: dict[str, list] = {}
         opens: dict[str, list] = {}
         anchors: dict[str, float] = {}

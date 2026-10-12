@@ -11,12 +11,20 @@ from sqlalchemy.pool import StaticPool
 
 from app import config, data_source
 from app.datahub_client import DatahubError
-from app.models.tables import Base, DailyValuation, FinancialIndicator, \
+from app.models.tables import Base, DailyPrice, DailyValuation, FinancialIndicator, \
     StockBasic, TradeCalendar
 
 OPEN = [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5),
         date(2026, 8, 6), date(2026, 8, 7)]
 CLOSED = date(2026, 8, 8)
+
+# daily_price 种子（本地 + 远端 fake 共用）：(code, trade_date, close, adj_factor, open)
+PRICE = [
+    ("000001", date(2026, 8, 3), 10.0, 1.0, 9.9),
+    ("000001", date(2026, 8, 4), 10.2, 1.0, 10.1),
+    ("600000", date(2026, 8, 3), 8.0, 1.0, 7.9),
+    ("600519", date(2026, 8, 3), 1500.0, 2.0, 1490.0),
+]
 
 # daily_valuation 种子（本地建表 + 远端 fake 共用）：(code, trade_date, pe_ttm, pb)
 VAL = [
@@ -63,6 +71,9 @@ def db():
             status=s["status"], universe=s["universe"], data_scope=s["data_scope"]))
     for i, (c, d, pe, pb) in enumerate(VAL):
         session.add(DailyValuation(id=i + 1, code=c, trade_date=d, pe_ttm=pe, pb=pb))
+    for i, (c, d, close, adj, op) in enumerate(PRICE):
+        session.add(DailyPrice(id=i + 1, code=c, trade_date=d, close=close,
+                               adj_factor=adj, open=op))
     for i, (c, rd, ad, roe, debt) in enumerate(FIN):
         session.add(FinancialIndicator(id=i + 1, code=c, report_date=rd,
                                        announce_date=ad, roe=roe, debt_ratio=debt))
@@ -518,3 +529,169 @@ def test_financial_fallback_local_on_error(gate_on_fin, monkeypatch, db):
         lambda: FakeFinancialClient(fail=DatahubError("down")))
     assert len(data_source.financial_rows(db, ["000001"],
                                           as_of=date(2026, 7, 25))) == 2
+
+
+# ---------- daily_price ----------
+
+class FakePriceClient:
+    """按 codes/start/end/date/last/fields 过滤固定行情行；另管 latest_trade_date/
+    market_ready/dup_keys 三小数据集。列序按 fields 投影。"""
+
+    def __init__(self, rows=None, latest=None, ready=True, fail=None):
+        self.rows = [dict(code=c, trade_date=d, close=close, adj_factor=adj, open=op)
+                     for c, d, close, adj, op in (rows if rows is not None else PRICE)]
+        self.latest = latest
+        self.ready = ready
+        self.fail = fail
+        self.calls = []
+
+    def fetch(self, dataset_id, params=None):
+        self.calls.append((dataset_id, dict(params or {})))
+        if self.fail is not None:
+            raise self.fail
+        p = params or {}
+        if dataset_id == "latest_trade_date":
+            return [{"trade_date": self.latest.isoformat()}] if self.latest else []
+        if dataset_id == "market_ready":
+            return [{"ready": self.ready, "covered": 3, "total": 3}]
+        if dataset_id == "dup_keys":
+            return []
+        want = [x.strip() for x in str(p.get("codes", "")).split(",") if x.strip()]
+        start = date.fromisoformat(p["start"]) if p.get("start") else None
+        end = date.fromisoformat(p["end"]) if p.get("end") else None
+        exact = date.fromisoformat(p["date"]) if p.get("date") else None
+        last = int(p["last"]) if p.get("last") else None
+        fields = [c.strip() for c in str(p.get("fields", "")).split(",") if c.strip()]
+        out = [r for r in self.rows if not want or r["code"] in want]
+        if exact is not None:
+            out = [r for r in out if r["trade_date"] == exact]
+        else:
+            out = [r for r in out
+                   if (start is None or r["trade_date"] >= start)
+                   and (end is None or r["trade_date"] <= end)]
+        out.sort(key=lambda r: (r["code"], r["trade_date"]))
+        if last:
+            per: dict[str, list] = {}
+            for r in out:
+                per.setdefault(r["code"], []).append(r)
+            out = []
+            for code in sorted(per):
+                top = sorted(per[code], key=lambda r: r["trade_date"], reverse=True)[:last]
+                out.extend(sorted(top, key=lambda r: r["trade_date"]))
+        full_cols = {"code", "trade_date", "close", "adj_factor", "open"}
+        return [{k: (r[k].isoformat() if k == "trade_date" else r[k])
+                 for k in fields if k in full_cols} for r in out]
+
+
+@pytest.fixture
+def gate_on_price(monkeypatch):
+    monkeypatch.setenv("DATAHUB_READ_DATASETS", "daily_price")
+    monkeypatch.setenv("DATAHUB_BASE_URL", "http://dh:8100")
+    monkeypatch.setenv("DATAHUB_TOKEN", "tok")
+
+
+def test_price_rows_local(db):
+    rows = data_source.price_rows(
+        db, ["000001"], date(2026, 8, 3), date(2026, 8, 4))
+    assert [(c, td) for c, td, _, _ in rows] == [
+        ("000001", date(2026, 8, 3)), ("000001", date(2026, 8, 4))]
+    assert float(rows[0][2]) == 10.0 and float(rows[0][3]) == 1.0
+
+
+def test_price_rows_remote(gate_on_price, monkeypatch):
+    fake = FakePriceClient()
+    monkeypatch.setattr("app.data_source.get_client", lambda: fake)
+    rows = data_source.price_rows(
+        _BoomDB(), ["000001"], date(2026, 8, 3), date(2026, 8, 4),
+        ("code", "trade_date", "close", "adj_factor"))
+    assert rows == [("000001", date(2026, 8, 3), 10.0, 1.0),
+                    ("000001", date(2026, 8, 4), 10.2, 1.0)]
+    assert fake.calls[0][0] == "daily_price"
+    assert fake.calls[0][1]["fields"] == "code,trade_date,close,adj_factor"
+
+
+def test_price_rows_empty_codes_short_circuits(db, gate_on_price, monkeypatch):
+    monkeypatch.setattr("app.data_source.get_client",
+                        lambda: FakePriceClient(fail=AssertionError("不应调用")))
+    assert data_source.price_rows(db, [], date(2026, 8, 3), date(2026, 8, 4)) == []
+
+
+def test_price_day_local(db):
+    rows = data_source.price_day(db, ["600519", "600000"], date(2026, 8, 3),
+                                 ("code", "close"))
+    assert sorted((c, float(v)) for c, v in rows) == [("600000", 8.0), ("600519", 1500.0)]
+
+
+def test_price_day_remote(gate_on_price, monkeypatch):
+    fake = FakePriceClient()
+    monkeypatch.setattr("app.data_source.get_client", lambda: fake)
+    rows = data_source.price_day(_BoomDB(), ["600519"], date(2026, 8, 3), ("code",))
+    assert rows == [("600519",)]
+    assert fake.calls[0][1]["date"] == "2026-08-03"
+
+
+def test_price_latest_local(db):
+    row = data_source.price_latest(db, "000001", ("code", "trade_date", "close"))
+    assert (row[0], row[1]) == ("000001", date(2026, 8, 4))
+    assert float(row[2]) == 10.2
+
+
+def test_price_latest_remote(gate_on_price, monkeypatch):
+    fake = FakePriceClient()
+    monkeypatch.setattr("app.data_source.get_client", lambda: fake)
+    row = data_source.price_latest(_BoomDB(), "000001", ("code", "trade_date", "close"))
+    assert row == ("000001", date(2026, 8, 4), 10.2)
+    assert fake.calls[0][1]["last"] == "1"
+
+
+def test_latest_trade_date_local_algo(db):
+    assert data_source.latest_trade_date(db) == date(2026, 8, 4)
+
+
+def test_latest_trade_date_remote(gate_on_price, monkeypatch):
+    fake = FakePriceClient(latest=date(2026, 8, 4))
+    monkeypatch.setattr("app.data_source.get_client", lambda: fake)
+    assert data_source.latest_trade_date(_BoomDB()) == date(2026, 8, 4)
+    assert fake.calls[0][0] == "latest_trade_date"
+    assert fake.calls[0][1]["exclude_index"] == "true"
+
+
+def test_latest_trade_date_remote_empty(gate_on_price, monkeypatch):
+    monkeypatch.setattr("app.data_source.get_client", lambda: FakePriceClient())
+    assert data_source.latest_trade_date(_BoomDB()) is None
+
+
+def test_market_ready_local(db):
+    assert data_source.market_ready(db, date(2026, 8, 3)) is True   # 3/3 池覆盖
+    assert data_source.market_ready(db, date(2026, 8, 4)) is False  # 1/3
+
+
+def test_market_ready_remote(gate_on_price, monkeypatch):
+    fake = FakePriceClient(ready=True)
+    monkeypatch.setattr("app.data_source.get_client", lambda: fake)
+    assert data_source.market_ready(_BoomDB(), date(2026, 8, 3)) is True
+    assert fake.calls[0][0] == "market_ready"
+    assert fake.calls[0][1]["date"] == "2026-08-03"
+
+
+def test_price_dup_keys_remote(gate_on_price, monkeypatch):
+    monkeypatch.setattr("app.data_source.get_client", lambda: FakePriceClient())
+    assert data_source.dup_keys(_BoomDB(), "daily_price") == 0
+
+
+def test_price_fail_loud_without_fallback(gate_on_price, monkeypatch):
+    monkeypatch.setattr(
+        "app.data_source.get_client",
+        lambda: FakePriceClient(fail=DatahubError("down")))
+    with pytest.raises(DatahubError):
+        data_source.price_rows(_BoomDB(), ["000001"], date(2026, 8, 3), date(2026, 8, 4))
+
+
+def test_price_fallback_local_on_error(gate_on_price, monkeypatch, db):
+    monkeypatch.setenv("DATAHUB_FALLBACK_LOCAL", "1")
+    monkeypatch.setattr(
+        "app.data_source.get_client",
+        lambda: FakePriceClient(fail=DatahubError("down")))
+    assert len(data_source.price_rows(db, ["000001"],
+                                      date(2026, 8, 3), date(2026, 8, 4))) == 2
+
