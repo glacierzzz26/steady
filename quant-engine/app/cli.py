@@ -25,15 +25,10 @@ logger = logging.getLogger("cli")
 
 
 def _default_trade_date(db) -> date | None:
-    """最近一个已有行情数据的交易日（与定时任务同口径）"""
-    from sqlalchemy import func, select
+    """最近一个已有行情数据的交易日（与定时任务同口径）—— Phase 3 按闸门走 datahub。"""
+    from app import data_source
 
-    from app.models.tables import DailyPrice
-
-    return db.execute(
-        select(func.max(DailyPrice.trade_date))
-        .where(DailyPrice.code.not_like("sh%"))
-    ).scalar()
+    return data_source.latest_trade_date(db)
 
 
 def cmd_factors(args) -> bool:

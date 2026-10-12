@@ -63,11 +63,8 @@ def _board_limit(code: str) -> float:
 
 
 def _market_latest(db) -> date | None:
-    """最新有行情的交易日（跳过指数伪股票 sh*）"""
-    return db.execute(
-        select(func.max(DailyPrice.trade_date))
-        .where(DailyPrice.code.not_like("sh%"))
-    ).scalar()
+    """最新有行情的交易日（跳过指数伪股票 sh*）—— Phase 3：按闸门走 datahub"""
+    return data_source.latest_trade_date(db)
 
 
 # ---------- 单项检查 ----------
@@ -92,10 +89,7 @@ def _check_coverage(db, td: date) -> dict:
     if not pool:
         return {"name": "coverage", "level": "warn",
                 "message": "行情覆盖　股票池为空", "metrics": {"pool": 0}}
-    with_bar = db.execute(
-        select(DailyPrice.code).distinct().where(
-            DailyPrice.trade_date == td, DailyPrice.code.in_(pool))
-    ).scalars().all()
+    with_bar = {c for (c,) in data_source.price_day(db, pool, td, ("code",))}
     ratio = len(with_bar) / len(pool)
     level = "ok" if ratio >= COVERAGE_MIN else "fail"
     msg = f"行情覆盖　{len(with_bar)}/{len(pool)} 股票有行情（{ratio * 100:.1f}%）"
@@ -175,8 +169,7 @@ def _dup_count(db, model, *cols) -> int:
 def _check_duplicates(db, td: date) -> dict:
     names = ("daily_price", "daily_valuation", "financial_indicator", "factor_value")
     broken = {
-        "daily_price": _dup_count(
-            db, DailyPrice, DailyPrice.code, DailyPrice.trade_date),
+        "daily_price": data_source.dup_keys(db, "daily_price"),
         "daily_valuation": data_source.dup_keys(db, "daily_valuation"),
         "financial_indicator": _dup_count(
             db, FinancialIndicator, FinancialIndicator.code,
@@ -313,9 +306,8 @@ def _check_benchmark(db, td: date) -> dict:
     if p_latest is None:
         return {"name": "benchmark", "level": "warn",
                 "message": "指数基准　无行情数据", "metrics": {}}
-    i_latest = db.execute(
-        select(func.max(DailyPrice.trade_date)).where(DailyPrice.code == "sh000300")
-    ).scalar()
+    i_rows = data_source.price_latest(db, "sh000300", ("trade_date",))
+    i_latest = i_rows[0] if i_rows else None
     if i_latest is None:
         return {"name": "benchmark", "level": "fail",
                 "message": f"指数基准　沪深300 无数据（行情已到 {p_latest}）",

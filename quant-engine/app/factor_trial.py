@@ -31,7 +31,7 @@ from app.factor_research import (HORIZONS, PRICE_TAIL_DAYS, QUANTILE_H,
 from app.factor_service import (FACTOR_DIRECTION, PRICE_WINDOW_DAYS,
                                 factor_raw_value, normalize_cross_section,
                                 parametrized_params, pool_codes)
-from app.models.tables import DailyPrice, FactorTrial
+from app.models.tables import FactorTrial
 
 logger = logging.getLogger(__name__)
 
@@ -66,14 +66,9 @@ def load_range_inputs(db, start: date, end: date) -> dict:
     price_start = start - timedelta(days=PRICE_WINDOW_DAYS)
     price_end = end + timedelta(days=PRICE_TAIL_DAYS)
 
-    price_rows = db.execute(
-        select(DailyPrice.code, DailyPrice.trade_date, DailyPrice.close,
-               DailyPrice.adj_factor)
-        .where(DailyPrice.code.in_(codes),
-               DailyPrice.trade_date >= price_start,
-               DailyPrice.trade_date <= price_end)
-        .order_by(DailyPrice.code, DailyPrice.trade_date)
-    ).all()
+    price_rows = data_source.price_rows(
+        db, codes, price_start, price_end,
+        ("code", "trade_date", "close", "adj_factor"))
     per_code: dict[str, dict] = {}
     pivot: dict[date, dict] = {}
     for code, td, close, adj in price_rows:

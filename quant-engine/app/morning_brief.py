@@ -29,7 +29,6 @@ from app import data_source
 from app.db import get_session, upsert
 from app.models.tables import (
     AccountNav,
-    DailyPrice,
     MarketHotspot,
     MorningBrief,
     Position,
@@ -49,10 +48,9 @@ CHECKLIST = [
 
 
 def _latest_trade_date(db) -> date | None:
-    """最近一个已有行情数据的交易日（跳过指数伪股票），语义与 app.tasks 一致"""
-    return db.execute(
-        select(func.max(DailyPrice.trade_date)).where(DailyPrice.code.not_like("sh%"))
-    ).scalar()
+    """最近一个已有行情数据的交易日（跳过指数伪股票），语义与 app.tasks 一致
+    —— Phase 3 按闸门走 datahub。"""
+    return data_source.latest_trade_date(db)
 
 
 def _is_open(db, d: date) -> bool:

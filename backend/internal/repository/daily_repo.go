@@ -48,6 +48,15 @@ func (r *DailyRepository) dsFallback(dataset string, err error) bool {
 
 // GetRange 区间行情，start/end 为 nil 时不过滤，按 trade_date 升序
 func (r *DailyRepository) GetRange(code string, start, end *time.Time) ([]model.DailyPrice, error) {
+	if r.useDS(datasource.DsDailyPrice) {
+		bars, err := r.ds.DailyRange(context.Background(), []string{code}, start, end)
+		if err == nil {
+			return bars, nil
+		}
+		if !r.dsFallback(datasource.DsDailyPrice, err) {
+			return nil, err
+		}
+	}
 	var bars []model.DailyPrice
 	q := r.db.Where("code = ?", code)
 	if start != nil {
@@ -62,6 +71,19 @@ func (r *DailyRepository) GetRange(code string, start, end *time.Time) ([]model.
 
 // GetLatest 最近一个交易日的行情，无数据返回 (nil, nil)
 func (r *DailyRepository) GetLatest(code string) (*model.DailyPrice, error) {
+	if r.useDS(datasource.DsDailyPrice) {
+		rows, err := r.ds.DailyLatest(context.Background(), []string{code}, 1, nil)
+		if err == nil {
+			if len(rows) == 0 {
+				return nil, nil
+			}
+			b := rows[len(rows)-1] // last=1 → 每码恰一行（升序末行即最新）
+			return &b, nil
+		}
+		if !r.dsFallback(datasource.DsDailyPrice, err) {
+			return nil, err
+		}
+	}
 	var bar model.DailyPrice
 	err := r.db.Where("code = ?", code).Order("trade_date DESC").First(&bar).Error
 	if err == gorm.ErrRecordNotFound {
@@ -130,6 +152,15 @@ func (r *DailyRepository) GetPrevClose(code string, tradeDate time.Time) (float6
 
 // GetLatestTradeDate 全市场最近交易日（自动下单日期基准）；无数据返回 (nil, nil)
 func (r *DailyRepository) GetLatestTradeDate() (*time.Time, error) {
+	if r.useDS(datasource.DsDailyPrice) {
+		td, err := r.ds.LatestTradeDate(context.Background(), false) // 不过滤指数行（对齐本地口径）
+		if err == nil {
+			return td, nil
+		}
+		if !r.dsFallback(datasource.DsDailyPrice, err) {
+			return nil, err
+		}
+	}
 	var bar model.DailyPrice
 	err := r.db.Order("trade_date DESC").First(&bar).Error
 	if err == gorm.ErrRecordNotFound {
@@ -143,6 +174,15 @@ func (r *DailyRepository) GetLatestTradeDate() (*time.Time, error) {
 
 // GetLatestFactor 该股全量最新非空复权因子（前复权锚点，跨查询区间），无数据返回 (0, false, nil)
 func (r *DailyRepository) GetLatestFactor(code string) (float64, bool, error) {
+	if r.useDS(datasource.DsDailyPrice) {
+		v, ok, err := r.ds.LatestFactor(context.Background(), code)
+		if err == nil {
+			return v, ok, nil
+		}
+		if !r.dsFallback(datasource.DsDailyPrice, err) {
+			return 0, false, err
+		}
+	}
 	var bar model.DailyPrice
 	err := r.db.Select("adj_factor").
 		Where("code = ? AND adj_factor IS NOT NULL", code).
@@ -163,6 +203,15 @@ func (r *DailyRepository) GetIndexQuotes(codes []string) ([]model.DailyPrice, er
 	if len(codes) == 0 {
 		return nil, nil
 	}
+	if r.useDS(datasource.DsDailyPrice) {
+		bars, err := r.ds.DailyLatest(context.Background(), codes, 2, nil)
+		if err == nil {
+			return bars, nil
+		}
+		if !r.dsFallback(datasource.DsDailyPrice, err) {
+			return nil, err
+		}
+	}
 	var bars []model.DailyPrice
 	err := r.db.Raw(`
 		SELECT t.code, t.trade_date, t.open, t.high, t.low, t.close, t.volume, t.amount, t.adj_factor
@@ -174,4 +223,13 @@ func (r *DailyRepository) GetIndexQuotes(codes []string) ([]model.DailyPrice, er
 		WHERE t.rn <= 2
 		ORDER BY t.code ASC, t.trade_date ASC`, codes).Scan(&bars).Error
 	return bars, err
+}
+
+// adjOrOne 复权因子缺省：NULL（wire→0）→ 1（对齐 SQL COALESCE(adj_factor, 1)）。
+// adj_factor 真实数据恒 > 0，故「==0」安全充当「空」判定。
+func adjOrOne(f float64) float64 {
+	if f == 0 {
+		return 1
+	}
+	return f
 }

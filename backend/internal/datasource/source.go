@@ -26,6 +26,8 @@ const (
 	DsDailyPrice         = "daily_price"
 	DsDailyValuation     = "daily_valuation"
 	DsFinancialIndicator = "financial_indicator"
+	DsLatestTradeDate    = "latest_trade_date"
+	DsMarketReady        = "market_ready"
 )
 
 // Source datahub 读取源：闸门判定 + HTTP 取数。并发安全（内含 Client）。
@@ -172,6 +174,64 @@ func (s *Source) DailyRange(ctx context.Context, codes []string, start, end *tim
 		out = append(out, toDailyPrice(r))
 	}
 	return out, nil
+}
+
+// DailyLatest 多码「每 code 最近 n 行」行情（可选锚 asof = trade_date ≤ asof）。
+// datahub 侧 ROW_NUMBER(PARTITION BY code ORDER BY trade_date DESC) 窗口，**一次往返**；
+// 返回按 (code, trade_date ASC) 升序。
+//
+// n=1 ⇒ 每码最新一日（Tier1「最新一条」读点）；n=2 ⇒ top-2（指数条/涨跌幅 LAG）；
+// n=21 ⇒ 21 根窗（20 日涨幅）。**空结果合法**（该 code 无行则不出现）。
+func (s *Source) DailyLatest(ctx context.Context, codes []string, n int, asof *time.Time) ([]model.DailyPrice, error) {
+	if len(codes) == 0 {
+		return nil, nil
+	}
+	p := map[string]string{"codes": strings.Join(codes, ",")}
+	if n > 0 {
+		p["last"] = strconv.Itoa(n)
+	}
+	if asof != nil {
+		p["asof"] = asof.Format(dateLayout)
+	}
+	rows, err := datahub.Fetch[dailyPriceRow](s.c, ctx, DsDailyPrice, p)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.DailyPrice, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, toDailyPrice(r))
+	}
+	return out, nil
+}
+
+// LatestFactor 该股全量最新非空复权因子（`adj_not_null` + `last=1`）。
+// datahub 侧先滤 adj_factor IS NOT NULL 再取每码最新一行；无数据返回 (0, false, nil)。
+func (s *Source) LatestFactor(ctx context.Context, code string) (float64, bool, error) {
+	rows, err := datahub.Fetch[dailyPriceRow](s.c, ctx, DsDailyPrice, map[string]string{
+		"codes": code, "adj_not_null": "true", "last": "1"})
+	if err != nil {
+		return 0, false, err
+	}
+	if len(rows) == 0 {
+		return 0, false, nil
+	}
+	return f64(rows[0].AdjFactor), true, nil
+}
+
+// LatestTradeDate 全市场最新交易日（`latest_trade_date` 数据集 MAX(trade_date)）。
+// excludeIndex=true 排除 sh% 指数行（对齐 qe 口径 `code NOT LIKE 'sh%'`）；
+// false = 不过滤（对齐 backend GetLatestTradeDate，含指数行）。无数据返回 (nil, nil)。
+func (s *Source) LatestTradeDate(ctx context.Context, excludeIndex bool) (*time.Time, error) {
+	rows, err := datahub.Fetch[latestTradeDateRow](s.c, ctx, DsLatestTradeDate, map[string]string{
+		"table": DsDailyPrice, "exclude_index": strconv.FormatBool(excludeIndex)})
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	d := rows[0].TradeDate.Time
+	return &d, nil
 }
 
 // ---- daily_valuation ----

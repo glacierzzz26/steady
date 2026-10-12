@@ -207,6 +207,33 @@ func (r *StockRepository) GetPoolMarket(codes []string) (map[string]*PoolMarket,
 	if len(codes) == 0 {
 		return out, nil
 	}
+	if r.ds != nil && r.ds.Enabled(datasource.DsDailyPrice) {
+		// last=2：每码最近两行（升序）；末行=最新、前一行=上一交易日。chg 由两行现算
+		// （对齐原 SQL `LAG(close) OVER (PARTITION BY code ORDER BY trade_date)` at rn=1）。
+		bars, err := r.ds.DailyLatest(context.Background(), codes, 2, nil)
+		if err == nil {
+			byCode := make(map[string][]model.DailyPrice, len(bars))
+			for _, rr := range bars {
+				byCode[rr.Code] = append(byCode[rr.Code], rr)
+			}
+			for code, bs := range byCode {
+				last := bs[len(bs)-1]
+				pm := &PoolMarket{Price: &last.Close, Amount: &last.Amount, TurnoverRate: last.TurnoverRate}
+				if len(bs) >= 2 {
+					prev := bs[len(bs)-2].Close
+					if prev > 0 {
+						chg := (last.Close/prev - 1) * 100
+						pm.Chg = &chg
+					}
+				}
+				out[code] = pm
+			}
+			return out, nil
+		}
+		if !r.dsFallback(err) {
+			return nil, err
+		}
+	}
 	type row struct {
 		Code         string
 		Price        float64

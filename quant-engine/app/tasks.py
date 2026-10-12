@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 
 from app import data_source
 from app.db import get_session, upsert
-from app.models.tables import DailyPrice, StrategySignal
+from app.models.tables import StrategySignal
 from app.notify_scheduler import tick as notify_tick
 from app.task_run import already_run, record_task
 from app.watchdog import (guarded, healthz_status, register_catchup,
@@ -68,24 +68,15 @@ def _start_healthz(service: str, default_port: int, status_provider=None) -> Non
 
 
 def latest_trade_date(db) -> date | None:
-    """最近一个已有行情数据的交易日（跳过指数伪股票）"""
-    return db.execute(
-        select(func.max(DailyPrice.trade_date))
-        .where(DailyPrice.code.not_like("sh%"))
-    ).scalar()
+    """最近一个已有行情数据的交易日（跳过指数伪股票）—— Phase 3 按闸门走 datahub。"""
+    return data_source.latest_trade_date(db)
 
 
 def market_ready(db, td: date) -> bool:
     """行情就绪检查：当日股票池有 bar 的比例 >= 90%，不足则跳过
-    （16:30 行情同步刚完成，正常应全覆盖；比例低说明同步失败或回填未完成）"""
-    pool = data_source.pool_codes(db)
-    if not pool:
-        return False
-    with_bar = db.execute(
-        select(DailyPrice.code).where(
-            DailyPrice.trade_date == td, DailyPrice.code.in_(pool))
-    ).scalars().all()
-    return len(with_bar) / len(pool) >= 0.9
+    （16:30 行情同步刚完成，正常应全覆盖；比例低说明同步失败或回填未完成）
+    —— Phase 3 按闸门走 datahub。"""
+    return data_source.market_ready(db, td)
 
 
 def factor_ready(db, td: date) -> bool:
