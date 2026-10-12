@@ -144,7 +144,6 @@ def _upsert_set_cols(stmt) -> set[str]:
 
 def test_save_akshare_path_preserves_amount():
     """AkShare 路径（build_rows amount=None）：update 不含 amount，保留既有成交额"""
-    from sqlalchemy.dialects.postgresql import dialect as pg_dialect
 
     db = FakeSession()
     data = build_rows("sh000300", make_index_df())

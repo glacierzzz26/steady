@@ -15,10 +15,6 @@ class Position:
     def market_value(self) -> float:
         return self.quantity * self.current_price
 
-    @property
-    def profit(self) -> float:
-        return self.quantity * (self.current_price - self.cost_price)
-
 
 @dataclass
 class Portfolio:
@@ -34,10 +30,6 @@ class Portfolio:
     def total_value(self) -> float:
         mv = sum(p.market_value for p in self.positions.values())
         return self.cash + mv
-
-    @property
-    def total_return(self) -> float:
-        return (self.total_value - self.initial_cash) / self.initial_cash
 
     def buy(self, code: str, price: float, qty: int, commission: float,
             trade_date: str = "", slippage: float = 0.0):

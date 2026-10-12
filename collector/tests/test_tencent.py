@@ -1,7 +1,6 @@
 """腾讯源适配层测试（mock HTTP，不打真实端点）"""
 from datetime import date
 
-import pandas as pd
 import pytest
 
 from app.sources import tencent

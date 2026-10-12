@@ -27,7 +27,6 @@ import pandas as pd
 from app import data_source
 from app.factor_service import FACTOR_DIRECTION, normalize_cross_section, \
     score_cross_section
-from app.factors.financial import latest_by_announce
 from app.factors.trend import macd_signal, ma_trend
 from app.strategies.base import Signal
 from app.strategies.multi_factor import ALL_FACTORS, rotation_action

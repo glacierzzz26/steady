@@ -142,7 +142,6 @@ def test_portfolio_mode_no_phantom_on_failed_fill(db):
         {D1: [Signal("600001", 80, "BUY")]}, prices)
     BacktestEngine(probe, DAYS[0].isoformat(), DAYS[3].isoformat(),
                    db=db, fill_mode="t1_open").run()
-    seen = dict(probe.seen)
     assert all("600001" not in s for _, s in probe.seen)
 
 
@@ -151,7 +150,6 @@ def test_running_mode_engine_does_not_sync(db):
     strat = make_strat(db, "running")
     strat.preload("2026-08-10", "2026-08-17")
     strat.run("2026-08-10")
-    snap = set(strat.holdings)             # 策略信号运行集
     BacktestEngine(strat, "2026-08-11", "2026-08-17", db=db).run()
     # 引擎不触碰 holdings（非 portfolio 模式无同步）；持仓仍按信号演化
     assert strat.holdings_mode == "running"

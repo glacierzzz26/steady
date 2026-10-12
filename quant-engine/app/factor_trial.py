@@ -26,7 +26,7 @@ from sqlalchemy import select, update
 from app import data_source
 from app.db import get_session
 from app.factor_research import (HORIZONS, PRICE_TAIL_DAYS, QUANTILE_H,
-                                 adj_close_frame, forward_returns, ic_series,
+                                 forward_returns, ic_series,
                                  icir, quantile_returns_by_date)
 from app.factor_service import (FACTOR_DIRECTION, PRICE_WINDOW_DAYS,
                                 factor_raw_value, normalize_cross_section,

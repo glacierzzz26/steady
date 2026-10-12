@@ -17,7 +17,7 @@
 **Increment 0（backend 基建，✅ 代码落地 2026-10-09，零行为变更）**：
 - `internal/config`：`DatahubConfig` + `ReadEnabled`（`DATAHUB_*` env，与 quant-engine 同源）+ `getEnvList/getEnvBool/ParseDur`。
 - `internal/datahub`（唯一出网点）：`FetchRaw`（Bearer/信封/瞬时重试/TTL 缓存/`Reset`）+ `Date` 适配器 + typed errors + 包级泛型 `Fetch[T]`。
-- `internal/datasource`（唯一切换点）：`Source`（`Enabled/FallbackLocal/Reset`）+ stock_basic/calendar/daily/valuation/financial accessor 与 wire DTO。
+- `internal/datasource`（唯一切换点）：`Source`（`Enabled/FallbackLocal`）+ stock_basic/calendar/daily/valuation/financial accessor 与 wire DTO。
 - 测试：`client_test.go`（httptest）+ `config_test.go` + `source_test.go`；`go test ./...` 全绿。
 - **默认 `read_datasets: []` + token 空 ⇒ 恒 disabled ⇒ 部署零行为变更**。repo 方法切换 + 接线随各数据集增量推进（Tier1/2/3 分级见设计 §6）。
 
@@ -137,10 +137,10 @@ quant-engine（分支 `feature/datahub-read-switch`）：
   dataset 参数），**不下发 limit/offset**（分页/总数由调用方做，否则 total 失真）。
 - `internal/repository/stock_repo.go`：`StockRepository` 加 `ds *datasource.Source`；构造函数
   **变参可选** `NewStockRepository(db, ds ...*datasource.Source)`（现有 `NewStockRepository(tx)`
-  tx-scoped 调用点零改动 ⇒ nil ⇒ 纯本地，保事务内一致）。五个读点加 prologue：`GetList`
+  tx-scoped 调用点零改动 ⇒ nil ⇒ 纯本地，保事务内一致）。四个读点加 prologue：`GetList`
   （映射 `StockBasicFilter` → Go 侧 `total=len()` + `(page-1)*pageSize` 切片，排序 NULLS LAST
   与本地 `stockSortClause` 一致）、`GetByCode`/`Exists`（`StockBasicByCode`，命中即 true）、
-  `GetNames`/`GetIndustries`（`StockBasicByCodes`）。**失败即抛**（默认；`fallback_local=1` 记
+  `GetNames`（`StockBasicByCodes`）。**失败即抛**（默认；`fallback_local=1` 记
   WARNING 后落本地）。
 - 接线：`cmd/server/main.go` 构造 `datasource.New(cfg.Datahub)` → `SetupRouter(db, ds, …)` +
   `NewTradingService(db, cfg.Account, ds)`（`SetupRouter` 首参新增 `ds`）。

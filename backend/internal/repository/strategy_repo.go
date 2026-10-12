@@ -63,13 +63,6 @@ func (r *StrategyRepository) Update(s *model.Strategy) error {
 	}).Error
 }
 
-// SetStatus 更新状态（状态机约束在 service 层）
-func (r *StrategyRepository) SetStatus(name, status string) error {
-	return r.db.Model(&model.Strategy{}).
-		Where("name = ?", name).
-		Update("status", status).Error
-}
-
 // SwitchTx 状态流转（事务）：切换为 active 时先把当前 active 降级为 paused，
 // 保证「同一时间仅一个运行中」不变量原子生效。
 func (r *StrategyRepository) SwitchTx(name, to string) error {

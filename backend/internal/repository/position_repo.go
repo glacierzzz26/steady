@@ -47,13 +47,6 @@ func (r *PositionRepository) Upsert(p *model.Position) error {
 	}).Create(p).Error
 }
 
-// UnfreezeT1 解冻当日买入份额（available_qty = quantity）
-func (r *PositionRepository) UnfreezeT1(accountID uint64) error {
-	return r.db.Model(&model.Position{}).
-		Where("account_id = ?", accountID).
-		Update("available_qty", gorm.Expr("quantity")).Error
-}
-
 // Delete 删除持仓（清仓后）
 func (r *PositionRepository) Delete(accountID uint64, code string) error {
 	return r.db.Where("account_id = ? AND code = ?", accountID, code).

@@ -3,7 +3,6 @@
 关键不变量：默认分支必须与旧 `universe IN ('hs300','zz500')` **逐字等价** ——
 这是「部署本批代码生产行为零变化」的根据，也是策略选股域不受扩池影响的证明。
 """
-import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 

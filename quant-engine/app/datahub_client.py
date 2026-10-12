@@ -63,9 +63,6 @@ class DatahubClient:
         self._session = session if session is not None else requests.Session()
         self._cache: dict[tuple, tuple[float, list]] = {}
 
-    def reset(self) -> None:
-        self._cache.clear()
-
     def fetch(self, dataset_id: str, params: dict | None = None) -> list[dict]:
         """取数据集 `dataset_id`，返回 `data` 列表。
 

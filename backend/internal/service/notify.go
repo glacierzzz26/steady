@@ -174,15 +174,6 @@ func (s *NotifyService) UpdateFeishuConfig(d FeishuConfigDTO) error {
 
 // ---------- 发送 ----------
 
-// Ready 是否可推送（启用且已配置 webhook）
-func (s *NotifyService) Ready() (bool, error) {
-	cfg, err := s.GetFeishuConfig()
-	if err != nil {
-		return false, err
-	}
-	return cfg.Enabled && cfg.WebhookURL != "", nil
-}
-
 // SendCard 发送飞书富文本卡片（同步；用户主动触发的推送）
 func (s *NotifyService) SendCard(title, content, template, footer string) error {
 	cfg, err := s.GetFeishuConfig()
