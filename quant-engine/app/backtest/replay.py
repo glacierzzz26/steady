@@ -30,7 +30,7 @@ from app.factor_service import FACTOR_DIRECTION, normalize_cross_section, \
     score_cross_section
 from app.factors.financial import latest_by_announce
 from app.factors.trend import macd_signal, ma_trend
-from app.models.tables import DailyPrice, FinancialIndicator
+from app.models.tables import DailyPrice
 from app.strategies.base import Signal
 from app.strategies.multi_factor import ALL_FACTORS, rotation_action
 
@@ -124,13 +124,7 @@ class ReplayStrategy:
                 {"trade_date": td,
                  "pe_ttm": float(pe) if pe is not None else None,
                  "pb": float(pb) if pb is not None else None})
-        fin_rows = self.db.execute(
-            select(FinancialIndicator.code, FinancialIndicator.report_date,
-                   FinancialIndicator.announce_date,
-                   FinancialIndicator.roe, FinancialIndicator.debt_ratio)
-            .where(FinancialIndicator.code.in_(self.pool))
-            .order_by(FinancialIndicator.code,
-                      FinancialIndicator.announce_date)).all()
+        fin_rows = data_source.financial_rows(self.db, self.pool)
         financials: dict[str, list] = {}
         for code, rd, ad, roe, debt in fin_rows:
             financials.setdefault(code, []).append(

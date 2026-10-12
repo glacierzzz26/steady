@@ -31,7 +31,7 @@ from app.factor_research import (HORIZONS, PRICE_TAIL_DAYS, QUANTILE_H,
 from app.factor_service import (FACTOR_DIRECTION, PRICE_WINDOW_DAYS,
                                 factor_raw_value, normalize_cross_section,
                                 parametrized_params, pool_codes)
-from app.models.tables import DailyPrice, FactorTrial, FinancialIndicator
+from app.models.tables import DailyPrice, FactorTrial
 
 logger = logging.getLogger(__name__)
 
@@ -93,13 +93,7 @@ def load_range_inputs(db, start: date, end: date) -> dict:
             {"trade_date": td, "pe_ttm": pe, "pb": pb})
     valuation = {c: pd.DataFrame(rows) for c, rows in valuation.items()}
 
-    fin_rows = db.execute(
-        select(FinancialIndicator.code, FinancialIndicator.report_date,
-               FinancialIndicator.announce_date, FinancialIndicator.roe,
-               FinancialIndicator.debt_ratio)
-        .where(FinancialIndicator.code.in_(codes),
-               FinancialIndicator.announce_date <= end)
-    ).all()
+    fin_rows = data_source.financial_rows(db, codes, as_of=end)
     financial: dict[str, pd.DataFrame] = {}
     for code, rd, ad, roe, debt in fin_rows:
         financial.setdefault(code, []).append(

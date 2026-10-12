@@ -246,3 +246,31 @@ func (s *Source) FinancialByCodes(ctx context.Context, codes []string) ([]model.
 	}
 	return out, nil
 }
+
+// FinancialLast 多码「每 code 最近 n 期」财务（可选锚 asOf = announce_date ≤ asOf）。
+// datahub 侧 ROW_NUMBER 按 (announce_date DESC, report_date DESC) 取最近 n 期；
+// n=1 ⇒ 每码最新一期。返回按 (code, report_date ASC) 升序。
+//
+// 注：announce_date 为 NOT NULL（schema），无 NULLS FIRST 风险；roe 等 NULL 经
+// toFinancial 归 0，调用方以「≠0」充当非空判定（对齐 SQL `IS NOT NULL`）。
+func (s *Source) FinancialLast(ctx context.Context, codes []string, asOf *time.Time, n int) ([]model.FinancialIndicator, error) {
+	if len(codes) == 0 {
+		return nil, nil
+	}
+	p := map[string]string{"codes": strings.Join(codes, ",")}
+	if asOf != nil {
+		p["as_of"] = asOf.Format(dateLayout)
+	}
+	if n > 0 {
+		p["last"] = strconv.Itoa(n)
+	}
+	rows, err := datahub.Fetch[financialRow](s.c, ctx, DsFinancialIndicator, p)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.FinancialIndicator, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, toFinancial(r))
+	}
+	return out, nil
+}

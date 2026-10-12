@@ -11,7 +11,8 @@ from sqlalchemy.pool import StaticPool
 
 from app import config, data_source
 from app.datahub_client import DatahubError
-from app.models.tables import Base, DailyValuation, StockBasic, TradeCalendar
+from app.models.tables import Base, DailyValuation, FinancialIndicator, \
+    StockBasic, TradeCalendar
 
 OPEN = [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5),
         date(2026, 8, 6), date(2026, 8, 7)]
@@ -22,6 +23,14 @@ VAL = [
     ("000001", date(2026, 8, 3), 5.0, 0.80),
     ("000001", date(2026, 8, 4), 5.1, 0.81),
     ("600519", date(2026, 8, 3), 30.0, 8.00),
+]
+
+# financial_indicator 种子（本地 + 远端 fake 共用）：
+# (code, report_date, announce_date, roe, debt_ratio)
+FIN = [
+    ("000001", date(2026, 3, 31), date(2026, 4, 25), 11.0, 90.0),
+    ("000001", date(2026, 6, 30), date(2026, 7, 20), 12.5, 89.5),
+    ("600519", date(2026, 6, 30), date(2026, 7, 15), 30.0, 20.0),
 ]
 
 # stock_basic 种子（同时用于本地建表 + 远端 fake）
@@ -54,6 +63,9 @@ def db():
             status=s["status"], universe=s["universe"], data_scope=s["data_scope"]))
     for i, (c, d, pe, pb) in enumerate(VAL):
         session.add(DailyValuation(id=i + 1, code=c, trade_date=d, pe_ttm=pe, pb=pb))
+    for i, (c, rd, ad, roe, debt) in enumerate(FIN):
+        session.add(FinancialIndicator(id=i + 1, code=c, report_date=rd,
+                                       announce_date=ad, roe=roe, debt_ratio=debt))
     session.commit()
     return session
 
@@ -402,3 +414,107 @@ def test_valuation_fallback_local_on_error(gate_on_val, monkeypatch, db):
         lambda: FakeValuationClient(fail=DatahubError("down")))
     assert len(data_source.valuation_rows(db, ["000001"],
                                           date(2026, 8, 3), date(2026, 8, 4))) == 2
+
+
+# ---------- financial_indicator ----------
+
+class FakeFinancialClient:
+    """按 codes/as_of 过滤固定财务行，支持 last 窗与 fields 投影；记录调用。"""
+
+    def __init__(self, rows=None, fail=None):
+        self.rows = [dict(code=c, report_date=rd, announce_date=ad,
+                          roe=roe, debt_ratio=debt)
+                     for c, rd, ad, roe, debt in (rows if rows is not None else FIN)]
+        self.fail = fail
+        self.calls = []
+
+    def fetch(self, dataset_id, params=None):
+        self.calls.append((dataset_id, dict(params or {})))
+        if self.fail is not None:
+            raise self.fail
+        p = params or {}
+        want = [x.strip() for x in str(p.get("codes", "")).split(",") if x.strip()]
+        as_of = date.fromisoformat(p["as_of"]) if p.get("as_of") else None
+        last = int(p["last"]) if p.get("last") else None
+        fields = [c.strip() for c in str(p.get("fields", "")).split(",") if c.strip()]
+        out = [r for r in self.rows
+               if (not want or r["code"] in want)
+               and (as_of is None or r["announce_date"] <= as_of)]
+        out.sort(key=lambda r: (r["code"], r["report_date"]))
+        if last:
+            # 每 code：announce_date/report_date 降序前 last 行，再升序回填
+            per: dict[str, list] = {}
+            for r in out:
+                per.setdefault(r["code"], []).append(r)
+            out = []
+            for code in sorted(per):
+                top = sorted(per[code],
+                             key=lambda r: (r["announce_date"], r["report_date"]),
+                             reverse=True)[:last]
+                out.extend(sorted(top, key=lambda r: r["report_date"]))
+        out = [{k: r[k] for k in fields} for r in out]
+        return out
+
+
+@pytest.fixture
+def gate_on_fin(monkeypatch):
+    monkeypatch.setenv("DATAHUB_READ_DATASETS", "financial_indicator")
+    monkeypatch.setenv("DATAHUB_BASE_URL", "http://dh:8100")
+    monkeypatch.setenv("DATAHUB_TOKEN", "tok")
+
+
+def test_financial_rows_local_as_of(db):
+    rows = data_source.financial_rows(db, ["000001"], as_of=date(2026, 5, 1))
+    assert [(c, rd, ad) for c, rd, ad, _, _ in rows] == [
+        ("000001", date(2026, 3, 31), date(2026, 4, 25))]
+    assert float(rows[0][3]) == 11.0 and float(rows[0][4]) == 90.0
+
+
+def test_financial_rows_remote(gate_on_fin, monkeypatch):
+    fake = FakeFinancialClient()
+    monkeypatch.setattr("app.data_source.get_client", lambda: fake)
+    rows = data_source.financial_rows(_BoomDB(), ["000001"],
+                                      as_of=date(2026, 7, 25))
+    assert rows == [("000001", date(2026, 3, 31), date(2026, 4, 25), 11.0, 90.0),
+                    ("000001", date(2026, 6, 30), date(2026, 7, 20), 12.5, 89.5)]
+    assert fake.calls[0][0] == "financial_indicator"
+    assert fake.calls[0][1]["fields"] == "code,report_date,announce_date,roe,debt_ratio"
+    assert fake.calls[0][1]["as_of"] == "2026-07-25"
+
+
+def test_financial_rows_empty_codes_short_circuits(db, gate_on_fin, monkeypatch):
+    monkeypatch.setattr("app.data_source.get_client",
+                        lambda: FakeFinancialClient(fail=AssertionError("不应调用")))
+    assert data_source.financial_rows(db, [], as_of=date(2026, 7, 25)) == []
+
+
+def test_pool_latest_announce_local(db):
+    assert data_source.pool_latest_announce(db) == {
+        "000001": date(2026, 7, 20), "600519": date(2026, 7, 15)}
+
+
+def test_pool_latest_announce_remote(gate_on_fin, monkeypatch):
+    fake = FakeFinancialClient()
+    monkeypatch.setattr("app.data_source.get_client", lambda: fake)
+    assert data_source.pool_latest_announce(_BoomDB(), ["000001", "600519"]) == {
+        "000001": date(2026, 7, 20), "600519": date(2026, 7, 15)}
+    assert fake.calls[0][0] == "financial_indicator"
+    assert fake.calls[0][1]["last"] == "1"
+    assert fake.calls[0][1]["fields"] == "code,announce_date"
+
+
+def test_financial_fail_loud_without_fallback(gate_on_fin, monkeypatch):
+    monkeypatch.setattr(
+        "app.data_source.get_client",
+        lambda: FakeFinancialClient(fail=DatahubError("down")))
+    with pytest.raises(DatahubError):
+        data_source.financial_rows(_BoomDB(), ["000001"], as_of=date(2026, 7, 25))
+
+
+def test_financial_fallback_local_on_error(gate_on_fin, monkeypatch, db):
+    monkeypatch.setenv("DATAHUB_FALLBACK_LOCAL", "1")
+    monkeypatch.setattr(
+        "app.data_source.get_client",
+        lambda: FakeFinancialClient(fail=DatahubError("down")))
+    assert len(data_source.financial_rows(db, ["000001"],
+                                          as_of=date(2026, 7, 25))) == 2
