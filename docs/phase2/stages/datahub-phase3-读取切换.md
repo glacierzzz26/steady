@@ -4,6 +4,7 @@
 > 总设计 [`../design/数据接入层-datahub.md`](../design/数据接入层-datahub.md) §5；本阶段蓝图
 > [`../design/数据接入层-datahub-phase3.md`](../design/数据接入层-datahub-phase3.md)。
 > 承接 [`datahub-phase2-地基搬栈.md`](datahub-phase2-地基搬栈.md)（采集已切 datahub）。
+> **生产操作手册**（底种 + 对账 + 翻闸 + 停采，只写不执行）：[`datahub-phase3-生产切换runbook.md`](datahub-phase3-生产切换runbook.md)。
 
 **状态**：🚧 进行中（calendar 读切换**已生产落地** 2026-10-09，发布 `steady-20261009-87e7dc7`；**backend Go 侧读取切换已纳入范围**，剩余数据集 `stock_basic→index→valuation→finance→daily` 逐集全迁移）。
 
