@@ -15,18 +15,17 @@ G9 同款模式：quant-engine 预计算落 strategy_perf（迁移 006），Go/�
 """
 import logging
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
-import pandas as pd
 from sqlalchemy import func, select
 
+from app import data_source
 from app.db import upsert
 from app.factor_service import FACTOR_DIRECTION
 from app.models.tables import (
     Account,
     AccountNav,
     BacktestResult,
-    DailyPrice,
     StrategyPerf,
     StrategySignal,
 )
@@ -49,14 +48,8 @@ def _adj_series(db, codes: list[str], d0: date, d1: date) -> dict[str, list[tupl
 
     adj_factor 为 NULL（指数行，基准不需要复权）→ 按 1.0 处理，用原始 close。
     """
-    rows = db.execute(
-        select(DailyPrice.code, DailyPrice.trade_date,
-               DailyPrice.close, DailyPrice.adj_factor)
-        .where(DailyPrice.code.in_(codes),
-               DailyPrice.trade_date >= d0,
-               DailyPrice.trade_date <= d1)
-        .order_by(DailyPrice.code, DailyPrice.trade_date)
-    ).all()
+    rows = data_source.price_rows(
+        db, codes, d0, d1, ("code", "trade_date", "close", "adj_factor"))
     series: dict[str, list[tuple[date, float]]] = defaultdict(list)
     for code, td, close, adj in rows:
         if close is None:
@@ -80,14 +73,9 @@ def _fwd_ret(series: list[tuple[date, float]], d0: date, n: int) -> float | None
 
 
 def _bench_series(db, d0: date, d1: date) -> list[tuple[date, float]]:
-    """基准（sh000300）后复权序列"""
-    rows = db.execute(
-        select(DailyPrice.trade_date, DailyPrice.close, DailyPrice.adj_factor)
-        .where(DailyPrice.code == _BENCHMARK_CODE,
-               DailyPrice.trade_date >= d0,
-               DailyPrice.trade_date <= d1)
-        .order_by(DailyPrice.trade_date)
-    ).all()
+    """基准（sh000300）后复权序列（Phase 3：按闸门走 datahub）"""
+    rows = data_source.price_rows(
+        db, [_BENCHMARK_CODE], d0, d1, ("trade_date", "close", "adj_factor"))
     out = []
     for td, close, adj in rows:
         if close is None:
@@ -365,12 +353,9 @@ def compute_attribution(db, strategy: str = DEFAULT_STRATEGY,
     pivots = {f: df for f, df in pivots.items() if not df.empty}
     codes = pool_codes(db)
     lookback = d0 - timedelta(days=7)
-    price_rows = db.execute(
-        select(DailyPrice.code, DailyPrice.trade_date, DailyPrice.close, DailyPrice.adj_factor)
-        .where(DailyPrice.code.in_(codes),
-               DailyPrice.trade_date >= lookback, DailyPrice.trade_date <= d1)
-    ).all()
-    adj_close = adj_close_frame(price_rows)
+    rows = data_source.price_rows(
+        db, codes, lookback, d1, ("code", "trade_date", "close", "adj_factor"))
+    adj_close = adj_close_frame(rows)
     if adj_close.empty:
         detail = {"factors": factors, "note": "池内行情缺失",
                   "period_start": str(d0), "period_end": str(d1)}

@@ -15,7 +15,7 @@ from sqlalchemy import func, select, text
 
 from app import data_source
 from app.db import get_session
-from app.models.tables import DailyPrice, NotifyConfig, StrategySignal, StockBasic, TaskRun
+from app.models.tables import NotifyConfig, StrategySignal, TaskRun
 from app.notify import FeishuNotifier, load_config
 from app.task_run import already_run, record_task
 
@@ -50,9 +50,7 @@ def _fmt_pct(x) -> str:
 def _code_names(db, codes) -> dict:
     if not codes:
         return {}
-    return {r.code: r.name for r in db.execute(
-        select(StockBasic.code, StockBasic.name).where(StockBasic.code.in_(codes))
-    ).all() if r.name}
+    return data_source.names_by_codes(db, codes)
 
 
 def _source_detail(db, task_name: str, td: date):
@@ -383,10 +381,7 @@ def _schedule_matches(db, ev: NotifyConfig, td: date) -> bool:
             # 下方「最近行情 == 今日」在早晨恒 False（行情 16:30 才落地），必须特判。
             return data_source.is_open(td, db=db)
         # 仅交易日触发：最近有行情数据的交易日 == 今天（周末/节假日不触发）
-        latest = db.execute(
-            select(func.max(DailyPrice.trade_date))
-            .where(DailyPrice.code.not_like("sh%"))
-        ).scalar()
+        latest = data_source.latest_trade_date(db)
         return latest == td
     return False  # event 型由各自触发点直接推送
 

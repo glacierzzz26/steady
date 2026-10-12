@@ -5,8 +5,6 @@
 `strategy_perf` 序列**质变**然而是静默的 —— 全量 pytest 仍会绿。故此处用
 「data_scope='a_share' 但 universe=NULL 的股票不得进 pool」把这条钉死。
 """
-from datetime import date
-
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 

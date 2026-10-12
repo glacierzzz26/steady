@@ -7,7 +7,6 @@
 幂等：同 (strategy_name, start_date, end_date, top_n) 唯一（uq_backtest_job），
 重复提交返回已有任务；failed 任务重新提交会重置为 pending 重跑。
 """
-import json
 import logging
 from datetime import date, datetime
 

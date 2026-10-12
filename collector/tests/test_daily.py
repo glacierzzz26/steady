@@ -106,7 +106,6 @@ def test_akshare_fetch_window_includes_context(monkeypatch):
 def test_akshare_guard_reject_falls_to_baostock(monkeypatch):
     """阶段 4 加守：AkShare 主源因子阶跃不符价格（平安型 step+16.7% 反涨）→
     守卫拒收 → 降级 BaoStock 兜底"""
-    from datetime import date
 
     monkeypatch.setattr(daily_mod, "baostock_enabled", lambda *a, **k: True)
     monkeypatch.setattr(daily_mod.baostock, "get_session", lambda: object())

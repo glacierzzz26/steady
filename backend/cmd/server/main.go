@@ -13,6 +13,7 @@ import (
 
 	"quant-system/backend/internal/api"
 	"quant-system/backend/internal/config"
+	"quant-system/backend/internal/datasource"
 	"quant-system/backend/internal/model"
 	"quant-system/backend/internal/repository"
 	"quant-system/backend/internal/service"
@@ -55,7 +56,9 @@ func main() {
 	}
 
 	// 4. 交易/通知/执行服务 + 调度器（Sprint 5：19:35 自动下单 / 21:05 净值快照 / 21:15 对账校验）
-	tradingSvc := service.NewTradingService(db, cfg.Account)
+	// datahub 读取源（Phase 3）：闸门默认关（DATAHUB_READ_DATASETS 空）⇒ 读路径恒本地。
+	dsrc := datasource.New(cfg.Datahub)
+	tradingSvc := service.NewTradingService(db, cfg.Account, dsrc)
 	navSvc := service.NewNavService(db, cfg.Account)
 	taskRunSvc := service.NewTaskRunService(db)
 	notifySvc := service.NewNotifyService(db)
@@ -66,7 +69,7 @@ func main() {
 
 	sched := service.NewScheduler(log)
 	accountRepo := repository.NewAccountRepository(db)
-	dailyRepo := repository.NewDailyRepository(db)
+	dailyRepo := repository.NewDailyRepository(db, dsrc)
 	// 每日任务均声明补跑语义：重启后若当天触发时刻已过且当日未执行 → 启动时立即补跑。
 	// 注册顺序即补跑顺序（llm-brief → auto-trade → nav-snapshot → consistency-check），
 	// 其中 llm-brief 依赖 quant-engine 09:10 落库的早报，与交易链无耦合。
@@ -85,7 +88,7 @@ func main() {
 	go sched.Start()
 
 	// 5. 注册路由并启动服务
-	router := api.SetupRouter(db, tradingSvc, navSvc, cfg.Account.InitialCash,
+	router := api.SetupRouter(db, dsrc, tradingSvc, navSvc, cfg.Account.InitialCash,
 		taskRunSvc, notifySvc, executeSvc, briefSvc, llmSvc)
 	srv := &http.Server{
 		Addr:         fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port),

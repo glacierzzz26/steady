@@ -1,6 +1,6 @@
 # 数据接入层 datahub — Phase 3 实施蓝图（读切换）
 
-> **状态**：📋 设计（2026-10-09）｜**上位文档**：[`数据接入层-datahub.md`](数据接入层-datahub.md)（总设计 §5 消费面改造）、[`数据接入层-datahub-phase2.md`](数据接入层-datahub-phase2.md)（采集接管蓝图）
+> **状态**：📋 设计（2026-10-09）｜**calendar 增量已生产落地**（发布 `steady-20261009-87e7dc7`，2026-10-09）｜**上位文档**：[`数据接入层-datahub.md`](数据接入层-datahub.md)（总设计 §5 消费面改造）、[`数据接入层-datahub-phase2.md`](数据接入层-datahub-phase2.md)（采集接管蓝图）
 > **一句话**：datahub 已接管采集 → 本阶段把 steady 的**原始数据读取**从本地库切到 datahub API（**按需 HTTP**），实现**单一真源**；数据集中**逐项灰度**、env 闸门控制（默认读本地=零行为变更）。
 
 ---
@@ -9,13 +9,14 @@
 
 **目标**
 - quant-engine 原始数据读取从「裸查本地表」改为集中入口 `app/data_source.py`，按闸门走 datahub HTTP。
+- **backend（Go）同步切读**：读取从 `internal/repository/*` 裸查本地表改为经 `internal/datasource` 走 datahub HTTP（见 §6）。
 - **逐数据集灰度**：先 calendar，再 stock_basic/index/valuation/finance/daily。
-- 闸门 `DATAHUB_READ_DATASETS`（逗号白名单）默认空 → 部署**零行为变更**，一键回退。
+- 闸门 `DATAHUB_READ_DATASETS`（逗号白名单）默认空 → 部署**零行为变更**，一键回退。**两消费方（quant-engine + backend）共用同一份 env**。
 
 **非目标（延后）**
-- backend（Go）读切换、collector 读切换（随 collector 退役）。
+- collector 读切换（随 collector 退役）。
 - 删本地原始表、删 collector 代码。
-- calendar 之外的其它数据集（各自接管次序到位后再逐个切）。
+- **停 steady 采集**是每个数据集的**最后一步**，且须 quant-engine 与 backend **都已切读**（否则 backend 服务陈旧数据；calendar 因预载到未来冻结无害，故先例不可照搬到数据表）。
 
 ---
 
@@ -76,6 +77,95 @@ DATAHUB_FALLBACK_LOCAL=0        # 故障回退本地（默认 0=失败即抛）
 
 ---
 
+## 2b. 第二个增量：stock_basic 读切换（qe 侧，2026-10-09）
+
+首个**非日历**数据集：`stock_basic` 有本地表、steady 仍在采、**backend 也读** —— 验证读切换在
+「有真实数据 + 多消费方」上的完整通路。**闸门默认关 = 逐字回退本地**。
+
+- **datahub 侧**：注册 raw 数据集 `stock_basic`（`db` provider 读自有库；params 对齐消费面：
+  `codes/market/universe/scope` 逗号 IN、`industry`、`keyword`、`sort/order`、`limit/offset`；
+  列照 steady 冻结）。见 datahub 仓 PR。
+- **qe 侧**：`app/data_source.py` 增 `pool_codes` / `names_by_codes` / `industries_by_codes` /
+  `a_share_listed_codes` / `a_share_listed_count` / `pool_code_dates` / `a_share_code_dates`。切读点：
+  `factor_service.pool_codes`、`tasks.market_ready`、`data_quality._coverage_pool` + 分母真值 +
+  `_check_financial` 分母、`morning_brief._positions_section`（拆 outerjoin）、
+  `notify_scheduler._code_names`、`backtest/replay.preload`（池 + industry）。
+- **过滤口径**：datahub `stock_basic` 无 `status`/`list_date` 服务端过滤 → 本侧拉小表后 Python 过滤
+  （NULL 一律排除，对齐本地 SQL `status='L' AND list_date<=td`）。若后续需要，可给 datahub 数据集加
+  `status`/`list_date` 参数（本轮不加，避免过度设计）。
+- **backend 侧**：读切换设计见 §6（由 backend 基建 PR 增补；同一闸门、同一 `.env`）；
+  **停采须待 qe + backend 都切读**。
+
+---
+
+## 2c. 第三个增量：daily_valuation 读切换（qe + backend，2026-10-12）
+
+首个「qe + backend **同批**切」的数据集（前两者逐消费方增量）。**闸门默认关 = 逐字回退本地**。
+
+- **datahub 侧**：注册 raw 数据集 `daily_valuation`（`db` provider 读自有库；列
+  `code,trade_date,close,total_mv,float_mv,pe_ttm,pe_static,pb`；params `codes`/`start`/`end`/
+  `asof`(≤)/`last`(每码最近 N 行，服务端 `ROW_NUMBER`)/`fields`）。见 datahub 仓 PR。
+- **qe 侧**：`data_source.py` 增 `valuation_rows`（闸门开走 `daily_valuation`，按 `fields` 投影为
+  有序元组）、`valuation_latest`（`latest_trade_date{table:daily_valuation,exclude_index:false}`）、
+  `dup_keys(db, table)`；切 `factor_service.load_factor_inputs`、`factor_trial.load_range_inputs`、
+  `data_quality._check_valuation` + `_check_duplicates`、`backtest/replay.preload` 的估值读点。
+- **backend 侧**：`internal/datasource` 增 `ValuationLast(codes,n,asof)`（`last` 有界窗）；
+  `DailyRepository.GetLatestValuation` / `SignalRepository.GetSignalPe` / `StockRepository.GetPoolValuation`
+  加 prologue（`last=1` + `asof`/null 过滤，Go 侧归约）；`NewDailyRepository`/`NewSignalRepository`
+  改变参可选，`SetupRouter`/`main.go`/`NewTradingService` 注入（tx-scoped 不传）。
+- 详见阶段文档 [`../stages/datahub-phase3-读取切换.md`](../stages/datahub-phase3-读取切换.md)「daily_valuation 读切换」节。
+
+## 2d. 第四个增量：financial_indicator 读切换（qe + backend，2026-10-12）
+
+第二个「qe + backend **同批**切」的数据集。**闸门默认关 = 逐字回退本地**。
+
+- **datahub 侧**：注册 raw 数据集 `financial_indicator`（`db` provider 读自有库；列
+  `code,report_date,announce_date,pe,pb,roe,profit_growth,revenue_growth,debt_ratio,gross_margin`；
+  params `codes`/`as_of`(announce_date ≤)/`last`(每码最近 N 期，服务端 `ROW_NUMBER` 按
+  `announce_date DESC, report_date DESC`)/`fields`）。`announce_date` 为 `NOT NULL`，故无需
+  `announce_not_null` 参数。见 datahub 仓 PR。
+- **qe 侧**：`data_source.py` 增 `financial_rows(db, codes, as_of, fields)`（按 `fields` 投影为有序元组）、
+  `pool_latest_announce(db, codes)`（`financial_indicator {last:1}`）；切 `factor_service.load_factor_inputs`、
+  `factor_trial.load_range_inputs`、`backtest/replay.preload` 的财务读点、`data_quality._check_financial`。
+- **backend 侧**：`internal/datasource` 增 `FinancialLast(codes,asOf,n)`（`last` 有界窗）；
+  `FinancialRepository.GetByCode`（`FinancialByCodes` + Go 侧 `report_date DESC` 排序/limit）、
+  `GetLatestByAnnounce`、`StockRepository.GetPoolFinancial`（`last=1` + roe 空过滤）加 prologue；
+  `NewFinancialRepository` 改变参可选，`SetupRouter` 注入。
+- 详见阶段文档 [`../stages/datahub-phase3-读取切换.md`](../stages/datahub-phase3-读取切换.md)「financial_indicator 读切换」节。
+
+---
+
+## 2e. 第五个增量：daily_price 读切换（qe + backend，2026-10-12）
+
+第三个「qe + backend **同批**切」的数据集，**读点最多、最高风险**（前复权因子/回测/指数条）。
+**闸门默认关 = 逐字回退本地**。**index 不建独立数据集**：指数行情物理存在 `daily_price`
+（code=`sh000300` 等），随本集一并切——qe 基准序列（`performance._bench_series`）、backend 指数条
+（`DailyRepository.GetIndexQuotes`）都读它。§2.2 曾设想的 `index_quotes` 派生集**不做**。
+
+- **datahub 侧**：注册 raw 数据集 `daily_price`（`db` provider 读自有库；列
+  `code,trade_date,open,high,low,close,volume,amount,adj_factor,turnover_rate`；params
+  `codes`/`start`/`end`/`date`(精确，覆盖 start/end)/`asof`(trade_date ≤)/`last`(每码最近 N 行，
+  服务端 `ROW_NUMBER OVER (PARTITION BY code ORDER BY trade_date DESC)`)/`fields`/`adj_not_null`）；
+  配套小数据集 `latest_trade_date`（params `table`/`exclude_index`，列 `trade_date`）。见 datahub 仓 PR。
+- **qe 侧**：`data_source.py` 增 `latest_trade_date(db)`（`exclude_index:true`，对齐本地
+  `code NOT LIKE 'sh%'`）、`price_rows(db, codes, start, end, fields)`、`price_day(db, codes, d, fields)`、
+  `price_latest(db, code, fields)`、`market_ready(db, td)`；切 `factor_service`/`factor_trial`/
+  `factor_research` 的行情读点、`performance.{_adj_series,_bench_series,compute_attribution}`、
+  `backtest/replay.preload`、`tasks`/`morning_brief`/`notify_scheduler`/`cli` 的最新交易日、
+  `data_quality.{_market_latest,_check_coverage(with_bar),_check_benchmark,_check_duplicates}`。
+  **有意保留本地**：`data_quality._check_missing_days`、`_check_price_anomalies`、`_check_coverage`
+  的上一交易日（prev）推导（需「上一开市日」谓词，datahub 无对应原语）、`backtest/engine` 逐 (code,date)
+  循环（Tier3）。
+- **backend 侧**：`internal/datasource` 增 `DailyLatest(codes,n,asof)`（`last` 有界窗）、
+  `LatestFactor(code)`、`LatestTradeDate(excludeIndex)`；Tier1 切
+  `DailyRepository.{GetRange,GetLatest,GetLatestTradeDate,GetLatestFactor}`；Tier2「有界窗 + Go 归约」切
+  `GetIndexQuotes`(n=2)、`GetPoolMarket`(n=2)、`GetSignalChg20`(n=21,asof)；`NewDailyRepository`/
+  `NewStockRepository`/`NewSignalRepository` 改变参可选，`SetupRouter`/`main.go`/`trading.go` 注入
+  （tx-scoped 不传）；`GetByDate`/`GetPrevClose` 保持本地。
+- 详见阶段文档 [`../stages/datahub-phase3-读取切换.md`](../stages/datahub-phase3-读取切换.md)「daily_price 读切换」节。
+
+---
+
 ## 3. 失败模式（决策）
 
 **失败即抛（不静默回退本地）**：datahub 权威、本地是待退役副本；静默回退会掩盖故障。调用方已有
@@ -103,3 +193,21 @@ DATAHUB_FALLBACK_LOCAL=0        # 故障回退本地（默认 0=失败即抛）
 | **token/可达性** | 401 或网络不通 | 翻闸前 curl 核对；**每次发布复验** datahub 在 steady 网络内 |
 | **datahub SPOF** | 读路径新增一跳 | datahub 自备 restart/healthcheck；缓存降抖动；一键回退 |
 | **新依赖 requests** | quant-engine 首次引入 | 与 collector 一致；镜像小幅增大 |
+
+---
+
+## 6. backend（Go）读切换设计
+
+backend 也读同一批本地表（`internal/repository/*.go`），是「停采」的前置。设计对齐 quant-engine，按 Go 习惯落地：
+
+- **`internal/config`**：新增 `DatahubConfig`（`datahub:` 段 + `DATAHUB_*` env 覆盖，与 quant-engine 同 env 名）+ `ReadEnabled(dataset)`（判定 = base_url 非空 × token 非空 × dataset ∈ 白名单）。**启动时读一次**（翻闸/回退本就「改 .env + 重启」）。默认 `read_datasets: []`、token 空 ⇒ 恒 disabled = 零行为变更。
+- **`internal/datahub`（唯一出网点）**：`Client.FetchRaw(ctx,id,params) → json.RawMessage`——Bearer、信封 `{code,message,data,meta}` 解析、**重试仅瞬时**（超时/连接错/500-504，429/其余 4xx 快速失败）、**TTL 缓存**、`Reset()`；错误类型 `HTTPError/TimeoutError/ParseError`；`Date` 适配器（解 `"2026-10-09"`）。泛型解码用**包级** `Fetch[T]`（Go 无泛型方法）解进**专用 wire DTO**（snake_case tag）——**不**解进 `model.*`（其 `time.Time` 解不动纯日期）、**不**用 `map[string]any`。
+- **`internal/datasource`（唯一切换点）**：`Source`（`Enabled/FallbackLocal` + 每数据集 accessor）；**不持有 gorm**——闸门关的本地 SQL 由 repository 保留。
+- **repository 接线**：repo 加 `ds *datasource.Source`，构造函数**变参可选** `NewXRepository(db, ds ...*datasource.Source)`（保现有调用点零改动）；被切方法加 prologue（闸门开走 ds，失败且未开 fallback → 抛；否则走原 gorm 体，逐字不变）。`api.SetupRouter` 增 `ds` 首参，`cmd/server/main.go` 构造注入；**tx-scoped 构造一律不传**（= nil = 纯本地，保事务内一致）。
+- **Tier 分级**（难易/风险）：
+  - **Tier1** 简单单点/批量（`GetByCode/GetNames/GetRange/GetLatest...`）→ 直接切。
+  - **Tier2** 窗口/聚合（`GetPoolMarket` 的 `LAG`、`GetPoolValuation/GetPoolFinancial/GetSignalPe/GetIndexQuotes` 的 `ROW_NUMBER`、`GetSignalChg20` 的 21 根窗）→ datahub 批量取**有界窗口** + Go 归约，或 datahub 加 `asof/as_of` 参数。
+  - **Tier3** tx 内 + trading 逐码循环（`GetPrevClose/GetByDate` 在每码循环里）→ **先保本地**（传 nil），待「批量原语」重构后再切。
+  - 计算表（`factor_value/strategy_signal/strategy/factor_definition`）**不切**。
+
+**现状（2026-10-12）**：Increment 0（基建：config + `internal/datahub` + `internal/datasource` + 测试）已落地，**默认全关、零行为变更**。**`stock_basic` repo 接线已落地（Tier1）**：`StockRepository` 四读点（`GetList`/`GetByCode`/`Exists`/`GetNames`）加 prologue（原第五读点 `GetIndustries` 全仓无调用方，已随死代码清理删除），`internal/datasource` 增 `StockBasicList`（列表）与既有 `StockBasicByCode(s)`；`SetupRouter`/`NewTradingService` 注入 `ds`；`go test ./...` 全绿。**`daily_valuation` repo 接线已落地（Tier1/2）**：`internal/datasource` 增 `ValuationLast(codes,n,asof)`（`last` 有界窗）；`DailyRepository.GetLatestValuation`、`SignalRepository.GetSignalPe`（`asof`+`last=1`）、`StockRepository.GetPoolValuation`（`last=1`+null 过滤）加 prologue；`NewDailyRepository`/`NewSignalRepository` 改变参可选，`SetupRouter`/`main.go`/`NewTradingService` 注入（tx-scoped 不传）。**`financial_indicator` repo 接线已落地（Tier1/2）**：`internal/datasource` 增 `FinancialLast(codes,asOf,n)`；`FinancialRepository.GetByCode`（`report_date DESC` 排序/limit）、`GetLatestByAnnounce`（`last=1`）、`StockRepository.GetPoolFinancial`（`last=1`+roe 空过滤）加 prologue；`NewFinancialRepository` 改变参可选，`SetupRouter` 注入。**`daily_price` repo 接线已落地（Tier1/2，含 index）**：`internal/datasource` 增 `DailyLatest(codes,n,asof)`（`last` 有界窗）/`LatestFactor`/`LatestTradeDate`；`DailyRepository.{GetRange,GetLatest,GetLatestTradeDate,GetLatestFactor}`（Tier1）、`GetIndexQuotes`(n=2)、`StockRepository.GetPoolMarket`(n=2)、`SignalRepository.GetSignalChg20`(n=21,asof)（Tier2「有界窗+Go 归约」）加 prologue；`NewDailyRepository`/`NewStockRepository`/`NewSignalRepository` 改变参可选，`SetupRouter`/`main.go`/`NewTradingService` 注入（tx-scoped 不传）；`GetByDate`/`GetPrevClose`（Tier3）保持本地。**qe + backend 四集（stock_basic/daily_valuation/financial_indicator/daily_price）读切换代码已全部落地，默认全关、零行为变更**；四集 datahub 首灌 + 对账 + 停采集待生产执行。

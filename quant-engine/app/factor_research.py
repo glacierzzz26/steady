@@ -21,9 +21,10 @@ from datetime import date, timedelta
 import pandas as pd
 from sqlalchemy import func, select
 
+from app import data_source
 from app.db import upsert
 from app.factor_service import FACTOR_DIRECTION, pool_codes
-from app.models.tables import DailyPrice, FactorCorr, FactorStat, FactorValue
+from app.models.tables import FactorCorr, FactorStat, FactorValue
 
 logger = logging.getLogger(__name__)
 
@@ -227,14 +228,11 @@ def precompute_factor_stat(db, factors: list[str] | None = None,
     factors = list(pivots.keys())
 
     # 行情：前向收益需要 [end, end+tail] 的复权收盘；start 之前不需要（IC 无 warmup）
+    # Phase 3：按闸门走 datahub（默认读本地库，逐字等价）
     codes = pool_codes(db)
-    price_rows = db.execute(
-        select(DailyPrice.code, DailyPrice.trade_date, DailyPrice.close,
-               DailyPrice.adj_factor)
-        .where(DailyPrice.code.in_(codes),
-               DailyPrice.trade_date >= start,
-               DailyPrice.trade_date <= end + timedelta(days=PRICE_TAIL_DAYS))
-    ).all()
+    price_rows = data_source.price_rows(
+        db, codes, start, end + timedelta(days=PRICE_TAIL_DAYS),
+        ("code", "trade_date", "close", "adj_factor"))
     adj_close = adj_close_frame(price_rows)
     fwd = {h: forward_returns(adj_close, h) for h in horizons}
 

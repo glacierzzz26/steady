@@ -1,8 +1,8 @@
 """策略基类：所有策略继承统一接口，便于新增/并行/回测对比"""
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import List
 
 import pandas as pd
 

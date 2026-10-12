@@ -2,7 +2,6 @@
 from datetime import date
 
 import pandas as pd
-import pytest
 
 from app.collectors.hotspot import _f, _fmt_flow, _fmt_yi, _pick
 
@@ -59,7 +58,6 @@ def test_cn_indices_em_main_source(monkeypatch):
         ("000300", "沪深300", 4609.17, -0.46),   # 不在 CN_INDEX_NAMES → 忽略
     ], "em")
     monkeypatch.setattr(hs.ak, "stock_zh_index_spot_em", lambda **kw: df)
-    sentinel = object()
     monkeypatch.setattr(hs.ak, "stock_zh_index_spot_sina", lambda: (_ for _ in ()).throw(AssertionError("不应调用新浪")))
     out = hs._cn_indices_from_em()
     assert [r["name"] for r in out] == ["上证指数", "深证成指", "创业板指"]

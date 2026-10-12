@@ -23,15 +23,15 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 from sqlalchemy import select, update
 
+from app import data_source
 from app.db import get_session
 from app.factor_research import (HORIZONS, PRICE_TAIL_DAYS, QUANTILE_H,
-                                 adj_close_frame, forward_returns, ic_series,
+                                 forward_returns, ic_series,
                                  icir, quantile_returns_by_date)
 from app.factor_service import (FACTOR_DIRECTION, PRICE_WINDOW_DAYS,
                                 factor_raw_value, normalize_cross_section,
                                 parametrized_params, pool_codes)
-from app.models.tables import (DailyPrice, DailyValuation, FactorTrial,
-                               FinancialIndicator)
+from app.models.tables import FactorTrial
 
 logger = logging.getLogger(__name__)
 
@@ -66,14 +66,9 @@ def load_range_inputs(db, start: date, end: date) -> dict:
     price_start = start - timedelta(days=PRICE_WINDOW_DAYS)
     price_end = end + timedelta(days=PRICE_TAIL_DAYS)
 
-    price_rows = db.execute(
-        select(DailyPrice.code, DailyPrice.trade_date, DailyPrice.close,
-               DailyPrice.adj_factor)
-        .where(DailyPrice.code.in_(codes),
-               DailyPrice.trade_date >= price_start,
-               DailyPrice.trade_date <= price_end)
-        .order_by(DailyPrice.code, DailyPrice.trade_date)
-    ).all()
+    price_rows = data_source.price_rows(
+        db, codes, price_start, price_end,
+        ("code", "trade_date", "close", "adj_factor"))
     per_code: dict[str, dict] = {}
     pivot: dict[date, dict] = {}
     for code, td, close, adj in price_rows:
@@ -86,27 +81,14 @@ def load_range_inputs(db, start: date, end: date) -> dict:
     adj_close = pd.DataFrame.from_dict(pivot, orient="index").sort_index()
 
     val_start = start - timedelta(days=30)
-    val_rows = db.execute(
-        select(DailyValuation.code, DailyValuation.trade_date,
-               DailyValuation.pe_ttm, DailyValuation.pb)
-        .where(DailyValuation.code.in_(codes),
-               DailyValuation.trade_date >= val_start,
-               DailyValuation.trade_date <= end)
-        .order_by(DailyValuation.code, DailyValuation.trade_date)
-    ).all()
+    val_rows = data_source.valuation_rows(db, codes, val_start, end)
     valuation: dict[str, pd.DataFrame] = {}
     for code, td, pe, pb in val_rows:
         valuation.setdefault(code, []).append(
             {"trade_date": td, "pe_ttm": pe, "pb": pb})
     valuation = {c: pd.DataFrame(rows) for c, rows in valuation.items()}
 
-    fin_rows = db.execute(
-        select(FinancialIndicator.code, FinancialIndicator.report_date,
-               FinancialIndicator.announce_date, FinancialIndicator.roe,
-               FinancialIndicator.debt_ratio)
-        .where(FinancialIndicator.code.in_(codes),
-               FinancialIndicator.announce_date <= end)
-    ).all()
+    fin_rows = data_source.financial_rows(db, codes, as_of=end)
     financial: dict[str, pd.DataFrame] = {}
     for code, rd, ad, roe, debt in fin_rows:
         financial.setdefault(code, []).append(

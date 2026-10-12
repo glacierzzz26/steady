@@ -1,5 +1,5 @@
 """ORM 模型（与 deploy/postgres/init.sql 表结构一一对应）"""
-from datetime import date, datetime
+from datetime import datetime
 
 from sqlalchemy import (
     JSON,

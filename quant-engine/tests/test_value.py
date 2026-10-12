@@ -2,7 +2,6 @@
 from datetime import date
 
 import pandas as pd
-import pytest
 
 from app.factors.value import latest_asof, pb_value, pe_value
 

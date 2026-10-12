@@ -10,8 +10,7 @@ from datetime import date, timedelta
 from apscheduler.schedulers.blocking import BlockingScheduler
 from sqlalchemy import func, select
 
-from app.config import (DAILY_FALLBACK_DAYS, DAILY_SYNC_INTERVAL,
-                        job_disabled)
+from app.config import (DAILY_SYNC_INTERVAL, job_disabled)
 from app.models.tables import DailyPrice
 from app.watchdog import (guarded, healthz_status, register_catchup,
                           spawn_startup_catchup, start_watchdog)

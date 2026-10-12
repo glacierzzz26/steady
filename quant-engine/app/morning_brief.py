@@ -29,11 +29,9 @@ from app import data_source
 from app.db import get_session, upsert
 from app.models.tables import (
     AccountNav,
-    DailyPrice,
     MarketHotspot,
     MorningBrief,
     Position,
-    StockBasic,
     StrategySignal,
     TaskRun,
 )
@@ -50,10 +48,9 @@ CHECKLIST = [
 
 
 def _latest_trade_date(db) -> date | None:
-    """最近一个已有行情数据的交易日（跳过指数伪股票），语义与 app.tasks 一致"""
-    return db.execute(
-        select(func.max(DailyPrice.trade_date)).where(DailyPrice.code.not_like("sh%"))
-    ).scalar()
+    """最近一个已有行情数据的交易日（跳过指数伪股票），语义与 app.tasks 一致
+    —— Phase 3 按闸门走 datahub。"""
+    return data_source.latest_trade_date(db)
 
 
 def _is_open(db, d: date) -> bool:
@@ -150,13 +147,14 @@ def _tasks_section(db, td: date) -> list[dict]:
 
 
 def _positions_section(db) -> list[dict]:
-    return [{"code": r.code, "name": r.name or "", "quantity": r.quantity,
+    rows = db.execute(
+        select(Position.code, Position.quantity, Position.market_value,
+               Position.profit_rate)).all()
+    names = data_source.names_by_codes(db, [r.code for r in rows])
+    return [{"code": r.code, "name": names.get(r.code, ""), "quantity": r.quantity,
              "market_value": float(r.market_value) if r.market_value is not None else None,
              "profit_rate": float(r.profit_rate) if r.profit_rate is not None else None}
-            for r in db.execute(
-                select(Position.code, Position.quantity, Position.market_value,
-                       Position.profit_rate, StockBasic.name)
-                .outerjoin(StockBasic, StockBasic.code == Position.code)).all()]
+            for r in rows]
 
 
 def assemble_brief(db, today: date, td: date, hotspot: dict) -> dict:
@@ -224,12 +222,6 @@ def job_morning_brief() -> None:
         record_task(db, "morning_brief", today, "failed", "早盘简报生成异常")
     finally:
         db.close()
-
-
-def sync_morning_brief() -> bool:
-    """手动触发入口（调试/补数据）：执行今日早报"""
-    job_morning_brief()
-    return True
 
 
 if __name__ == "__main__":
