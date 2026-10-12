@@ -69,7 +69,7 @@ func main() {
 
 	sched := service.NewScheduler(log)
 	accountRepo := repository.NewAccountRepository(db)
-	dailyRepo := repository.NewDailyRepository(db)
+	dailyRepo := repository.NewDailyRepository(db, dsrc)
 	// 每日任务均声明补跑语义：重启后若当天触发时刻已过且当日未执行 → 启动时立即补跑。
 	// 注册顺序即补跑顺序（llm-brief → auto-trade → nav-snapshot → consistency-check），
 	// 其中 llm-brief 依赖 quant-engine 09:10 落库的早报，与交易链无耦合。

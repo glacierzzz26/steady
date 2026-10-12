@@ -249,6 +249,30 @@ func (r *StockRepository) GetPoolValuation(codes []string) (map[string]*PoolValu
 	if len(codes) == 0 {
 		return out, nil
 	}
+	if r.ds != nil && r.ds.Enabled(datasource.DsDailyValuation) {
+		// last=1：每码最新一行；`pe_ttm IS NOT NULL OR pb IS NOT NULL` 过滤与原 SQL
+		// 同判（NULL → 模型 0 → 置 nil 指针，PE/PB 真实数据不恰为 0）。
+		rows, err := r.ds.ValuationLast(context.Background(), codes, 1, nil)
+		if err == nil {
+			for _, rr := range rows {
+				var pe, pb *float64
+				if rr.PeTtm != 0 {
+					pe = &rr.PeTtm
+				}
+				if rr.Pb != 0 {
+					pb = &rr.Pb
+				}
+				if pe == nil && pb == nil {
+					continue
+				}
+				out[rr.Code] = &PoolValuation{Pe: pe, Pb: pb}
+			}
+			return out, nil
+		}
+		if !r.dsFallback(err) {
+			return nil, err
+		}
+	}
 	type row struct {
 		Code string
 		Pe   *float64

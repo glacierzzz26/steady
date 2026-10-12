@@ -25,8 +25,7 @@ from datetime import date, timedelta
 from sqlalchemy import func, select
 
 from app import data_source
-from app.models.tables import (DailyPrice, DailyValuation, FactorValue,
-                               FinancialIndicator)
+from app.models.tables import DailyPrice, FactorValue, FinancialIndicator
 
 logger = logging.getLogger("data_quality")
 
@@ -174,21 +173,23 @@ def _dup_count(db, model, *cols) -> int:
 
 
 def _check_duplicates(db, td: date) -> dict:
-    tables = [
-        ("daily_price", DailyPrice, (DailyPrice.code, DailyPrice.trade_date)),
-        ("daily_valuation", DailyValuation,
-         (DailyValuation.code, DailyValuation.trade_date)),
-        ("financial_indicator", FinancialIndicator,
-         (FinancialIndicator.code, FinancialIndicator.report_date)),
-        ("factor_value", FactorValue,
-         (FactorValue.code, FactorValue.factor_name, FactorValue.trade_date)),
-    ]
-    broken = {name: _dup_count(db, model, *cols) for name, model, cols in tables}
+    names = ("daily_price", "daily_valuation", "financial_indicator", "factor_value")
+    broken = {
+        "daily_price": _dup_count(
+            db, DailyPrice, DailyPrice.code, DailyPrice.trade_date),
+        "daily_valuation": data_source.dup_keys(db, "daily_valuation"),
+        "financial_indicator": _dup_count(
+            db, FinancialIndicator, FinancialIndicator.code,
+            FinancialIndicator.report_date),
+        "factor_value": _dup_count(
+            db, FactorValue, FactorValue.code, FactorValue.factor_name,
+            FactorValue.trade_date),
+    }
     broken = {k: v for k, v in broken.items() if v}
     if not broken:
         return {"name": "duplicates", "level": "ok",
                 "message": "重复数据　4 张表均 0 条",
-                "metrics": {name: 0 for name, _, _ in tables}}
+                "metrics": {name: 0 for name in names}}
     msg = "重复数据　" + "　".join(f"{k} {v} 个键" for k, v in broken.items())
     return {"name": "duplicates", "level": "fail", "message": msg,
             "metrics": dict(broken)}
@@ -255,7 +256,7 @@ def _check_valuation(db, td: date) -> dict:
     if p_latest is None:
         return {"name": "valuation", "level": "warn",
                 "message": "估值　无行情数据", "metrics": {}}
-    v_latest = db.execute(select(func.max(DailyValuation.trade_date))).scalar()
+    v_latest = data_source.valuation_latest(db)
     if v_latest is None:
         return {"name": "valuation", "level": "fail",
                 "message": f"估值　从未同步（行情已到 {p_latest}）",

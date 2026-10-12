@@ -19,8 +19,7 @@ from app.db import upsert
 from app.factors.financial import debt_by_announce, roe_by_announce
 from app.factors.trend import macd_signal, ma_trend, winsorize
 from app.factors.value import pb_value, pe_value
-from app.models.tables import (DailyPrice, DailyValuation,
-                               FinancialIndicator, FactorValue)
+from app.models.tables import DailyPrice, FinancialIndicator, FactorValue
 
 logger = logging.getLogger(__name__)
 
@@ -66,14 +65,7 @@ def load_factor_inputs(db, codes: list[str], trade_date: date) -> dict[str, dict
         anchors[code] = float(adj)
 
     # 2. 估值（as-of 窗口内，停牌日取最近一日）
-    val_rows = db.execute(
-        select(DailyValuation.code, DailyValuation.trade_date,
-               DailyValuation.pe_ttm, DailyValuation.pb)
-        .where(DailyValuation.code.in_(codes),
-               DailyValuation.trade_date >= val_start,
-               DailyValuation.trade_date <= trade_date)
-        .order_by(DailyValuation.code, DailyValuation.trade_date)
-    ).all()
+    val_rows = data_source.valuation_rows(db, codes, val_start, trade_date)
     valuations: dict[str, list] = {}
     for code, td, pe, pb in val_rows:
         valuations.setdefault(code, []).append(
