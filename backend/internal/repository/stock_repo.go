@@ -360,42 +360,6 @@ func (r *StockRepository) GetNames(codes []string) (map[string]string, error) {
 	return out, nil
 }
 
-// GetIndustries 批量查询股票行业（风控行业集中度用），key: code；查不到的代码缺失
-func (r *StockRepository) GetIndustries(codes []string) (map[string]string, error) {
-	out := make(map[string]string, len(codes))
-	if len(codes) == 0 {
-		return out, nil
-	}
-	if r.useDS() {
-		rows, err := r.ds.StockBasicByCodes(context.Background(), codes)
-		if err == nil {
-			for _, s := range rows {
-				out[s.Code] = s.Industry
-			}
-			return out, nil
-		}
-		if !r.dsFallback(err) {
-			return nil, err
-		}
-	}
-	type row struct {
-		Code     string
-		Industry string
-	}
-	var rows []row
-	err := r.db.Model(&model.StockBasic{}).
-		Select("code, industry").
-		Where("code IN (?)", codes).
-		Scan(&rows).Error
-	if err != nil {
-		return nil, err
-	}
-	for _, rr := range rows {
-		out[rr.Code] = rr.Industry
-	}
-	return out, nil
-}
-
 // PoolFinancial 财务摘要（G2）：roe（公告日最新，同详情口径）
 type PoolFinancial struct {
 	Roe *float64

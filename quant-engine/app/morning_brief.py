@@ -224,12 +224,6 @@ def job_morning_brief() -> None:
         db.close()
 
 
-def sync_morning_brief() -> bool:
-    """手动触发入口（调试/补数据）：执行今日早报"""
-    job_morning_brief()
-    return True
-
-
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     job_morning_brief()

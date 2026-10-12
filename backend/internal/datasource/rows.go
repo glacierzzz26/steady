@@ -19,12 +19,6 @@ type stockBasicRow struct {
 	DataScope string       `json:"data_scope"`
 }
 
-type calendarRow struct {
-	CalDate  datahub.Date `json:"cal_date"`
-	IsOpen   bool         `json:"is_open"`
-	Exchange string       `json:"exchange"`
-}
-
 type dailyPriceRow struct {
 	Code         string       `json:"code"`
 	TradeDate    datahub.Date `json:"trade_date"`

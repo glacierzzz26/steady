@@ -509,7 +509,7 @@ def _probe_factor_value(_delta: float) -> bool:
 
 def _probe_strategy_signal(_delta: float) -> bool:
     """当日策略信号是否已产出"""
-    from app.models.tables import FactorValue, StrategySignal
+    from app.models.tables import StrategySignal
 
     db = get_session()
     try:

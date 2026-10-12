@@ -2,10 +2,8 @@
 from datetime import date
 
 import pandas as pd
-import pytest
 
-from app.factors.financial import (debt_by_announce, latest_by_announce,
-                                   roe_by_announce)
+from app.factors.financial import (debt_by_announce, roe_by_announce)
 
 
 def _fin_df(rows):

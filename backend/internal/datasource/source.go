@@ -22,7 +22,6 @@ import (
 // 数据集 id（值 = datahub 数据集 id，用于 DATAHUB_READ_DATASETS 白名单与 HTTP 路径）。
 const (
 	DsStockBasic         = "stock_basic"
-	DsTradeCalendar      = "trade_calendar"
 	DsDailyPrice         = "daily_price"
 	DsDailyValuation     = "daily_valuation"
 	DsFinancialIndicator = "financial_indicator"
@@ -46,9 +45,6 @@ func (s *Source) Enabled(dataset string) bool { return s.cfg.ReadEnabled(dataset
 
 // FallbackLocal 读失败时是否回退本地（默认 false = 失败即抛）。
 func (s *Source) FallbackLocal() bool { return s.cfg.FallbackLocal }
-
-// Reset 清客户端 TTL 缓存（测试用）。
-func (s *Source) Reset() { s.c.Reset() }
 
 const dateLayout = "2006-01-02"
 
@@ -131,22 +127,6 @@ func (s *Source) StockBasicList(ctx context.Context, f StockBasicFilter) ([]mode
 	out := make([]model.StockBasic, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, toStockBasic(r))
-	}
-	return out, nil
-}
-
-// ---- trade_calendar ----
-
-// OpenDates [start, end] 区间内的交易日（升序）。
-func (s *Source) OpenDates(ctx context.Context, start, end time.Time) ([]time.Time, error) {
-	rows, err := datahub.Fetch[calendarRow](s.c, ctx, DsTradeCalendar, map[string]string{
-		"start": start.Format(dateLayout), "end": end.Format(dateLayout), "is_open": "true"})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]time.Time, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, r.CalDate.Time)
 	}
 	return out, nil
 }
@@ -235,29 +215,6 @@ func (s *Source) LatestTradeDate(ctx context.Context, excludeIndex bool) (*time.
 }
 
 // ---- daily_valuation ----
-
-// ValuationRange 多码区间估值。
-func (s *Source) ValuationRange(ctx context.Context, codes []string, start, end *time.Time) ([]model.DailyValuation, error) {
-	if len(codes) == 0 {
-		return nil, nil
-	}
-	p := map[string]string{"codes": strings.Join(codes, ",")}
-	if start != nil {
-		p["start"] = start.Format(dateLayout)
-	}
-	if end != nil {
-		p["end"] = end.Format(dateLayout)
-	}
-	rows, err := datahub.Fetch[valuationRow](s.c, ctx, DsDailyValuation, p)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]model.DailyValuation, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, toValuation(r))
-	}
-	return out, nil
-}
 
 // ValuationLast 多码「每 code 最近 n 行」估值（可选锚 asof = trade_date ≤ asof）。
 // datahub 侧用 ROW_NUMBER(PARTITION BY code ORDER BY trade_date DESC) 窗口，

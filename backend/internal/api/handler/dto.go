@@ -178,14 +178,6 @@ func toStockBasicDTO(m model.StockBasic) StockBasicDTO {
 	}
 }
 
-func toStockBasicDTOs(items []model.StockBasic) []StockBasicDTO {
-	out := make([]StockBasicDTO, 0, len(items))
-	for _, it := range items {
-		out = append(out, toStockBasicDTO(it))
-	}
-	return out
-}
-
 func toKlineItem(m model.DailyPrice) klineItem {
 	return klineItem{
 		Date:   formatDate(m.TradeDate),

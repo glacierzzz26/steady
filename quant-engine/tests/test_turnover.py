@@ -10,7 +10,6 @@ cost     = 累计(佣金+印花税+滑点) / 平均总资产 × (252/交易日�
 手算：buy_amount=10010，total_cost=36.4945，avg=(99985+100963.5055)/2，
       turnover≈12.55，cost≈0.0458（与设计 §3.5 口径一致，DECIMAL(8,2)/(8,4)）。
 """
-import math
 from datetime import date
 
 import pytest

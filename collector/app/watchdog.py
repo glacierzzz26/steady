@@ -27,7 +27,7 @@ import os
 import threading
 import time
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 logger = logging.getLogger("watchdog")
 

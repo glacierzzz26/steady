@@ -1,7 +1,6 @@
 """回测任务队列服务测试：claim_job 原子领取 + 报告带净值序列"""
 from datetime import date
 
-import pytest
 from sqlalchemy import select
 
 from app.backtest_service import claim_job

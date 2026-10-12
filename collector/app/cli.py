@@ -120,7 +120,6 @@ def cmd_audit_tencent(args):
     """
     from sqlalchemy import select
 
-    from app.collectors.daily import sina_symbol
     from app.db import get_session
     from app.models.tables import DailyPrice
     from app.sources import tencent

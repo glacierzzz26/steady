@@ -58,11 +58,3 @@ def get_task_status(db, task_name: str, run_date) -> str | None:
 def already_run(db, task_name: str, run_date) -> bool:
     """该任务当日是否已有执行记录（含失败），用于去重"""
     return get_task_status(db, task_name, run_date) is not None
-
-
-def list_recent(db, limit: int = 20) -> list[TaskRun]:
-    """最近任务执行记录（页面展示用）"""
-    return db.execute(
-        select(TaskRun).order_by(TaskRun.run_date.desc(),
-                                 TaskRun.created_at.desc()).limit(limit)
-    ).scalars().all()

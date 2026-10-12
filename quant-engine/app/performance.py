@@ -15,9 +15,8 @@ G9 同款模式：quant-engine 预计算落 strategy_perf（迁移 006），Go/�
 """
 import logging
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
-import pandas as pd
 from sqlalchemy import func, select
 
 from app import data_source
