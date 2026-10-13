@@ -6,7 +6,7 @@
 > 承接 [`datahub-phase2-地基搬栈.md`](datahub-phase2-地基搬栈.md)（采集已切 datahub）。
 > **生产操作手册**（底种 + 对账 + 翻闸 + 停采，只写不执行）：[`datahub-phase3-生产切换runbook.md`](datahub-phase3-生产切换runbook.md)。
 
-**状态**：🚧 进行中（calendar 读切换**已生产落地** 2026-10-09，发布 `steady-20261009-87e7dc7`；**backend Go 侧读取切换已纳入范围**；`stock_basic`、`daily_valuation`、`financial_indicator`、`daily_price`（含 index）读切换**代码全部落地**（qe+backend，闸门默认关），四集首灌+对账+停采待生产执行）。
+**状态**：✅ **已全量生产落地**（2026-10-13）：`calendar` 2026-10-09 首切；`stock_basic`/`daily_valuation`/`financial_indicator`/`daily_price`（含 index）四集于 2026-10-13 生产翻读 + 停 steady 采集（qe + backend 双消费方），datahub 成**唯一采集方**。执行记录见 [`datahub-phase3-生产切换runbook.md`](datahub-phase3-生产切换runbook.md) §5。剩余：Tier3 读点本地陈旧待 Phase 4 重构、过渡期告警断链。
 
 ## 剩余数据集逐集全迁移（2026-10-09 起）
 
@@ -287,6 +287,7 @@ params `codes` 逗号 IN / `start`/`end` 区间 / `date` 精确（覆盖 start/e
 
 ## 遗留
 
-- backend（Go）读切换 `stock_basic`、`daily_valuation`、`financial_indicator`、`daily_price`（含 index）**已全部落地**；四个数据集的 datahub 首灌 + 对账 + 停采待生产执行。
+- backend（Go）读切换 `stock_basic`、`daily_valuation`、`financial_indicator`、`daily_price`（含 index）**已全部落地**；四集 **2026-10-13 生产翻读 + 停 steady 采集**（datahub 唯一采集方，见 runbook §5）。
+- **Tier3 读点本地陈旧**：停 `daily_price` 采集后，qe `backtest/engine` 逐 (code,date) 读、`data_quality` prev 推导仍读本地冻结副本（2026-10-12）→ 跨停采日的回测/质量检查受限，待 Phase 4 重构。
 - collector 读切换（随 collector 退役）。
 - 过渡期告警断链（datahub 写自有库 `task_run` → steady `notify_scheduler` 不读，暂看 datahub-collector `/healthz`）仍待解。
