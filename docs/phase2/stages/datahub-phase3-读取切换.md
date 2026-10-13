@@ -6,7 +6,7 @@
 > 承接 [`datahub-phase2-地基搬栈.md`](datahub-phase2-地基搬栈.md)（采集已切 datahub）。
 > **生产操作手册**（底种 + 对账 + 翻闸 + 停采，只写不执行）：[`datahub-phase3-生产切换runbook.md`](datahub-phase3-生产切换runbook.md)。
 
-**状态**：🚧 进行中（calendar 读切换**已生产落地** 2026-10-09，发布 `steady-20261009-87e7dc7`；**backend Go 侧读取切换已纳入范围**；`stock_basic`、`daily_valuation`、`financial_indicator`、`daily_price`（含 index）读切换**代码全部落地**（qe+backend，闸门默认关），四集首灌+对账+停采待生产执行）。
+**状态**：✅ **已全量生产落地**（2026-10-13）：`calendar` 2026-10-09 首切；`stock_basic`/`daily_valuation`/`financial_indicator`/`daily_price`（含 index）四集于 2026-10-13 生产翻读 + 停 steady 采集（qe + backend 双消费方），datahub 成**唯一采集方**。执行记录见 [`datahub-phase3-生产切换runbook.md`](datahub-phase3-生产切换runbook.md) §5。剩余：Tier3 读点本地陈旧待 Phase 4 重构、过渡期告警断链。
 
 ## 剩余数据集逐集全迁移（2026-10-09 起）
 
@@ -285,8 +285,82 @@ params `codes` 逗号 IN / `start`/`end` 区间 / `date` 精确（覆盖 start/e
   「datahub 500 ⇒ 失败即抛」。**`go test ./...` 全绿**。
 - 放行门（datahub 首灌 `daily_price`（含指数行）+ 逐位对账零偏差）与停采 **待生产执行**。
 
+## Phase 4 · Tier3 读点迁移（2026-10-13 起）
+
+Tier3 读点在 Phase 3 **有意留本地**；`daily_price` 停采后本地副本**冻结在 2026-10-12**，
+Tier3 读点读到陈旧数据。本阶段逐增量迁到 datahub，使本地 `daily_price` 可完全退役。
+范围：引擎 **A** + 后端交易 **C** + `data_quality` **B**（含两处 datahub 新原语）；分 PR 串行；
+闸门默认关 = 零行为变更、fail-closed。
+
+### 增量 A — 引擎（`backtest/engine.py`，2026-10-13）
+
+- **datahub 侧**：无新增（复用 `daily_price`）。
+- **qe 侧**：
+  - `_get_benchmark_nav` → `data_source.price_rows(db, ["sh000300"], 区间起, 区间止, ("trade_date","close"))`
+    （原读本地**全表**；现按回测区间收窄并走 datahub，`Decimal→float` 已归一 ⇒ 字典逐位一致）。
+    **这是引擎中唯一恒活（无策略短路）的本地读**：跨冻结日回测曾致 benchmark/excess_return 静默截断。
+  - `_get_price` / `_get_fill_price`(t1_open) / `_get_prev_close` → `price_day` / `price_rows`（闸门关=逐字本地）。
+    生产回测一律经 `ReplayStrategy`（实现 `price_at`/`open_at`/`prev_close_at`），此三方法兜底为**死路径**；
+    迁移使「引擎读本地冻结 `daily_price`」彻底清零。
+  - 移除 `DailyPrice` / `select` import。
+- **测试**：`tests/test_backtest.py` 增 `_get_benchmark_nav` 闸门开单测（boom-db + fake client，断言
+  一次往返、区间缓存、**不触本地库**）；既有回测套件（闸门关）全绿；`pytest` 228 passed。
+
+### 增量 C — 后端交易批量快照（`daily_repo.go` + `service/trading.go`，2026-10-13）★ 修停摆
+
+- **datahub 侧**：无新增（复用 `daily_price` 的 `last` 有界窗）。
+- **backend 侧**：
+  - `DailyRepository` 增**当日快照** `PrefetchDay(ctx, codes, tradeDate)`：闸门开 →
+    `DailyLatest(codes, last=2, asof=tradeDate)` **恰一次**往返，按升序 `(code, trade_date)` 归约——
+    末行 `trade_date==当日` ⇒**当日 bar**（供 `GetByDate`）+ 前一行收盘（供 `GetPrevClose`）；
+    末行 `< 当日`（当日停牌/无数据）⇒ 当日无 bar、prev close = 末行；该码全无行 ⇒ 当日 `nil` /
+    prev `(0,false)`。闸门关（ds 为 nil / 未开 / codes 空）⇒ no-op。
+  - `GetByDate` / `GetPrevClose` **首检快照**（`dayLoaded && 同日` → 走内存映射，**不触 gorm**）；
+    否则**逐字回退**原本地实现（零行为变更；tx-scoped 构造不传 ds）。
+  - `ExecuteDay`：`dr := NewDailyRepository(tx, s.ds)`；在逐码循环**之前**聚集 code 集合
+    （`ledger.positions` ∪ `or.GetPending` ∪ 当日 SELL/BUY signals，须**上移** `sr.GetSignals`
+    两 action 的纯读）→ `dr.PrefetchDay(...)` 一次预取；失败即 `return err`（回滚 = fail-closed）。
+    下游逐码 `GetByDate`/`GetPrevClose` 调用点**零改动**。
+  - **修停摆**：冻结日后 `GetByDate(code, today)→nil` ⇒ mark-to-market 保留旧价、`fillStrategy`
+    全「停牌跳过」、`execManual` 全「当日无行情」拒单 ⇒ **自 10-13 起实际不再成交**；快照后恢复。
+- **等价/风险**：`ExecuteDay` 事务**不写 `daily_price`** ⇒ 快照一致（且比「读冻结本地」更正确）；
+  全程**恰一次**往返（N 码不变，避免事务内 N+1）。风险＝**快照完整性**（漏码 ⇒ 误判停牌 ⇒ 静默跳单）
+  ⇒ 预取**必在全部 code 集已知后**执行，并加完整性测试（覆盖 SELL+BUY）。
+- **测试**：`internal/repository/daily_ds_test.go` 增 `PrefetchDay`（命中快照 + **恰一次**往返 +
+  `last=2&asof` 断言）、当日停牌码、当日上市码（无前收）、缺码、fail-closed（500 即抛）、闸门关 no-op；
+  `internal/service/trading_ds_test.go` 增 `ExecuteDay` 端到端（本地 `daily_price` **不种**=模拟冻结，
+  datahub 有当日行情 ⇒ `BuyCount==1`、恰一次 `last=2&asof`、mark-to-market 取新价）。`go test ./...` 全绿。
+
+### 增量 B — data_quality prev 推导 / 缺日（`data_source.py` + `data_quality.py`，2026-10-13）
+
+- **datahub 侧**（另一仓 datahub PR #17）：`latest_trade_date` 加 `before` 参数（trade_date **严格 <**）；
+  新增小数据集 `daily_price_days`（区间内有行情的交易日 **DISTINCT 升序**，`exclude_index` 默认 true）。
+  **翻闸前置**：qe 侧闸门开时须 datahub 镜像**已发布**含此两原语（跨仓发布顺序：先合 datahub PR + 发布镜像）。
+- **qe 侧**：
+  - `data_source.py` 增 `latest_trade_date(db, before=None)`（闸门开透传 `before`；闸门关本地
+    `max(trade_date) where code NOT LIKE 'sh%' [and trade_date < before]`）与
+    `price_days(db, start, end, exclude_index=True)`（闸门开走新集 `daily_price_days`，关走本地 `distinct`）。
+  - `data_quality._check_coverage`：`prev = latest_trade_date(db, before=td)`；
+    `prev_bar = {c for (c,) in price_day(db, pool, prev, ("code",))}`（suspect 逻辑不变）。
+  - `data_quality._check_price_anomalies`：`prev = latest_trade_date(db, before=latest)`；
+    `cur = price_day(db, [], latest, _ANOMALY_FIELDS)`（空 codes = 全市场，**含指数**，对齐原
+    `select(DailyPrice)` 无过滤口径）；`prev_close = {code: close for code, close in
+    price_day(db, [], prev, ("code", "close")) if close}`；循环体 ORM 属性访问改**元组下标**。
+  - `data_quality._check_missing_days`：`present = set(price_days(db, min(days), max(days)))`；
+    `missing = [d for d in days if d not in present]`。移除 `data_quality` 的 `DailyPrice` import。
+- **等价**：`max(trade_date) where code NOT LIKE 'sh%' and <td` ≡
+  `latest_trade_date{before=td, exclude_index=true}`；`prev_bar`/`cur`/`prev_close`/缺日集合逐字对齐。
+  `remediation.py` 复用 `_check_coverage` 一并修复，自身不改。
+- **测试**：`tests/test_data_source.py` 增 `latest_trade_date(before)` 严格 `<`（本地 + 远端 + 参数断言）、
+  `price_days`（本地/远端/fail-closed）；新增 `tests/test_data_quality_ds.py`——**同种子过闸门关（sqlite）
+  与闸门开（fake client + `_BoomDB`）**，断言 `_check_coverage`（prev/prev_bar/suspect）、
+  `_check_missing_days`、`_check_price_anomalies`（prev_close 涨跌幅）**逐位相同**。`pytest` 237 passed。
+
 ## 遗留
 
-- backend（Go）读切换 `stock_basic`、`daily_valuation`、`financial_indicator`、`daily_price`（含 index）**已全部落地**；四个数据集的 datahub 首灌 + 对账 + 停采待生产执行。
+- backend（Go）读切换 `stock_basic`、`daily_valuation`、`financial_indicator`、`daily_price`（含 index）**已全部落地**；四集 **2026-10-13 生产翻读 + 停 steady 采集**（datahub 唯一采集方，见 runbook §5）。
+- **Tier3 读点迁移**（Phase 4）：引擎（`backtest/engine`）**已迁**（增量 A，见上）；backend
+  `GetByDate`/`GetPrevClose`（交易批量快照）**已迁**（增量 C，见上）；`data_quality` prev 推导/缺日
+  **已迁**（增量 B，见上，配 datahub `latest_trade_date.before` + 新集 `daily_price_days`）。**Tier3 全部迁完**。
 - collector 读切换（随 collector 退役）。
 - 过渡期告警断链（datahub 写自有库 `task_run` → steady `notify_scheduler` 不读，暂看 datahub-collector `/healthz`）仍待解。

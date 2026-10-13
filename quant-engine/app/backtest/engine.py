@@ -1,14 +1,13 @@
 """回测引擎主循环：按交易日历逐日执行，记录净值/回撤/基准对比"""
 import logging
+from datetime import date as _date, timedelta
 from typing import List, Optional
 
 import pandas as pd
-from sqlalchemy import select
 
 from app import data_source
 from app.backtest.broker import Broker
 from app.backtest.portfolio import Portfolio
-from app.models.tables import DailyPrice
 from app.strategies.base import Signal, Strategy
 
 logger = logging.getLogger(__name__)
@@ -56,46 +55,39 @@ class BacktestEngine:
             self.start_date, self.end_date, db=self.db)]
 
     def _get_price(self, code: str, date: str) -> Optional[float]:
-        """当日真实收盘价（不复权）；优先用策略预加载数据，回退查库"""
+        """当日真实收盘价（不复权）；优先用策略预加载数据，回退 data_source"""
         if hasattr(self.strategy, "price_at"):
             return self.strategy.price_at(code, date)
-        close = self.db.execute(
-            select(DailyPrice.close).where(
-                DailyPrice.code == code, DailyPrice.trade_date == date)
-        ).scalar()
-        return float(close) if close is not None else None
+        rows = data_source.price_day(
+            self.db, [code], _date.fromisoformat(date), ("close",))
+        return float(rows[0][0]) if rows and rows[0][0] is not None else None
 
     def _get_fill_price(self, code: str, date: str) -> Optional[float]:
         """成交价：t_close=当日收盘；t1_open=当日开盘（无 open 视为停牌/数据缺失）"""
         if self.fill_mode == "t1_open":
             if hasattr(self.strategy, "open_at"):
                 return self.strategy.open_at(code, date)
-            open_ = self.db.execute(
-                select(DailyPrice.open).where(
-                    DailyPrice.code == code, DailyPrice.trade_date == date)
-            ).scalar()
-            return float(open_) if open_ is not None else None
+            rows = data_source.price_day(
+                self.db, [code], _date.fromisoformat(date), ("open",))
+            return float(rows[0][0]) if rows and rows[0][0] is not None else None
         return self._get_price(code, date)
 
     def _get_prev_close(self, code: str, date: str) -> Optional[float]:
         """前一交易日收盘价，用于涨跌停判断"""
         if hasattr(self.strategy, "prev_close_at"):
             return self.strategy.prev_close_at(code, date)
-        rows = self.db.execute(
-            select(DailyPrice.close)
-            .where(DailyPrice.code == code, DailyPrice.trade_date < date)
-            .order_by(DailyPrice.trade_date.desc())
-            .limit(1)
-        ).scalar()
-        return float(rows) if rows is not None else None
+        prev_day = _date.fromisoformat(date) - timedelta(days=1)
+        rows = data_source.price_rows(self.db, [code], None, prev_day, ("close",))
+        return float(rows[-1][0]) if rows and rows[-1][0] is not None else None
 
     def _get_benchmark_nav(self, date: str) -> Optional[float]:
-        """沪深300 指数当日收盘（用于超额收益对比），缓存全量"""
+        """沪深300 指数当日收盘（用于超额收益对比），缓存区间全量"""
         if self._benchmark_cache is None:
-            rows = self.db.execute(
-                select(DailyPrice.trade_date, DailyPrice.close)
-                .where(DailyPrice.code == "sh000300")
-            ).all()
+            rows = data_source.price_rows(
+                self.db, ["sh000300"],
+                _date.fromisoformat(self.start_date),
+                _date.fromisoformat(self.end_date),
+                ("trade_date", "close"))
             self._benchmark_cache = {
                 d.isoformat(): float(c) for d, c in rows if c is not None}
         return self._benchmark_cache.get(date)

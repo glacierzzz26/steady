@@ -25,7 +25,7 @@ from datetime import date, timedelta
 from sqlalchemy import func, select
 
 from app import data_source
-from app.models.tables import DailyPrice, FactorValue, FinancialIndicator
+from app.models.tables import FactorValue, FinancialIndicator
 
 logger = logging.getLogger("data_quality")
 
@@ -101,16 +101,10 @@ def _check_coverage(db, td: date) -> dict:
     # suspect = 「昨日有 bar 而今日无」—— 真缺口（当日同步未跑完/失败），
     # 而非停牌。**这是自愈 stage1 的 diff-repair 输入**（Issue #13）：只看真缺口，
     # 停牌股昨日今日都无 bar、不进 suspect，自愈不再每日空跑。
-    prev = db.execute(
-        select(func.max(DailyPrice.trade_date))
-        .where(DailyPrice.code.not_like("sh%"), DailyPrice.trade_date < td)
-    ).scalar()
+    prev = data_source.latest_trade_date(db, before=td)
     suspect: list[str] = []
     if prev is not None:
-        prev_bar = set(db.execute(
-            select(DailyPrice.code).distinct().where(
-                DailyPrice.trade_date == prev, DailyPrice.code.in_(pool))
-        ).scalars().all())
+        prev_bar = {c for (c,) in data_source.price_day(db, pool, prev, ("code",))}
         suspect = sorted(prev_bar - set(with_bar))
     # 自愈用 suspect；suspect 为空而 miss 不为空 → 是停牌面而非缺口，不触自愈
     missing_codes = suspect if _collect_scope() == "a_share" else missing_all
@@ -142,14 +136,8 @@ def _check_missing_days(db, td: date) -> dict:
         return {"name": "missing_days", "level": "warn",
                 "message": "缺失交易日　无行情数据", "metrics": {}}
     days = data_source.recent_open_days(latest, MISSING_DAY_WINDOW, db=db)
-    missing = []
-    for d in days:
-        n = db.execute(
-            select(func.count()).select_from(DailyPrice)
-            .where(DailyPrice.trade_date == d, DailyPrice.code.not_like("sh%"))
-        ).scalar()
-        if n == 0:
-            missing.append(d)
+    present = set(data_source.price_days(db, min(days), max(days))) if days else set()
+    missing = [d for d in days if d not in present]
     if not missing:
         return {"name": "missing_days", "level": "ok",
                 "message": f"缺失交易日　最近 {len(days)} 个开市日无缺失",
@@ -188,44 +176,44 @@ def _check_duplicates(db, td: date) -> dict:
             "metrics": dict(broken)}
 
 
+_ANOMALY_FIELDS = ("code", "close", "high", "low", "open", "volume", "amount")
+
+
 def _check_price_anomalies(db, td: date) -> dict:
     latest = _market_latest(db)
     if latest is None:
         return {"name": "price_anomalies", "level": "warn",
                 "message": "价格异常　无行情数据", "metrics": {}}
-    prev = db.execute(
-        select(func.max(DailyPrice.trade_date)).where(
-            DailyPrice.code.not_like("sh%"), DailyPrice.trade_date < latest)
-    ).scalar()
-    cur = {r.code: r for r in db.execute(
-        select(DailyPrice).where(DailyPrice.trade_date == latest)).scalars().all()}
+    # Phase 4：prev 推导 + cur/prev_close 全走 data_source（闸门关逐字回退本地）。
+    # codes 空 = 全市场（**含指数**，对齐原 `select(DailyPrice)` 无过滤口径）。
+    prev = data_source.latest_trade_date(db, before=latest)
+    cur = {r[0]: r for r in data_source.price_day(db, [], latest, _ANOMALY_FIELDS)}
     prev_close = {}
     if prev is not None:
-        prev_close = {r.code: r.close for r in db.execute(
-            select(DailyPrice).where(DailyPrice.trade_date == prev)).scalars().all()
-            if r.close}
+        prev_close = {code: close for code, close
+                      in data_source.price_day(db, [], prev, ("code", "close")) if close}
 
     fails, warns = [], []
     for code, r in cur.items():
-        if r.close is None or r.close <= 0:
-            fails.append(f"{code} 收盘价 {r.close}")
+        _, close, high, low, open_, vol, amt = r
+        if close is None or close <= 0:
+            fails.append(f"{code} 收盘价 {close}")
             continue
-        if r.high is None or r.low is None or r.high < r.low:
-            fails.append(f"{code} 高低价异常（低 {r.low}/高 {r.high}）")
+        if high is None or low is None or high < low:
+            fails.append(f"{code} 高低价异常（低 {low}/高 {high}）")
             continue
-        if r.open is not None and (
-                r.high < max(r.open, r.close) or r.low > min(r.open, r.close)):
+        if open_ is not None and (high < max(open_, close) or low > min(open_, close)):
             fails.append(f"{code} 开收价超出高低区间")
             continue
-        if r.volume is not None and r.volume < 0:
+        if vol is not None and vol < 0:
             fails.append(f"{code} 成交量负数")
             continue
-        if r.amount is not None and r.amount < 0:
+        if amt is not None and amt < 0:
             fails.append(f"{code} 成交额负数")
             continue
         pc = prev_close.get(code)
         if pc:
-            pct = abs(float(r.close) / float(pc) - 1) * 100
+            pct = abs(float(close) / float(pc) - 1) * 100
             if pct > LIMIT_HARD:
                 fails.append(f"{code} 涨跌幅 {pct:.1f}% 超上限")
             elif pct > _board_limit(code) + BOARD_LIMIT_TOL:

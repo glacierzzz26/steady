@@ -18,6 +18,15 @@ import (
 type DailyRepository struct {
 	db *gorm.DB
 	ds *datasource.Source
+
+	// 当日行情快照（Tier3 读点批量化）：由 PrefetchDay 一次性预取填充，仅交易日
+	// 执行路径（ExecuteDay）使用。dayLoaded 且调用日 == dayDate 时，GetByDate /
+	// GetPrevClose 走内存映射——既不触 gorm（避免事务内 N+1），也脱离本地冻结副本；
+	// 否则逐字回退本地实现（闸门关 = 零行为变更）。
+	dayLoaded  bool
+	dayDate    time.Time
+	dayBars    map[string]model.DailyPrice // trade_date == dayDate 的当日 bar
+	prevCloses map[string]float64          // trade_date < dayDate 的最近一行收盘
 }
 
 // NewDailyRepository 构造。ds 变参可选：现有 `NewDailyRepository(db)` / tx-scoped
@@ -121,8 +130,59 @@ func (r *DailyRepository) GetLatestValuation(code string) (*model.DailyValuation
 	return &v, nil
 }
 
+// PrefetchDay 预取「当日 + 前一交易日」行情快照（**恰一次** datahub 往返），供同一事务内
+// 逐码 GetByDate / GetPrevClose 读内存映射——避免事务内 N+1，并脱离本地冻结副本。
+//
+// 闸门关（ds 为 nil / daily_price 未开 / codes 为空）→ no-op（dayLoaded=false），
+// GetByDate / GetPrevClose 逐字回退本地 gorm（零行为变更，保 tx-scoped 一致）。
+// 闸门开 → DailyLatest(codes, last=2, asof=tradeDate)：每码 trade_date ≤ 当日 的最近 2 行
+// （升序）。末行 == 当日 ⇒ 当日 bar（dayBars）+ 前一行收盘（prevCloses）；末行 < 当日
+// （当日停牌/无数据）⇒ 仅 prevCloses（当日无 bar ⇒ GetByDate 返 nil）。
+// 读失败按 dsFallback 处置：未开 fallback ⇒ 返回 err（调用方回滚，fail-closed）。
+func (r *DailyRepository) PrefetchDay(ctx context.Context, codes []string, tradeDate time.Time) error {
+	if !r.useDS(datasource.DsDailyPrice) || len(codes) == 0 {
+		return nil
+	}
+	bars, err := r.ds.DailyLatest(ctx, codes, 2, &tradeDate)
+	if err != nil {
+		if !r.dsFallback(datasource.DsDailyPrice, err) {
+			return err
+		}
+		return nil
+	}
+	dayBars := make(map[string]model.DailyPrice, len(codes))
+	prevCloses := make(map[string]float64, len(codes))
+	for _, b := range bars { // 升序 (code, trade_date)：同码后写覆盖先写
+		if sameDay(b.TradeDate, tradeDate) {
+			dayBars[b.Code] = b
+		} else {
+			prevCloses[b.Code] = b.Close // 末行（最近一行 < 当日）即前一交易日收盘
+		}
+	}
+	r.dayDate = tradeDate
+	r.dayBars = dayBars
+	r.prevCloses = prevCloses
+	r.dayLoaded = true
+	return nil
+}
+
+// sameDay 同一日（忽略时分/时区位置）：对齐调用方 tradeDate（可能带时刻）与 datahub 的
+// trade_date（仅日期）。
+func sameDay(a, b time.Time) bool {
+	ay, am, ad := a.Date()
+	by, bm, bd := b.Date()
+	return ay == by && am == bm && ad == bd
+}
+
 // GetByDate 指定交易日行情；当日停牌/无数据返回 (nil, nil)
 func (r *DailyRepository) GetByDate(code string, tradeDate time.Time) (*model.DailyPrice, error) {
+	if r.dayLoaded && sameDay(tradeDate, r.dayDate) { // 快照命中：缺码 = 当日停牌/无数据
+		if b, ok := r.dayBars[code]; ok {
+			bar := b
+			return &bar, nil
+		}
+		return nil, nil
+	}
 	var bar model.DailyPrice
 	err := r.db.Where("code = ? AND trade_date = ?", code, tradeDate).First(&bar).Error
 	if err == gorm.ErrRecordNotFound {
@@ -136,6 +196,12 @@ func (r *DailyRepository) GetByDate(code string, tradeDate time.Time) (*model.Da
 
 // GetPrevClose 前一交易日收盘价（涨跌停判断），无数据返回 (0, false, nil)
 func (r *DailyRepository) GetPrevClose(code string, tradeDate time.Time) (float64, bool, error) {
+	if r.dayLoaded && sameDay(tradeDate, r.dayDate) { // 快照命中：缺码 = 无前一交易日行
+		if c, ok := r.prevCloses[code]; ok {
+			return c, true, nil
+		}
+		return 0, false, nil
+	}
 	var bar model.DailyPrice
 	err := r.db.Select("close").
 		Where("code = ? AND trade_date < ?", code, tradeDate).
