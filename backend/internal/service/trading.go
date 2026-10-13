@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -125,6 +126,7 @@ func (l *Ledger) SizeBuyQty(price float64, topN int, maxPositionPct float64) int
 // TradingService 交易服务：自动执行（ExecuteDay）+ 手动委托
 type TradingService struct {
 	db      *gorm.DB
+	ds      *datasource.Source // datahub 读取源（可选，nil ⇒ 全本地）；供 ExecuteDay 预取当日行情快照
 	broker  *Broker
 	initial float64 // 初始资金（净值基准）
 
@@ -139,8 +141,13 @@ type TradingService struct {
 }
 
 func NewTradingService(db *gorm.DB, account config.AccountConfig, ds ...*datasource.Source) *TradingService {
+	var dsrc *datasource.Source
+	if len(ds) > 0 {
+		dsrc = ds[0]
+	}
 	return &TradingService{
 		db:           db,
+		ds:           dsrc,
 		broker:       NewBroker(account),
 		initial:      account.InitialCash,
 		accountRepo:  repository.NewAccountRepository(db),
@@ -180,7 +187,7 @@ func (s *TradingService) ExecuteDay(accountID uint64, tradeDate time.Time) (*Exe
 		pr := repository.NewPositionRepository(tx)
 		or := repository.NewOrderRepository(tx)
 		tr := repository.NewTradeRepository(tx)
-		dr := repository.NewDailyRepository(tx)
+		dr := repository.NewDailyRepository(tx, s.ds)
 		sr := repository.NewSignalRepository(tx)
 
 		acc, err := ar.LockByID(accountID)
@@ -213,6 +220,31 @@ func (s *TradingService) ExecuteDay(accountID uint64, tradeDate time.Time) (*Exe
 		}
 		ledger.UnfreezeT1()
 
+		// 策略幂等闸：该日已有策略单则跳过策略执行，只处理手动单。
+		strategyDone, err := or.HasStrategyOrderOn(accountID, tradeDate)
+		if err != nil {
+			return err
+		}
+		// 预读当日策略上下文（active 策略参数 + SELL/BUY 信号）。信号读取纯读、无副作用，
+		// 前置到快照预取之前，以把信号 code 纳入快照全集。
+		var run strategyRun
+		if !strategyDone {
+			if run, err = s.loadStrategyRun(sr, tradeDate); err != nil {
+				return err
+			}
+		}
+
+		// 当日行情快照（恰一次 datahub 往返）：覆盖本事务内 mark-to-market / 止损 / 策略 /
+		// 手动单的全部 GetByDate / GetPrevClose 读点，脱离本地冻结副本。
+		// 闸门关 ⇒ no-op，上述读点逐字回退本地（零行为变更）。
+		codes, err := s.snapshotCodes(ledger, run, or, accountID, strategyDone)
+		if err != nil {
+			return err
+		}
+		if err := dr.PrefetchDay(context.Background(), codes, tradeDate); err != nil {
+			return err // fail-closed：预取失败即回滚，不静默用陈旧/缺失行情
+		}
+
 		// mark-to-market：停牌（无当日 bar）保留旧价
 		for code, st := range ledger.positions {
 			bar, err := dr.GetByDate(code, tradeDate)
@@ -227,13 +259,8 @@ func (s *TradingService) ExecuteDay(accountID uint64, tradeDate time.Time) (*Exe
 			}
 		}
 
-		// 策略信号（幂等：该日已有策略单则跳过，只处理手动单）
-		strategyDone, err := or.HasStrategyOrderOn(accountID, tradeDate)
-		if err != nil {
-			return err
-		}
 		if !strategyDone {
-			if err := s.execStrategy(tx, ledger, acc, res, tradeDate, dr, sr, or, tr, pr); err != nil {
+			if err := s.execStrategy(tx, ledger, acc, res, tradeDate, dr, or, tr, pr, run); err != nil {
 				return err
 			}
 		}
@@ -267,57 +294,105 @@ func defaultStrategyParams() strategyParams {
 	return strategyParams{TopN: 20, MaxPositionPct: 0.20}
 }
 
-// execStrategy 策略信号执行（SELL 先于 BUY，释放现金）
-// Iteration 4 风控：读 active 策略 params（轮动 + stop_loss / drawdown_fuse / industry_limit），
-// 执行顺序 = 止损扫描 → 熔断判断（跳过 BUY）→ SELL → BUY（行业集中检查）。
-func (s *TradingService) execStrategy(tx *gorm.DB, ledger *Ledger, acc *model.Account,
-	res *ExecResult, date time.Time, dr *repository.DailyRepository,
-	sr *repository.SignalRepository, or *repository.OrderRepository,
-	tr *repository.TradeRepository, pr *repository.PositionRepository) error {
+// strategyRun ExecuteDay 预解析 + 预读的策略上下文（active 策略名/参数 + 当日 SELL/BUY 信号）。
+// 由 loadStrategyRun 填充、execStrategy 复用——避免事务内重复读取，并让信号 code 纳入行情快照预取。
+type strategyRun struct {
+	name   string
+	params strategyParams
+	sells  []repository.SignalItem
+	buys   []repository.SignalItem
+}
 
-	// 单 active 不变量：GetStrategies() 返回 status='active' 策略（最多一条）
+// loadStrategyRun 解析 active 策略并预读当日 SELL/BUY 信号（纯读）。
+// 单 active 不变量：GetStrategies() 返回 status='active' 策略（最多一条）；
+// 无 active 时用缺省参数 + 名 multi_factor。
+func (s *TradingService) loadStrategyRun(sr *repository.SignalRepository,
+	date time.Time) (strategyRun, error) {
+	run := strategyRun{name: "multi_factor", params: defaultStrategyParams()}
 	actives, err := sr.GetStrategies()
 	if err != nil {
-		return err
+		return run, err
 	}
-	params := defaultStrategyParams()
-	strategyName := "multi_factor"
 	if len(actives) > 0 {
 		st := actives[0]
-		strategyName = st.Name
-		if err := json.Unmarshal(st.Params, &params); err == nil {
-			if params.TopN <= 0 {
-				params.TopN = 20
+		run.name = st.Name
+		if err := json.Unmarshal(st.Params, &run.params); err == nil {
+			if run.params.TopN <= 0 {
+				run.params.TopN = 20
 			}
-			if params.MaxPositionPct <= 0 {
-				params.MaxPositionPct = 0.20
+			if run.params.MaxPositionPct <= 0 {
+				run.params.MaxPositionPct = 0.20
 			}
 		}
 	}
+	if run.sells, err = sr.GetSignals(run.name, date, model.ActionSell, 500); err != nil {
+		return run, err
+	}
+	if run.buys, err = sr.GetSignals(run.name, date, model.ActionBuy, 500); err != nil {
+		return run, err
+	}
+	return run, nil
+}
+
+// snapshotCodes 汇总当日执行将经 dr.GetByDate / GetPrevClose 访问的全部 code：
+// 持仓 ∪ 当日策略信号（SELL+BUY）∪ 手动待成交单。供 PrefetchDay 一次性预取。
+// 策略幂等跳过（strategyDone）时不含信号 code（该日不执行策略单）。
+func (s *TradingService) snapshotCodes(ledger *Ledger, run strategyRun,
+	or *repository.OrderRepository, accountID uint64, strategyDone bool) ([]string, error) {
+	set := make(map[string]struct{}, len(ledger.positions))
+	for code := range ledger.positions {
+		set[code] = struct{}{}
+	}
+	if !strategyDone {
+		for _, sg := range run.sells {
+			set[sg.Code] = struct{}{}
+		}
+		for _, sg := range run.buys {
+			set[sg.Code] = struct{}{}
+		}
+	}
+	pendings, err := or.GetPending(accountID)
+	if err != nil {
+		return nil, err
+	}
+	for _, o := range pendings {
+		set[o.Code] = struct{}{}
+	}
+	codes := make([]string, 0, len(set))
+	for c := range set {
+		codes = append(codes, c)
+	}
+	return codes, nil
+}
+
+// execStrategy 策略信号执行（SELL 先于 BUY，释放现金）
+// Iteration 4 风控：读 active 策略 params（轮动 + stop_loss / drawdown_fuse / industry_limit），
+// 执行顺序 = 止损扫描 → 熔断判断（跳过 BUY）→ SELL → BUY（行业集中检查）。
+// run（策略名/参数 + 当日信号）由 ExecuteDay 预解析预读后传入，避免事务内重复读取。
+func (s *TradingService) execStrategy(tx *gorm.DB, ledger *Ledger, acc *model.Account,
+	res *ExecResult, date time.Time, dr *repository.DailyRepository,
+	or *repository.OrderRepository, tr *repository.TradeRepository,
+	pr *repository.PositionRepository, run strategyRun) error {
 
 	// 1. 止损扫描（策略信号前）：持仓亏损 >= stop_loss_pct → 强制卖出当日可卖量
-	if err := s.stopLossScan(tx, ledger, acc, res, date, params.StopLossPct, dr, or, tr, pr); err != nil {
+	if err := s.stopLossScan(tx, ledger, acc, res, date, run.params.StopLossPct, dr, or, tr, pr); err != nil {
 		return err
 	}
 
 	// 2. 回撤熔断：组合回撤 >= drawdown_fuse_pct → 当日跳过全部策略 BUY
-	fused, err := s.drawdownFused(tx, acc.ID, date, ledger.TotalAsset(), params.DrawdownFusePct)
+	fused, err := s.drawdownFused(tx, acc.ID, date, ledger.TotalAsset(), run.params.DrawdownFusePct)
 	if err != nil {
 		return err
 	}
 	res.Fused = fused
 
-	exec := func(action string) error {
+	exec := func(action string, items []repository.SignalItem) error {
 		if action == model.ActionBuy && fused {
 			return nil // 熔断日 BUY 全跳（SELL/止损照常）
 		}
-		items, err := sr.GetSignals(strategyName, date, action, 500)
-		if err != nil {
-			return err
-		}
 		for _, sg := range items {
 			rejected, err := s.fillStrategy(tx, ledger, acc, res, sg, date,
-				params.TopN, params.MaxPositionPct, params.IndustryLimitPct, dr, or, tr, pr)
+				run.params.TopN, run.params.MaxPositionPct, run.params.IndustryLimitPct, dr, or, tr, pr)
 			if err != nil {
 				return err
 			}
@@ -327,10 +402,10 @@ func (s *TradingService) execStrategy(tx *gorm.DB, ledger *Ledger, acc *model.Ac
 		}
 		return nil
 	}
-	if err := exec(model.ActionSell); err != nil {
+	if err := exec(model.ActionSell, run.sells); err != nil {
 		return err
 	}
-	return exec(model.ActionBuy)
+	return exec(model.ActionBuy, run.buys)
 }
 
 // stopLossScan 止损扫描：持仓 profit_rate <= -stop_loss_pct → 强制卖出当日可卖量。
