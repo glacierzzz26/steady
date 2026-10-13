@@ -450,14 +450,21 @@ def valuation_latest(db) -> date | None:
     return db.execute(select(func.max(DailyValuation.trade_date))).scalar()
 
 
-def dup_keys(db, table: str) -> int:
+def dup_keys(db, table: str, start=None, end=None) -> int:
     """唯一键重复**组数**（`table ∈ daily_price/daily_valuation/financial_indicator`）。
 
+    `start`/`end` 收窄**键日期**窗口（价格/估值为 trade_date，财务为 report_date）：
+    datahub 侧近窗 `GROUP BY`，避免对 9–10M 行全表扫描超读超时；本地回退同窗过滤（语义一致）。
     datahub 侧有 UNIQUE 索引 → 恒 0；本地对无唯一约束库（sqlite 测试）同样可查。
     """
     if config.datahub_read_enabled(table):
         try:
-            return len(get_client().fetch("dup_keys", {"table": table}))
+            params = {"table": table}
+            if start is not None:
+                params["start"] = _iso(start)
+            if end is not None:
+                params["end"] = _iso(end)
+            return len(get_client().fetch("dup_keys", params))
         except DatahubError:
             _read_fallback(table, f"dup_keys({table})")
     from app.models.tables import (DailyPrice, DailyValuation,
@@ -470,6 +477,11 @@ def dup_keys(db, table: str) -> int:
     cols = [getattr(model, c) for c in key_cols]
     q = (select(*cols, func.count().label("c"))
          .group_by(*cols).having(func.count() > 1))
+    date_col = getattr(model, key_cols[1])
+    if start is not None:
+        q = q.where(date_col >= start)
+    if end is not None:
+        q = q.where(date_col <= end)
     return len(db.execute(q).all())
 
 

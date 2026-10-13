@@ -356,6 +356,23 @@ Tier3 读点读到陈旧数据。本阶段逐增量迁到 datahub，使本地 `d
   与闸门开（fake client + `_BoomDB`）**，断言 `_check_coverage`（prev/prev_bar/suspect）、
   `_check_missing_days`、`_check_price_anomalies`（prev_close 涨跌幅）**逐位相同**。`pytest` 237 passed。
 
+### 增量 B 修复 — `dup_keys` 全表 GROUP BY 超时（2026-10-13）
+
+- **现象**：生产 `job_data_quality(2026-10-13)` **失败**——qe 读 datahub `dup_keys` 超时（读超时 10s）：
+  `dup_keys(daily_price)` 实测 10.1s（卡线）、`dup_keys(daily_valuation)` 55s → 503；datahub 侧连带
+  「遗弃 worker 线程」（超时后不发 join，可级联耗连接池）。
+- **根因**：`dup_keys` 对 9–10M 行表做**全表** `GROUP BY code,date HAVING count>1`，叠加 datahub 自身
+  18:10/18:15 采集并发。**非 Phase 4 引入**——`dup_keys` 自 Phase 3 起即按**表名**命中读闸门走 datahub
+  （`daily_price`/`daily_valuation` 在 `DATAHUB_READ_DATASETS` 内）；Phase 4 在同 job 内新增了 datahub
+  读并发把它压过阈值。两表本就有 `UNIQUE(code,trade_date)`，重复结构上不可能，全表扫描纯属浪费。
+- **修复**（datahub PR #21 + 本仓 PR）：`dup_keys` 加 `start`/`end`（**键日期**窗口，价格/估值 `trade_date`、
+  财务 `report_date`），`WHERE` 在 `GROUP BY` **之前**收窄；`_check_duplicates` 传近
+  `DUP_WINDOW_DAYS=30` 日窗（`[td-30d, td]`）。**近窗仍是真扫描**（非跳过），采集 bug 引入的重复几乎都
+  落在近窗内 ⇒ 语义不变、秒级返回。financial/factor 走本地（表小），无需窗口。
+- **发布顺序**：datahub（#21）镜像须**先于** qe 侧发布，否则 qe 传 `start/end` 被旧实现忽略（不报错但慢）。
+- **测试**：datahub `test_dup_keys_window_filters_by_key_date`；qe `test_dup_keys_remote_forwards_window`
+  （参数透传）+ `test_dup_keys_local_window_filters`（本地回退同窗过滤）。
+
 ## 遗留
 
 - backend（Go）读切换 `stock_basic`、`daily_valuation`、`financial_indicator`、`daily_price`（含 index）**已全部落地**；四集 **2026-10-13 生产翻读 + 停 steady 采集**（datahub 唯一采集方，见 runbook §5）。

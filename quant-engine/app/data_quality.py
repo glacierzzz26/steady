@@ -33,6 +33,7 @@ logger = logging.getLogger("data_quality")
 COVERAGE_MIN = 0.90           # 行情覆盖下限（与 market_ready 一致）
 COVERAGE_DRIFT_WARN = 0.02    # 采集范围分母漂移 >2% → warn（Issue #13 R2）
 MISSING_DAY_WINDOW = 10       # 缺失交易日：回溯最近 N 个开市日
+DUP_WINDOW_DAYS = 30          # 重复检查：只扫近 N 日（全表 GROUP BY 9–10M 行会超 datahub 读超时）
 VALUATION_WARN_LAG = 1        # 估值落后 ≥1 天 warn
 VALUATION_FAIL_LAG = 3        # 落后 ≥3 天 fail
 FINANCIAL_FRESH_DAYS = 270    # 财务：近 270 天应有公告（覆盖最近 2 个披露期）
@@ -155,10 +156,14 @@ def _dup_count(db, model, *cols) -> int:
 
 
 def _check_duplicates(db, td: date) -> dict:
+    # 只扫近窗：daily_price/valuation 经 datahub `dup_keys` 做 `GROUP BY`，全表（10M 行）
+    # 需 ~10–55s → 超读超时（10s）致 job 假失败。近窗仍是真扫描（非跳过），采集 bug 引入的
+    # 重复几乎都落在近窗内。（financial/factor 走本地，表小，无需窗口。）
+    start = td - timedelta(days=DUP_WINDOW_DAYS)
     names = ("daily_price", "daily_valuation", "financial_indicator", "factor_value")
     broken = {
-        "daily_price": data_source.dup_keys(db, "daily_price"),
-        "daily_valuation": data_source.dup_keys(db, "daily_valuation"),
+        "daily_price": data_source.dup_keys(db, "daily_price", start=start, end=td),
+        "daily_valuation": data_source.dup_keys(db, "daily_valuation", start=start, end=td),
         "financial_indicator": _dup_count(
             db, FinancialIndicator, FinancialIndicator.code,
             FinancialIndicator.report_date),
@@ -169,7 +174,7 @@ def _check_duplicates(db, td: date) -> dict:
     broken = {k: v for k, v in broken.items() if v}
     if not broken:
         return {"name": "duplicates", "level": "ok",
-                "message": "重复数据　4 张表均 0 条",
+                "message": f"重复数据　近 {DUP_WINDOW_DAYS} 日 4 张表均 0 条",
                 "metrics": {name: 0 for name in names}}
     msg = "重复数据　" + "　".join(f"{k} {v} 个键" for k, v in broken.items())
     return {"name": "duplicates", "level": "fail", "message": msg,
