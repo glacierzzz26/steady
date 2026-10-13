@@ -306,9 +306,35 @@ Tier3 读点读到陈旧数据。本阶段逐增量迁到 datahub，使本地 `d
 - **测试**：`tests/test_backtest.py` 增 `_get_benchmark_nav` 闸门开单测（boom-db + fake client，断言
   一次往返、区间缓存、**不触本地库**）；既有回测套件（闸门关）全绿；`pytest` 228 passed。
 
+### 增量 C — 后端交易批量快照（`daily_repo.go` + `service/trading.go`，2026-10-13）★ 修停摆
+
+- **datahub 侧**：无新增（复用 `daily_price` 的 `last` 有界窗）。
+- **backend 侧**：
+  - `DailyRepository` 增**当日快照** `PrefetchDay(ctx, codes, tradeDate)`：闸门开 →
+    `DailyLatest(codes, last=2, asof=tradeDate)` **恰一次**往返，按升序 `(code, trade_date)` 归约——
+    末行 `trade_date==当日` ⇒**当日 bar**（供 `GetByDate`）+ 前一行收盘（供 `GetPrevClose`）；
+    末行 `< 当日`（当日停牌/无数据）⇒ 当日无 bar、prev close = 末行；该码全无行 ⇒ 当日 `nil` /
+    prev `(0,false)`。闸门关（ds 为 nil / 未开 / codes 空）⇒ no-op。
+  - `GetByDate` / `GetPrevClose` **首检快照**（`dayLoaded && 同日` → 走内存映射，**不触 gorm**）；
+    否则**逐字回退**原本地实现（零行为变更；tx-scoped 构造不传 ds）。
+  - `ExecuteDay`：`dr := NewDailyRepository(tx, s.ds)`；在逐码循环**之前**聚集 code 集合
+    （`ledger.positions` ∪ `or.GetPending` ∪ 当日 SELL/BUY signals，须**上移** `sr.GetSignals`
+    两 action 的纯读）→ `dr.PrefetchDay(...)` 一次预取；失败即 `return err`（回滚 = fail-closed）。
+    下游逐码 `GetByDate`/`GetPrevClose` 调用点**零改动**。
+  - **修停摆**：冻结日后 `GetByDate(code, today)→nil` ⇒ mark-to-market 保留旧价、`fillStrategy`
+    全「停牌跳过」、`execManual` 全「当日无行情」拒单 ⇒ **自 10-13 起实际不再成交**；快照后恢复。
+- **等价/风险**：`ExecuteDay` 事务**不写 `daily_price`** ⇒ 快照一致（且比「读冻结本地」更正确）；
+  全程**恰一次**往返（N 码不变，避免事务内 N+1）。风险＝**快照完整性**（漏码 ⇒ 误判停牌 ⇒ 静默跳单）
+  ⇒ 预取**必在全部 code 集已知后**执行，并加完整性测试（覆盖 SELL+BUY）。
+- **测试**：`internal/repository/daily_ds_test.go` 增 `PrefetchDay`（命中快照 + **恰一次**往返 +
+  `last=2&asof` 断言）、当日停牌码、当日上市码（无前收）、缺码、fail-closed（500 即抛）、闸门关 no-op；
+  `internal/service/trading_ds_test.go` 增 `ExecuteDay` 端到端（本地 `daily_price` **不种**=模拟冻结，
+  datahub 有当日行情 ⇒ `BuyCount==1`、恰一次 `last=2&asof`、mark-to-market 取新价）。`go test ./...` 全绿。
+
 ## 遗留
 
 - backend（Go）读切换 `stock_basic`、`daily_valuation`、`financial_indicator`、`daily_price`（含 index）**已全部落地**；四集 **2026-10-13 生产翻读 + 停 steady 采集**（datahub 唯一采集方，见 runbook §5）。
-- **Tier3 读点迁移**（Phase 4，进行中）：引擎（`backtest/engine`）**已迁**（增量 A，见上）；`data_quality` prev 推导（增量 B）与 backend `GetByDate`/`GetPrevClose`（增量 C）待迁。
+- **Tier3 读点迁移**（Phase 4，进行中）：引擎（`backtest/engine`）**已迁**（增量 A，见上）；backend
+  `GetByDate`/`GetPrevClose`（交易批量快照）**已迁**（增量 C，见上）；`data_quality` prev 推导（增量 B）待迁。
 - collector 读切换（随 collector 退役）。
 - 过渡期告警断链（datahub 写自有库 `task_run` → steady `notify_scheduler` 不读，暂看 datahub-collector `/healthz`）仍待解。

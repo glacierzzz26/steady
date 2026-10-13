@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -272,6 +273,98 @@ func TestSignalRepoGetSignalChg20ViaDatahub(t *testing.T) {
 	q := (*paths)[0]
 	if !strings.Contains(q, "last=21") || !strings.Contains(q, "asof=2026-06-21") {
 		t.Fatalf("chg20 query wrong: %q", q)
+	}
+}
+
+func TestDailyRepoPrefetchDayViaDatahub(t *testing.T) {
+	ds, paths := newPriceDS(t, []map[string]any{
+		// 000001：当日 bar（d）+ 前一交易日（dPrev）→ GetByDate=d、GetPrevClose=dPrev
+		bar("000001", "2026-08-01", 10, 1.0),
+		bar("000001", "2026-08-02", 11, 1.0),
+		// 600000：当日停牌（两行均 < d）→ GetByDate=nil、GetPrevClose=最近一行（08-01）
+		bar("600000", "2026-07-30", 5, 1.0),
+		bar("600000", "2026-08-01", 6, 1.0),
+		// 300001：当日上市（仅当日一行）→ GetByDate=当日、GetPrevClose=(0,false)
+		bar("300001", "2026-08-02", 20, 1.0),
+	}, "")
+	r := NewDailyRepository(nil, ds)
+	d := mustDate(t, "2026-08-02")
+
+	if err := r.PrefetchDay(context.Background(), []string{"000001", "600000", "300001"}, d); err != nil {
+		t.Fatalf("PrefetchDay: %v", err)
+	}
+	if len(*paths) != 1 {
+		t.Fatalf("应恰一次往返，got %d calls: %v", len(*paths), *paths)
+	}
+	q := (*paths)[0]
+	if !strings.Contains(q, "last=2") || !strings.Contains(q, "asof=2026-08-02") {
+		t.Fatalf("预取查询应含 last=2 & asof: %q", q)
+	}
+
+	// 000001：当日 + 前收
+	if bar, err := r.GetByDate("000001", d); err != nil || bar == nil || bar.Close != 11 {
+		t.Fatalf("000001 GetByDate wrong: %+v err=%v", bar, err)
+	}
+	if c, ok, err := r.GetPrevClose("000001", d); err != nil || !ok || c != 10 {
+		t.Fatalf("000001 GetPrevClose wrong: c=%v ok=%v err=%v", c, ok, err)
+	}
+
+	// 600000：停牌 → 当日无 bar，前收取最近一行
+	if bar, err := r.GetByDate("600000", d); err != nil || bar != nil {
+		t.Fatalf("600000 停牌 GetByDate 应 (nil,nil): %+v err=%v", bar, err)
+	}
+	if c, ok, err := r.GetPrevClose("600000", d); err != nil || !ok || c != 6 {
+		t.Fatalf("600000 停牌 GetPrevClose wrong: c=%v ok=%v err=%v", c, ok, err)
+	}
+
+	// 300001：当日上市 → 无前收
+	if bar, err := r.GetByDate("300001", d); err != nil || bar == nil || bar.Close != 20 {
+		t.Fatalf("300001 GetByDate wrong: %+v err=%v", bar, err)
+	}
+	if _, ok, err := r.GetPrevClose("300001", d); err != nil || ok {
+		t.Fatalf("300001 无前收应 (0,false): ok=%v err=%v", ok, err)
+	}
+
+	// 快照外 code：无行 → GetByDate=nil、GetPrevClose=(0,false)
+	if bar, err := r.GetByDate("999999", d); err != nil || bar != nil {
+		t.Fatalf("快照缺码 GetByDate 应 (nil,nil): %+v err=%v", bar, err)
+	}
+	if _, ok, _ := r.GetPrevClose("999999", d); ok {
+		t.Fatal("快照缺码 GetPrevClose 应 (0,false)")
+	}
+}
+
+func TestDailyRepoPrefetchDayFailClosed(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(ts.Close)
+	cfg := config.DatahubConfig{
+		BaseURL: ts.URL, Token: "tok",
+		ReadDatasets:   []string{datasource.DsDailyPrice},
+		ConnectTimeout: "1s", ReadTimeout: "1s", Retries: 0, RetryDelay: "1ms", CacheTTL: "0s",
+	}
+	r := NewDailyRepository(nil, datasource.New(cfg))
+	err := r.PrefetchDay(context.Background(), []string{"000001"}, mustDate(t, "2026-08-02"))
+	if err == nil {
+		t.Fatal("500 应失败即抛（fail-closed）")
+	}
+}
+
+func TestDailyRepoPrefetchDayNoOpWhenGateOff(t *testing.T) {
+	// ds 未注入（闸门关形态）→ no-op，不 panic
+	if err := NewDailyRepository(nil).PrefetchDay(context.Background(),
+		[]string{"000001"}, mustDate(t, "2026-08-02")); err != nil {
+		t.Fatalf("闸门关 PrefetchDay 应 no-op: %v", err)
+	}
+	// codes 为空 → no-op（闸门开亦不发请求）
+	ds, paths := newPriceDS(t, nil, "")
+	if err := NewDailyRepository(nil, ds).PrefetchDay(context.Background(),
+		nil, mustDate(t, "2026-08-02")); err != nil {
+		t.Fatalf("空 codes PrefetchDay 应 no-op: %v", err)
+	}
+	if len(*paths) != 0 {
+		t.Fatalf("空 codes 不应发请求: %v", *paths)
 	}
 }
 

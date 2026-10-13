@@ -155,14 +155,14 @@ DATAHUB_FALLBACK_LOCAL=0        # 故障回退本地（默认 0=失败即抛）
   `data_quality.{_market_latest,_check_coverage(with_bar),_check_benchmark,_check_duplicates}`。
   **有意保留本地**：`data_quality._check_missing_days`、`_check_price_anomalies`、`_check_coverage`
   的上一交易日（prev）推导（需「上一开市日」谓词，datahub 无对应原语）、`backtest/engine` 逐 (code,date)
-  循环（Tier3）。→ **Phase 4 迁移**（见 §6）：引擎已迁（增量 A），`data_quality`（增量 B，配
-  `latest_trade_date.before` + 新集 `daily_price_days`）、backend 交易（增量 C，批量快照）随后。
+  循环（Tier3）。→ **Phase 4 迁移**（见 §6）：引擎已迁（增量 A），backend 交易（增量 C，批量快照）
+  已迁，`data_quality`（增量 B，配 `latest_trade_date.before` + 新集 `daily_price_days`）随后。
 - **backend 侧**：`internal/datasource` 增 `DailyLatest(codes,n,asof)`（`last` 有界窗）、
   `LatestFactor(code)`、`LatestTradeDate(excludeIndex)`；Tier1 切
   `DailyRepository.{GetRange,GetLatest,GetLatestTradeDate,GetLatestFactor}`；Tier2「有界窗 + Go 归约」切
   `GetIndexQuotes`(n=2)、`GetPoolMarket`(n=2)、`GetSignalChg20`(n=21,asof)；`NewDailyRepository`/
   `NewStockRepository`/`NewSignalRepository` 改变参可选，`SetupRouter`/`main.go`/`trading.go` 注入
-  （tx-scoped 不传）；`GetByDate`/`GetPrevClose` 保持本地。
+  （tx-scoped 不传）；`GetByDate`/`GetPrevClose`（Tier3）Phase 4 增量 C 改走 `PrefetchDay` 批量快照。
 - 详见阶段文档 [`../stages/datahub-phase3-读取切换.md`](../stages/datahub-phase3-读取切换.md)「daily_price 读切换」节。
 
 ---
@@ -208,9 +208,10 @@ backend 也读同一批本地表（`internal/repository/*.go`），是「停采�
 - **Tier 分级**（难易/风险）：
   - **Tier1** 简单单点/批量（`GetByCode/GetNames/GetRange/GetLatest...`）→ 直接切。
   - **Tier2** 窗口/聚合（`GetPoolMarket` 的 `LAG`、`GetPoolValuation/GetPoolFinancial/GetSignalPe/GetIndexQuotes` 的 `ROW_NUMBER`、`GetSignalChg20` 的 21 根窗）→ datahub 批量取**有界窗口** + Go 归约，或 datahub 加 `asof/as_of` 参数。
-  - **Tier3** tx 内 + trading 逐码循环（`GetPrevClose/GetByDate` 在每码循环里）→ **Phase 4 迁**：
-    事务内**一次预取当日快照**（`DailyLatest(codes, last=2, asof=date)`，末两行推出当日 close 与 prev close），
-    循环内改读内存映射，调用点零改；tx 不写 `daily_price` ⇒ 不破坏事务一致性。
+  - **Tier3** tx 内 + trading 逐码循环（`GetPrevClose/GetByDate` 在每码循环里）→ **Phase 4 迁**
+    （**✅ 已落地，增量 C**）：事务内**一次预取当日快照**（`DailyLatest(codes, last=2, asof=date)`，
+    末两行推出当日 close 与 prev close），循环内改读内存映射，调用点零改；tx 不写 `daily_price`
+    ⇒ 不破坏事务一致性。`DailyRepository.PrefetchDay` + `ExecuteDay` 单次往返接线，见阶段文档「Phase 4」。
   - 计算表（`factor_value/strategy_signal/strategy/factor_definition`）**不切**。
 
-**现状（2026-10-12）**：Increment 0（基建：config + `internal/datahub` + `internal/datasource` + 测试）已落地，**默认全关、零行为变更**。**`stock_basic` repo 接线已落地（Tier1）**：`StockRepository` 四读点（`GetList`/`GetByCode`/`Exists`/`GetNames`）加 prologue（原第五读点 `GetIndustries` 全仓无调用方，已随死代码清理删除），`internal/datasource` 增 `StockBasicList`（列表）与既有 `StockBasicByCode(s)`；`SetupRouter`/`NewTradingService` 注入 `ds`；`go test ./...` 全绿。**`daily_valuation` repo 接线已落地（Tier1/2）**：`internal/datasource` 增 `ValuationLast(codes,n,asof)`（`last` 有界窗）；`DailyRepository.GetLatestValuation`、`SignalRepository.GetSignalPe`（`asof`+`last=1`）、`StockRepository.GetPoolValuation`（`last=1`+null 过滤）加 prologue；`NewDailyRepository`/`NewSignalRepository` 改变参可选，`SetupRouter`/`main.go`/`NewTradingService` 注入（tx-scoped 不传）。**`financial_indicator` repo 接线已落地（Tier1/2）**：`internal/datasource` 增 `FinancialLast(codes,asOf,n)`；`FinancialRepository.GetByCode`（`report_date DESC` 排序/limit）、`GetLatestByAnnounce`（`last=1`）、`StockRepository.GetPoolFinancial`（`last=1`+roe 空过滤）加 prologue；`NewFinancialRepository` 改变参可选，`SetupRouter` 注入。**`daily_price` repo 接线已落地（Tier1/2，含 index）**：`internal/datasource` 增 `DailyLatest(codes,n,asof)`（`last` 有界窗）/`LatestFactor`/`LatestTradeDate`；`DailyRepository.{GetRange,GetLatest,GetLatestTradeDate,GetLatestFactor}`（Tier1）、`GetIndexQuotes`(n=2)、`StockRepository.GetPoolMarket`(n=2)、`SignalRepository.GetSignalChg20`(n=21,asof)（Tier2「有界窗+Go 归约」）加 prologue；`NewDailyRepository`/`NewStockRepository`/`NewSignalRepository` 改变参可选，`SetupRouter`/`main.go`/`NewTradingService` 注入（tx-scoped 不传）；`GetByDate`/`GetPrevClose`（Tier3）保持本地。**qe + backend 四集（stock_basic/daily_valuation/financial_indicator/daily_price）读切换代码已全部落地，默认全关、零行为变更**；**四集已生产翻读 + 停 steady 采集（✅ 2026-10-13，datahub 成唯一采集方）**，执行见 runbook [`../stages/datahub-phase3-生产切换runbook.md`](../stages/datahub-phase3-生产切换runbook.md) §5。**Phase 4（Tier3 读点迁移）进行中**：引擎增量已落地（增量 A），backend 交易快照（增量 C）、`data_quality`（增量 B）随后；见 [`../stages/datahub-phase3-读取切换.md`](../stages/datahub-phase3-读取切换.md)「Phase 4」节。
+**现状（2026-10-12）**：Increment 0（基建：config + `internal/datahub` + `internal/datasource` + 测试）已落地，**默认全关、零行为变更**。**`stock_basic` repo 接线已落地（Tier1）**：`StockRepository` 四读点（`GetList`/`GetByCode`/`Exists`/`GetNames`）加 prologue（原第五读点 `GetIndustries` 全仓无调用方，已随死代码清理删除），`internal/datasource` 增 `StockBasicList`（列表）与既有 `StockBasicByCode(s)`；`SetupRouter`/`NewTradingService` 注入 `ds`；`go test ./...` 全绿。**`daily_valuation` repo 接线已落地（Tier1/2）**：`internal/datasource` 增 `ValuationLast(codes,n,asof)`（`last` 有界窗）；`DailyRepository.GetLatestValuation`、`SignalRepository.GetSignalPe`（`asof`+`last=1`）、`StockRepository.GetPoolValuation`（`last=1`+null 过滤）加 prologue；`NewDailyRepository`/`NewSignalRepository` 改变参可选，`SetupRouter`/`main.go`/`NewTradingService` 注入（tx-scoped 不传）。**`financial_indicator` repo 接线已落地（Tier1/2）**：`internal/datasource` 增 `FinancialLast(codes,asOf,n)`；`FinancialRepository.GetByCode`（`report_date DESC` 排序/limit）、`GetLatestByAnnounce`（`last=1`）、`StockRepository.GetPoolFinancial`（`last=1`+roe 空过滤）加 prologue；`NewFinancialRepository` 改变参可选，`SetupRouter` 注入。**`daily_price` repo 接线已落地（Tier1/2，含 index）**：`internal/datasource` 增 `DailyLatest(codes,n,asof)`（`last` 有界窗）/`LatestFactor`/`LatestTradeDate`；`DailyRepository.{GetRange,GetLatest,GetLatestTradeDate,GetLatestFactor}`（Tier1）、`GetIndexQuotes`(n=2)、`StockRepository.GetPoolMarket`(n=2)、`SignalRepository.GetSignalChg20`(n=21,asof)（Tier2「有界窗+Go 归约」）加 prologue；`NewDailyRepository`/`NewStockRepository`/`NewSignalRepository` 改变参可选，`SetupRouter`/`main.go`/`NewTradingService` 注入（tx-scoped 不传）；`GetByDate`/`GetPrevClose`（Tier3）保持本地。**qe + backend 四集（stock_basic/daily_valuation/financial_indicator/daily_price）读切换代码已全部落地，默认全关、零行为变更**；**四集已生产翻读 + 停 steady 采集（✅ 2026-10-13，datahub 成唯一采集方）**，执行见 runbook [`../stages/datahub-phase3-生产切换runbook.md`](../stages/datahub-phase3-生产切换runbook.md) §5。**Phase 4（Tier3 读点迁移）进行中**：引擎增量已落地（增量 A），backend 交易批量快照（增量 C，修冻结日后交易停摆）已落地（`DailyRepository.PrefetchDay` + `ExecuteDay` 单次往返），`data_quality`（增量 B）随后；见 [`../stages/datahub-phase3-读取切换.md`](../stages/datahub-phase3-读取切换.md)「Phase 4」节。
