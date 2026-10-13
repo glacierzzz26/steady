@@ -27,6 +27,7 @@ _PRICE = "daily_price"
 _VALUATION = "daily_valuation"
 _FINANCIAL = "financial_indicator"
 _LATEST = "latest_trade_date"
+_DAILY_PRICE_DAYS = "daily_price_days"
 _MARKET_READY = "market_ready"
 # 近端查询（recent_open_days）datahub 路径的起始放宽窗口（日历日）；不足则翻倍
 _RECENT_WINDOW_DAYS = 45
@@ -248,26 +249,58 @@ def a_share_code_dates(db, end: date) -> list:
 #
 # datahub 侧 params：codes/start/end/date/asof/last/fields/adj_not_null。**远端返回「按 fields
 # 顺序的元组」**（trade_date 转 date），调用方 `for code, td, close, adj in rows` 几乎不改。
-# 派生小数据集 `latest_trade_date`（MAX）/ `market_ready`（池覆盖率）同按 daily_price 闸门分派。
+# 派生小数据集 `latest_trade_date`（MAX，+ `before` 取「低于某日最近交易日」）/
+# `daily_price_days`（区间有行情交易日 DISTINCT）/ `market_ready`（池覆盖率）同按
+# daily_price 闸门分派（供 data_quality prev 推导 / 缺日判定，Phase 4）。
 
 _PRICE_FIELDS = ("code", "trade_date", "close", "adj_factor")
 
 
-def latest_trade_date(db) -> date | None:
-    """最近一个已有行情数据的交易日（跳过指数伪股票 sh*）。
+def latest_trade_date(db, before=None) -> date | None:
+    """最近一个已有行情数据的交易日（跳过指数伪股票 sh*）；`before` 给定时取
+    `trade_date < before` 的最近一日（严格小于；供 data_quality prev 推导）。
 
-    对齐本地 `max(trade_date) where code NOT LIKE 'sh%'`；datahub `latest_trade_date`
-    `exclude_index=true` 同口径。无行情 → None。
+    对齐本地 `max(trade_date) where code NOT LIKE 'sh%' [and trade_date < before]`；
+    datahub `latest_trade_date` `exclude_index=true` + `before` 同口径。无行情 → None。
     """
     if config.datahub_read_enabled(_PRICE):
         try:
-            rows = get_client().fetch(_LATEST, {"table": _PRICE, "exclude_index": "true"})
+            params = {"table": _PRICE, "exclude_index": "true"}
+            if before is not None:
+                params["before"] = _iso(before)
+            rows = get_client().fetch(_LATEST, params)
             return _to_date(rows[0]["trade_date"]) if rows else None
         except DatahubError:
             _read_fallback(_PRICE, "latest_trade_date")
-    return db.execute(
-        select(func.max(DailyPrice.trade_date)).where(DailyPrice.code.not_like("sh%"))
-    ).scalar()
+    q = select(func.max(DailyPrice.trade_date)).where(DailyPrice.code.not_like("sh%"))
+    if before is not None:
+        q = q.where(DailyPrice.trade_date < before)
+    return db.execute(q).scalar()
+
+
+def price_days(db, start, end, exclude_index=True) -> list[date]:
+    """区间 `[start, end]` 内「有行情的交易日」去重升序列表（默认排指数 sh*）。
+
+    对齐本地 `select(distinct trade_date) where start<=trade_date<=end
+    [and code NOT LIKE 'sh%'] order by trade_date`。供 data_quality._check_missing_days。
+    """
+    if config.datahub_read_enabled(_PRICE):
+        try:
+            params = {"start": _iso(start), "end": _iso(end),
+                      "exclude_index": "true" if exclude_index else "false"}
+            rows = get_client().fetch(_DAILY_PRICE_DAYS, params)
+            return [_to_date(r["trade_date"]) for r in rows]
+        except DatahubError:
+            _read_fallback(_PRICE, "price_days")
+    q = select(DailyPrice.trade_date).distinct()
+    if start is not None:
+        q = q.where(DailyPrice.trade_date >= start)
+    if end is not None:
+        q = q.where(DailyPrice.trade_date <= end)
+    if exclude_index:
+        q = q.where(DailyPrice.code.not_like("sh%"))
+    q = q.order_by(DailyPrice.trade_date)
+    return list(db.execute(q).scalars().all())
 
 
 def price_rows(db, codes, start=None, end=None, fields=_PRICE_FIELDS) -> list:

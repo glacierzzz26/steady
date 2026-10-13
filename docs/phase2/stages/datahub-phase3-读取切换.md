@@ -331,10 +331,36 @@ Tier3 读点读到陈旧数据。本阶段逐增量迁到 datahub，使本地 `d
   `internal/service/trading_ds_test.go` 增 `ExecuteDay` 端到端（本地 `daily_price` **不种**=模拟冻结，
   datahub 有当日行情 ⇒ `BuyCount==1`、恰一次 `last=2&asof`、mark-to-market 取新价）。`go test ./...` 全绿。
 
+### 增量 B — data_quality prev 推导 / 缺日（`data_source.py` + `data_quality.py`，2026-10-13）
+
+- **datahub 侧**（另一仓 datahub PR #17）：`latest_trade_date` 加 `before` 参数（trade_date **严格 <**）；
+  新增小数据集 `daily_price_days`（区间内有行情的交易日 **DISTINCT 升序**，`exclude_index` 默认 true）。
+  **翻闸前置**：qe 侧闸门开时须 datahub 镜像**已发布**含此两原语（跨仓发布顺序：先合 datahub PR + 发布镜像）。
+- **qe 侧**：
+  - `data_source.py` 增 `latest_trade_date(db, before=None)`（闸门开透传 `before`；闸门关本地
+    `max(trade_date) where code NOT LIKE 'sh%' [and trade_date < before]`）与
+    `price_days(db, start, end, exclude_index=True)`（闸门开走新集 `daily_price_days`，关走本地 `distinct`）。
+  - `data_quality._check_coverage`：`prev = latest_trade_date(db, before=td)`；
+    `prev_bar = {c for (c,) in price_day(db, pool, prev, ("code",))}`（suspect 逻辑不变）。
+  - `data_quality._check_price_anomalies`：`prev = latest_trade_date(db, before=latest)`；
+    `cur = price_day(db, [], latest, _ANOMALY_FIELDS)`（空 codes = 全市场，**含指数**，对齐原
+    `select(DailyPrice)` 无过滤口径）；`prev_close = {code: close for code, close in
+    price_day(db, [], prev, ("code", "close")) if close}`；循环体 ORM 属性访问改**元组下标**。
+  - `data_quality._check_missing_days`：`present = set(price_days(db, min(days), max(days)))`；
+    `missing = [d for d in days if d not in present]`。移除 `data_quality` 的 `DailyPrice` import。
+- **等价**：`max(trade_date) where code NOT LIKE 'sh%' and <td` ≡
+  `latest_trade_date{before=td, exclude_index=true}`；`prev_bar`/`cur`/`prev_close`/缺日集合逐字对齐。
+  `remediation.py` 复用 `_check_coverage` 一并修复，自身不改。
+- **测试**：`tests/test_data_source.py` 增 `latest_trade_date(before)` 严格 `<`（本地 + 远端 + 参数断言）、
+  `price_days`（本地/远端/fail-closed）；新增 `tests/test_data_quality_ds.py`——**同种子过闸门关（sqlite）
+  与闸门开（fake client + `_BoomDB`）**，断言 `_check_coverage`（prev/prev_bar/suspect）、
+  `_check_missing_days`、`_check_price_anomalies`（prev_close 涨跌幅）**逐位相同**。`pytest` 237 passed。
+
 ## 遗留
 
 - backend（Go）读切换 `stock_basic`、`daily_valuation`、`financial_indicator`、`daily_price`（含 index）**已全部落地**；四集 **2026-10-13 生产翻读 + 停 steady 采集**（datahub 唯一采集方，见 runbook §5）。
-- **Tier3 读点迁移**（Phase 4，进行中）：引擎（`backtest/engine`）**已迁**（增量 A，见上）；backend
-  `GetByDate`/`GetPrevClose`（交易批量快照）**已迁**（增量 C，见上）；`data_quality` prev 推导（增量 B）待迁。
+- **Tier3 读点迁移**（Phase 4）：引擎（`backtest/engine`）**已迁**（增量 A，见上）；backend
+  `GetByDate`/`GetPrevClose`（交易批量快照）**已迁**（增量 C，见上）；`data_quality` prev 推导/缺日
+  **已迁**（增量 B，见上，配 datahub `latest_trade_date.before` + 新集 `daily_price_days`）。**Tier3 全部迁完**。
 - collector 读切换（随 collector 退役）。
 - 过渡期告警断链（datahub 写自有库 `task_run` → steady `notify_scheduler` 不读，暂看 datahub-collector `/healthz`）仍待解。

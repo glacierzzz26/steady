@@ -110,7 +110,8 @@
 4. **Tier2 等价性**：`GetPoolMarket`/`GetIndexQuotes`(`last=2`)、`GetSignalChg20`(`last=21`) 的 Go 归约须与原 SQL 逐行等价——翻闸后抽样核对。
 5. **Tier3 遗留**：backend `GetByDate`/`GetPrevClose`、qe `backtest/engine` 逐 (code,date) 读、
    `data_quality.{missing_days,price_anomalies,coverage prev}` 仍走本地——仅「停本地表」的 Phase 4 才需重构，本轮不动。
-   **→ Phase 4 迁移进行中**（引擎增量 A、backend 交易批量快照增量 C 已落地，`data_quality` 增量 B 随后），见
+   **→ Phase 4 迁移已全部迁出**（引擎增量 A、backend 交易批量快照增量 C、`data_quality` prev 推导/缺日
+   增量 B 均已落地，B 配 datahub `latest_trade_date.before` + 新集 `daily_price_days`），见
    [`datahub-phase3-读取切换.md`](datahub-phase3-读取切换.md)「Phase 4」节。
    **⚠️ 停 `daily_price` 采集后副作用**：本地 `daily_price` 冻结在停采日（2026-10-12），
    而上述 Tier3 读点仍读本地 ⇒ **回测区间跨过停采日 / 跑「至今」回测时，基准线（`_get_benchmark_nav`
@@ -147,5 +148,5 @@ steady `steady-20261012-654f6e2`（四集读切换代码均已发布）。
 **回退**：`cp <备份> .env` → 对应 `docker compose … up -d --force-recreate <服务>`（datahub-collector /
 quant-engine+backend / collector）。
 
-**遗留**：Tier3 陈旧（见 §4.5，**Phase 4 迁移进行中：引擎（增量 A）+ backend 交易批量快照（增量 C）已迁**，见 `datahub-phase3-读取切换.md`「Phase 4」）；过渡期告警断链（见 §4.6）；datahub 当日 10-13 增量首次实跑需晚间核对。
+**遗留**：Tier3 陈旧（见 §4.5，**Phase 4 迁移已全部迁出：引擎（增量 A）+ backend 交易批量快照（增量 C）+ `data_quality` prev 推导/缺日（增量 B）**，见 `datahub-phase3-读取切换.md`「Phase 4」）；过渡期告警断链（见 §4.6）；datahub 当日 10-13 增量首次实跑需晚间核对。
 
