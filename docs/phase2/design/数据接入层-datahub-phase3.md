@@ -107,7 +107,8 @@ DATAHUB_FALLBACK_LOCAL=0        # 故障回退本地（默认 0=失败即抛）
   `asof`(≤)/`last`(每码最近 N 行，服务端 `ROW_NUMBER`)/`fields`）。见 datahub 仓 PR。
 - **qe 侧**：`data_source.py` 增 `valuation_rows`（闸门开走 `daily_valuation`，按 `fields` 投影为
   有序元组）、`valuation_latest`（`latest_trade_date{table:daily_valuation,exclude_index:false}`）、
-  `dup_keys(db, table)`；切 `factor_service.load_factor_inputs`、`factor_trial.load_range_inputs`、
+  `dup_keys(db, table, start=None, end=None)`（`start`/`end` = 键日期窗口，Phase 4 修复：全表
+  `GROUP BY` 超时）；切 `factor_service.load_factor_inputs`、`factor_trial.load_range_inputs`、
   `data_quality._check_valuation` + `_check_duplicates`、`backtest/replay.preload` 的估值读点。
 - **backend 侧**：`internal/datasource` 增 `ValuationLast(codes,n,asof)`（`last` 有界窗）；
   `DailyRepository.GetLatestValuation` / `SignalRepository.GetSignalPe` / `StockRepository.GetPoolValuation`

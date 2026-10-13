@@ -409,6 +409,30 @@ def test_dup_keys_remote(gate_on_val, monkeypatch):
     assert data_source.dup_keys(_BoomDB(), "daily_valuation") == 0
 
 
+def test_dup_keys_remote_forwards_window(gate_on_val, monkeypatch):
+    # 近窗 start/end 透传到 datahub（避免全表 GROUP BY 超时）
+    fake = FakeValuationClient()
+    monkeypatch.setattr("app.data_source.get_client", lambda: fake)
+    data_source.dup_keys(_BoomDB(), "daily_valuation",
+                         start=date(2026, 9, 1), end=date(2026, 9, 30))
+    assert fake.calls == [("dup_keys", {"table": "daily_valuation",
+                                        "start": "2026-09-01", "end": "2026-09-30"})]
+
+
+def test_dup_keys_local_window_filters(db):
+    # 本地回退同窗过滤：窗口内外的重复各一，全窗计 2、近窗计 1
+    db.add_all([
+        DailyValuation(id=98, code="000001", trade_date=date(2026, 8, 3), pe_ttm=1.0, pb=1.0),
+        DailyValuation(id=99, code="000001", trade_date=date(2026, 8, 3), pe_ttm=1.0, pb=1.0),
+        DailyValuation(id=100, code="000002", trade_date=date(2026, 9, 3), pe_ttm=1.0, pb=1.0),
+        DailyValuation(id=101, code="000002", trade_date=date(2026, 9, 3), pe_ttm=1.0, pb=1.0),
+    ])
+    db.commit()
+    assert data_source.dup_keys(db, "daily_valuation") == 2
+    assert data_source.dup_keys(db, "daily_valuation",
+                                start=date(2026, 9, 1), end=date(2026, 9, 30)) == 1
+
+
 def test_valuation_fail_loud_without_fallback(gate_on_val, monkeypatch):
     monkeypatch.setattr(
         "app.data_source.get_client",
