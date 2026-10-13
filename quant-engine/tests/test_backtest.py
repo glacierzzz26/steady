@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app import data_source
 from app.backtest.engine import BacktestEngine
 from app.backtest.replay import ReplayStrategy
 from app.models.tables import (Base, DailyPrice, DailyValuation,
@@ -101,3 +102,46 @@ def test_replay_signal_actions_valid(db):
         for sig in signals:
             assert sig.action in ("BUY", "SELL", "HOLD")
             assert sig.score > 0
+
+
+class _BoomDB:
+    """闸门开时不应查本地库：execute 即抛。"""
+    def execute(self, *a, **k):
+        raise AssertionError("闸门开时引擎不应查本地库")
+
+
+class _BenchFakeClient:
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = []
+
+    def fetch(self, dataset_id, params=None):
+        self.calls.append((dataset_id, dict(params or {})))
+        return list(self.rows)
+
+
+class _Stub:
+    """无 price_at/open_at/prev_close_at 的占位策略（仅取属性）。"""
+    top_n = 2
+    max_position_pct = 0.2
+
+
+def test_engine_benchmark_reads_datahub_not_local(monkeypatch):
+    """Phase 4：_get_benchmark_nav 闸门开走 datahub（不触库），一次往返 + 缓存"""
+    monkeypatch.setenv("DATAHUB_READ_DATASETS", "daily_price")
+    monkeypatch.setenv("DATAHUB_BASE_URL", "http://dh:8100")
+    monkeypatch.setenv("DATAHUB_TOKEN", "tok")
+    fake = _BenchFakeClient([
+        {"code": "sh000300", "trade_date": "2026-08-10", "close": 3000.0},
+        {"code": "sh000300", "trade_date": "2026-08-11", "close": 3010.0},
+    ])
+    monkeypatch.setattr(data_source, "get_client", lambda: fake)
+
+    engine = BacktestEngine(_Stub(), "2026-08-10", "2026-08-17", db=_BoomDB())
+    assert engine._get_benchmark_nav("2026-08-11") == 3010.0
+    # 区间内全量缓存：第二次查不再发请求
+    assert engine._get_benchmark_nav("2026-08-10") == 3000.0
+    assert engine._get_benchmark_nav("2026-12-31") is None
+    assert len(fake.calls) == 1
+    assert fake.calls[0][0] == "daily_price"
+    assert fake.calls[0][1]["codes"] == "sh000300"
