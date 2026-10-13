@@ -551,7 +551,21 @@ class FakePriceClient:
             raise self.fail
         p = params or {}
         if dataset_id == "latest_trade_date":
+            b = date.fromisoformat(p["before"]) if p.get("before") else None
+            if b is not None:  # 从 rows 派生「非指数、< before 的最大日」
+                ds = [r["trade_date"] for r in self.rows
+                      if not r["code"].startswith("sh") and r["trade_date"] < b]
+                return [{"trade_date": max(ds).isoformat()}] if ds else []
             return [{"trade_date": self.latest.isoformat()}] if self.latest else []
+        if dataset_id == "daily_price_days":
+            start = date.fromisoformat(p["start"]) if p.get("start") else None
+            end = date.fromisoformat(p["end"]) if p.get("end") else None
+            excl = str(p.get("exclude_index", "true")).lower() in ("1", "true", "yes", "on")
+            ds = sorted({r["trade_date"] for r in self.rows
+                         if (not excl or not r["code"].startswith("sh"))
+                         and (start is None or r["trade_date"] >= start)
+                         and (end is None or r["trade_date"] <= end)})
+            return [{"trade_date": d.isoformat()} for d in ds]
         if dataset_id == "market_ready":
             return [{"ready": self.ready, "covered": 3, "total": 3}]
         if dataset_id == "dup_keys":
@@ -659,6 +673,47 @@ def test_latest_trade_date_remote(gate_on_price, monkeypatch):
 def test_latest_trade_date_remote_empty(gate_on_price, monkeypatch):
     monkeypatch.setattr("app.data_source.get_client", lambda: FakePriceClient())
     assert data_source.latest_trade_date(_BoomDB()) is None
+
+
+def test_latest_trade_date_before_local_strict(db):
+    # 600000/600519 仅 08-03，000001 有 08-03/08-04；before=08-04（严格 <）→ 08-03
+    assert data_source.latest_trade_date(db, before=date(2026, 8, 4)) == date(2026, 8, 3)
+    # before=08-03 → 更早无数据 → None
+    assert data_source.latest_trade_date(db, before=date(2026, 8, 3)) is None
+
+
+def test_latest_trade_date_before_remote(gate_on_price, monkeypatch):
+    fake = FakePriceClient()
+    monkeypatch.setattr("app.data_source.get_client", lambda: fake)
+    assert data_source.latest_trade_date(_BoomDB(), before=date(2026, 8, 4)) == \
+        date(2026, 8, 3)
+    assert fake.calls[0][0] == "latest_trade_date"
+    assert fake.calls[0][1] == {"table": "daily_price", "exclude_index": "true",
+                                "before": "2026-08-04"}
+
+
+def test_price_days_local_distinct_asc(db):
+    # 区间 [08-03, 08-04] 内有行情的交易日（默认排指数）→ 08-03, 08-04
+    assert data_source.price_days(db, date(2026, 8, 3), date(2026, 8, 4)) == [
+        date(2026, 8, 3), date(2026, 8, 4)]
+
+
+def test_price_days_remote(gate_on_price, monkeypatch):
+    fake = FakePriceClient()
+    monkeypatch.setattr("app.data_source.get_client", lambda: fake)
+    assert data_source.price_days(_BoomDB(), date(2026, 8, 3), date(2026, 8, 4)) == [
+        date(2026, 8, 3), date(2026, 8, 4)]
+    assert fake.calls[0][0] == "daily_price_days"
+    assert fake.calls[0][1] == {"start": "2026-08-03", "end": "2026-08-04",
+                                "exclude_index": "true"}
+
+
+def test_price_days_fail_loud_without_fallback(gate_on_price, monkeypatch):
+    monkeypatch.setattr(
+        "app.data_source.get_client",
+        lambda: FakePriceClient(fail=DatahubError("down")))
+    with pytest.raises(DatahubError):
+        data_source.price_days(_BoomDB(), date(2026, 8, 3), date(2026, 8, 4))
 
 
 def test_market_ready_local(db):
