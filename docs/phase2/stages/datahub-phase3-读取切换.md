@@ -285,9 +285,30 @@ params `codes` 逗号 IN / `start`/`end` 区间 / `date` 精确（覆盖 start/e
   「datahub 500 ⇒ 失败即抛」。**`go test ./...` 全绿**。
 - 放行门（datahub 首灌 `daily_price`（含指数行）+ 逐位对账零偏差）与停采 **待生产执行**。
 
+## Phase 4 · Tier3 读点迁移（2026-10-13 起）
+
+Tier3 读点在 Phase 3 **有意留本地**；`daily_price` 停采后本地副本**冻结在 2026-10-12**，
+Tier3 读点读到陈旧数据。本阶段逐增量迁到 datahub，使本地 `daily_price` 可完全退役。
+范围：引擎 **A** + 后端交易 **C** + `data_quality` **B**（含两处 datahub 新原语）；分 PR 串行；
+闸门默认关 = 零行为变更、fail-closed。
+
+### 增量 A — 引擎（`backtest/engine.py`，2026-10-13）
+
+- **datahub 侧**：无新增（复用 `daily_price`）。
+- **qe 侧**：
+  - `_get_benchmark_nav` → `data_source.price_rows(db, ["sh000300"], 区间起, 区间止, ("trade_date","close"))`
+    （原读本地**全表**；现按回测区间收窄并走 datahub，`Decimal→float` 已归一 ⇒ 字典逐位一致）。
+    **这是引擎中唯一恒活（无策略短路）的本地读**：跨冻结日回测曾致 benchmark/excess_return 静默截断。
+  - `_get_price` / `_get_fill_price`(t1_open) / `_get_prev_close` → `price_day` / `price_rows`（闸门关=逐字本地）。
+    生产回测一律经 `ReplayStrategy`（实现 `price_at`/`open_at`/`prev_close_at`），此三方法兜底为**死路径**；
+    迁移使「引擎读本地冻结 `daily_price`」彻底清零。
+  - 移除 `DailyPrice` / `select` import。
+- **测试**：`tests/test_backtest.py` 增 `_get_benchmark_nav` 闸门开单测（boom-db + fake client，断言
+  一次往返、区间缓存、**不触本地库**）；既有回测套件（闸门关）全绿；`pytest` 228 passed。
+
 ## 遗留
 
 - backend（Go）读切换 `stock_basic`、`daily_valuation`、`financial_indicator`、`daily_price`（含 index）**已全部落地**；四集 **2026-10-13 生产翻读 + 停 steady 采集**（datahub 唯一采集方，见 runbook §5）。
-- **Tier3 读点本地陈旧**：停 `daily_price` 采集后，qe `backtest/engine` 逐 (code,date) 读、`data_quality` prev 推导仍读本地冻结副本（2026-10-12）→ 跨停采日的回测/质量检查受限，待 Phase 4 重构。
+- **Tier3 读点迁移**（Phase 4，进行中）：引擎（`backtest/engine`）**已迁**（增量 A，见上）；`data_quality` prev 推导（增量 B）与 backend `GetByDate`/`GetPrevClose`（增量 C）待迁。
 - collector 读切换（随 collector 退役）。
 - 过渡期告警断链（datahub 写自有库 `task_run` → steady `notify_scheduler` 不读，暂看 datahub-collector `/healthz`）仍待解。
